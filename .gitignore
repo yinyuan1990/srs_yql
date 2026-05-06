@@ -1,0 +1,55 @@
+# macOS
+.DS_Store
+._*
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcuserdatad/
+*.moved-aside
+*.xcscmblueprint
+*.xccheckout
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# CocoaPods (如果以后用)
+Pods/
+
+# Carthage (如果以后用)
+Carthage/Build/
+
+# Fastlane (如果以后用)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# 日志 / 崩溃报告
+*.log
+*.ips
+
+# 备份压缩包
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# Claude Code 工作区
+.claude/
+
+# 项目里非 iOS 相关
+videodemo/

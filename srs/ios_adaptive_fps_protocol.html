@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>iOS 自适应帧率对接文档 - 信令协议 v1.0</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; padding: 20px; background: #f5f5f5; line-height: 1.6; }
+        h1 { color: #333; border-bottom: 3px solid #007AFF; padding-bottom: 10px; }
+        h2 { color: #007AFF; margin-top: 35px; border-left: 4px solid #007AFF; padding-left: 12px; }
+        h3 { color: #555; margin-top: 20px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px 15px; text-align: left; }
+        th { background: #007AFF; color: white; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        tr:hover { background: #e8f4ff; }
+        .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .success { background: #d4edda; border-left: 4px solid #28a745; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .warning { background: #f8d7da; border-left: 4px solid #dc3545; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .info { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .code { background: #263238; color: #aed581; padding: 15px; border-radius: 6px; font-family: "Consolas", "Monaco", monospace; margin: 12px 0; overflow-x: auto; font-size: 13px; }
+        .code pre { margin: 0; white-space: pre-wrap; }
+        .json { background: #1e1e1e; color: #9cdcfe; padding: 15px; border-radius: 6px; font-family: "Consolas", monospace; margin: 12px 0; }
+        .json .key { color: #9cdcfe; }
+        .json .string { color: #ce9178; }
+        .json .number { color: #b5cea8; }
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; margin-right: 5px; }
+        .tag-required { background: #dc3545; color: white; }
+        .tag-optional { background: #6c757d; color: white; }
+        .tag-pc { background: #007AFF; color: white; }
+        .tag-ios { background: #34C759; color: white; }
+        .section { margin-bottom: 40px; }
+        .flow-box { background: #fff; border: 2px solid #007AFF; border-radius: 8px; padding: 20px; margin: 15px 0; }
+        .flow-step { display: flex; align-items: center; margin: 10px 0; }
+        .flow-num { background: #007AFF; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; margin-right: 12px; flex-shrink: 0; }
+        .flow-arrow { color: #007AFF; font-size: 20px; margin: 5px 0 5px 40px; }
+        ul { padding-left: 20px; }
+        li { margin: 8px 0; }
+    </style>
+</head>
+<body>
+
+<h1>📱 iOS 自适应帧率对接文档</h1>
+<p><strong>版本：</strong>v1.0 &nbsp;&nbsp; <strong>更新日期：</strong>2025-01-31</p>
+
+<!-- ==================== 概述 ==================== -->
+<div class="section">
+    <h2>1. 概述</h2>
+    <p>本文档定义 PC 端与 iOS 端之间的<strong>自适应帧率控制信令协议</strong>，用于在弱网环境下实现平滑降帧/升帧。</p>
+    
+    <div class="info">
+        <strong>核心原则：</strong>
+        <ul>
+            <li>PC 端负责<strong>网络状态检测与决策</strong></li>
+            <li>iOS 端负责<strong>执行帧率调整</strong></li>
+            <li>信令必须<strong>低延迟、高优先级</strong>传输</li>
+        </ul>
+    </div>
+
+    <h3>1.1 帧率四档定义</h3>
+    <table>
+        <tr>
+            <th>档位</th>
+            <th>帧率 (fps)</th>
+            <th>建议码率</th>
+            <th>适用场景</th>
+        </tr>
+        <tr>
+            <td><strong>档位1（最高）</strong></td>
+            <td>60 fps</td>
+            <td>8-12 Mbps</td>
+            <td>网络优秀，满帧体验</td>
+        </tr>
+        <tr>
+            <td><strong>档位2</strong></td>
+            <td>45 fps</td>
+            <td>6-8 Mbps</td>
+            <td>网络良好，轻微降级</td>
+        </tr>
+        <tr>
+            <td><strong>档位3</strong></td>
+            <td>30 fps</td>
+            <td>4-6 Mbps</td>
+            <td>网络一般，中等降级</td>
+        </tr>
+        <tr>
+            <td><strong>档位4（最低）</strong></td>
+            <td>15 fps</td>
+            <td>2-3 Mbps</td>
+            <td>极端弱网，保流优先</td>
+        </tr>
+    </table>
+    
+    <div class="note">
+        <strong>说明：</strong>分辨率保持不变，仅通过帧率四档平滑调节；码率随帧率同步微调。
+    </div>
+</div>
+
+<!-- ==================== 信令通道 ==================== -->
+<div class="section">
+    <h2>2. 信令通道</h2>
+    
+    <h3>2.1 推荐方式（优先级从高到低）</h3>
+    <table>
+        <tr>
+            <th>方式</th>
+            <th>延迟</th>
+            <th>可靠性</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td><strong>WebRTC DataChannel（推荐）</strong></td>
+            <td>~10-50ms</td>
+            <td>可配置</td>
+            <td>复用现有连接，延迟最低</td>
+        </tr>
+        <tr>
+            <td>WebSocket 信令</td>
+            <td>~50-150ms</td>
+            <td>可靠</td>
+            <td>通用方案，兼容性好</td>
+        </tr>
+        <tr>
+            <td>自定义 UDP</td>
+            <td>~5-30ms</td>
+            <td>不可靠</td>
+            <td>超低延迟，需自行保障</td>
+        </tr>
+    </table>
+
+    <h3>2.2 DataChannel 配置建议</h3>
+    <div class="code">
+<pre>
+// PC 端创建 DataChannel（高优先级、不可靠模式）
+const adaptiveChannel = peerConnection.createDataChannel("adaptive-fps", {
+    ordered: false,           // 不需要有序
+    maxRetransmits: 0,        // 不重传（追求低延迟）
+    priority: "high"          // 高优先级
+});
+
+// 或者可靠模式（推荐用于帧率控制）
+const adaptiveChannel = peerConnection.createDataChannel("adaptive-fps", {
+    ordered: true,
+    maxRetransmits: 3,        // 最多重传3次
+    priority: "high"
+});
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 信令协议 ==================== -->
+<div class="section">
+    <h2>3. 信令协议定义</h2>
+    
+    <h3>3.1 PC → iOS：帧率控制指令</h3>
+    <p><span class="tag tag-pc">PC端发送</span> <span class="tag tag-ios">iOS端接收</span></p>
+    
+    <div class="json">
+<pre>
+{
+    "type": "adaptive_fps_control",
+    "version": "1.0",
+    "timestamp": 1706745600000,
+    "seq": 12345,
+    "data": {
+        "action": "adjust",
+        "targetFps": 30,
+        "targetBitrate": 5000000,
+        "urgency": "normal",
+        "reason": "jitter_high",
+        "metrics": {
+            "arrivalRate": 0.72,
+            "jitterRatio": 0.45,
+            "lossRate": 0.03,
+            "rttMs": 180,
+            "queueDepth": 2
+        }
+    }
+}
+</pre>
+    </div>
+
+    <h4>字段说明</h4>
+    <table>
+        <tr>
+            <th>字段</th>
+            <th>类型</th>
+            <th>必填</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>type</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>固定值 "adaptive_fps_control"</td>
+        </tr>
+        <tr>
+            <td>version</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>协议版本，当前 "1.0"</td>
+        </tr>
+        <tr>
+            <td>timestamp</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>Unix 毫秒时间戳</td>
+        </tr>
+        <tr>
+            <td>seq</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>序列号，用于去重和排序</td>
+        </tr>
+        <tr>
+            <td>data.action</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>"adjust" | "force" | "reset"</td>
+        </tr>
+        <tr>
+            <td>data.targetFps</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>目标帧率：15 / 30 / 45 / 60</td>
+        </tr>
+        <tr>
+            <td>data.targetBitrate</td>
+            <td>number</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>目标码率（bps）</td>
+        </tr>
+        <tr>
+            <td>data.urgency</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>"low" | "normal" | "high" | "critical"</td>
+        </tr>
+        <tr>
+            <td>data.reason</td>
+            <td>string</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>触发原因（用于日志/调试）</td>
+        </tr>
+        <tr>
+            <td>data.metrics</td>
+            <td>object</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>触发时的网络指标快照</td>
+        </tr>
+    </table>
+
+    <h4>action 枚举值</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+            <th>iOS 响应</th>
+        </tr>
+        <tr>
+            <td><strong>adjust</strong></td>
+            <td>平滑调整</td>
+            <td>按四档就近切换，可平滑过渡</td>
+        </tr>
+        <tr>
+            <td><strong>force</strong></td>
+            <td>强制立即切换</td>
+            <td>立即切换到目标帧率，无过渡</td>
+        </tr>
+        <tr>
+            <td><strong>reset</strong></td>
+            <td>重置到初始帧率</td>
+            <td>恢复到用户配置的原始帧率</td>
+        </tr>
+    </table>
+
+    <h4>urgency 紧急度</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+            <th>iOS 响应时限</th>
+            <th>触发场景</th>
+        </tr>
+        <tr>
+            <td>low</td>
+            <td>低优先级</td>
+            <td>≤ 2000ms</td>
+            <td>升帧建议</td>
+        </tr>
+        <tr>
+            <td>normal</td>
+            <td>正常</td>
+            <td>≤ 500ms</td>
+            <td>常规降帧</td>
+        </tr>
+        <tr>
+            <td><strong>high</strong></td>
+            <td>高优先级</td>
+            <td><strong>≤ 200ms</strong></td>
+            <td>网络快速恶化</td>
+        </tr>
+        <tr>
+            <td><strong>critical</strong></td>
+            <td>紧急</td>
+            <td><strong>≤ 50ms</strong></td>
+            <td>即将断流</td>
+        </tr>
+    </table>
+
+    <h4>reason 触发原因枚举</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+        </tr>
+        <tr><td>arrival_low</td><td>到达率不足（&lt;85%）</td></tr>
+        <tr><td>jitter_high</td><td>抖动过高（&gt;30%）</td></tr>
+        <tr><td>loss_high</td><td>丢包过高（&gt;5%）</td></tr>
+        <tr><td>rtt_high</td><td>RTT过高（&gt;300ms）</td></tr>
+        <tr><td>queue_low</td><td>队列不足（&lt;3帧）</td></tr>
+        <tr><td>network_recover</td><td>网络恢复，可升帧</td></tr>
+        <tr><td>user_request</td><td>用户主动请求</td></tr>
+    </table>
+</div>
+
+<!-- ==================== iOS → PC 响应 ==================== -->
+<div class="section">
+    <h3>3.2 iOS → PC：执行确认</h3>
+    <p><span class="tag tag-ios">iOS端发送</span> <span class="tag tag-pc">PC端接收</span></p>
+    
+    <div class="json">
+<pre>
+{
+    "type": "adaptive_fps_ack",
+    "version": "1.0",
+    "timestamp": 1706745600050,
+    "seq": 12345,
+    "data": {
+        "status": "applied",
+        "appliedFps": 30,
+        "appliedBitrate": 5000000,
+        "execTimeMs": 35,
+        "encoderState": "ok"
+    }
+}
+</pre>
+    </div>
+
+    <h4>字段说明</h4>
+    <table>
+        <tr>
+            <th>字段</th>
+            <th>类型</th>
+            <th>必填</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>type</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>固定值 "adaptive_fps_ack"</td>
+        </tr>
+        <tr>
+            <td>seq</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>对应请求的序列号</td>
+        </tr>
+        <tr>
+            <td>data.status</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>"applied" | "rejected" | "pending"</td>
+        </tr>
+        <tr>
+            <td>data.appliedFps</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>实际应用的帧率</td>
+        </tr>
+        <tr>
+            <td>data.appliedBitrate</td>
+            <td>number</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>实际应用的码率</td>
+        </tr>
+        <tr>
+            <td>data.execTimeMs</td>
+            <td>number</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>执行耗时（毫秒）</td>
+        </tr>
+        <tr>
+            <td>data.encoderState</td>
+            <td>string</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>"ok" | "overload" | "error"</td>
+        </tr>
+    </table>
+
+    <h4>status 枚举值</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+            <th>PC端处理</th>
+        </tr>
+        <tr>
+            <td><strong>applied</strong></td>
+            <td>已执行</td>
+            <td>确认生效，继续监控</td>
+        </tr>
+        <tr>
+            <td>rejected</td>
+            <td>拒绝执行</td>
+            <td>记录日志，可能需调整策略</td>
+        </tr>
+        <tr>
+            <td>pending</td>
+            <td>延迟执行中</td>
+            <td>等待后续 applied 确认</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== iOS 状态上报 ==================== -->
+<div class="section">
+    <h3>3.3 iOS → PC：状态主动上报（可选）</h3>
+    <p><span class="tag tag-ios">iOS端发送</span> <span class="tag tag-pc">PC端接收</span></p>
+    
+    <div class="json">
+<pre>
+{
+    "type": "ios_encoder_status",
+    "version": "1.0",
+    "timestamp": 1706745600100,
+    "data": {
+        "currentFps": 30,
+        "currentBitrate": 5000000,
+        "encoderQueue": 2,
+        "cpuUsage": 0.45,
+        "thermalState": "nominal",
+        "networkType": "wifi"
+    }
+}
+</pre>
+    </div>
+    
+    <div class="note">
+        <strong>上报频率建议：</strong>正常 5 秒一次；网络波动时 1 秒一次。
+    </div>
+</div>
+
+<!-- ==================== 快速响应机制 ==================== -->
+<div class="section">
+    <h2>4. iOS 端快速响应机制</h2>
+    
+    <h3>4.1 响应时序要求</h3>
+    <div class="flow-box">
+        <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div>PC 端检测到网络恶化，发送 <code>adaptive_fps_control</code></div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div>iOS 端收到信令（目标 ≤ 50ms 内收到）</div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div>iOS 解析并调用编码器 API（目标 ≤ 30ms）</div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div>编码器生效并输出新帧率码流</div>
+        </div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">
+            <div class="flow-num">5</div>
+            <div>iOS 发送 <code>adaptive_fps_ack</code> 确认</div>
+        </div>
+    </div>
+
+    <div class="warning">
+        <strong>关键约束：</strong>从 PC 发送到 iOS 执行完成，<strong>总延迟应 ≤ 200ms</strong>（critical 级别应 ≤ 100ms）
+    </div>
+
+    <h3>4.2 iOS 端实现要点</h3>
+    
+    <h4>4.2.1 信令监听（高优先级线程）</h4>
+    <div class="code">
+<pre>
+// Swift 伪代码 - DataChannel 监听
+class AdaptiveFpsHandler {
+    
+    // 使用高优先级队列处理信令
+    private let signalQueue = DispatchQueue(label: "adaptive.fps.signal", qos: .userInteractive)
+    
+    func onDataChannelMessage(_ message: Data) {
+        signalQueue.async { [weak self] in
+            guard let json = try? JSONDecoder().decode(AdaptiveFpsControl.self, from: message) else { return }
+            
+            if json.type == "adaptive_fps_control" {
+                self?.handleFpsControl(json)
+            }
+        }
+    }
+    
+    private func handleFpsControl(_ control: AdaptiveFpsControl) {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        // 1. 根据 urgency 决定是否立即执行
+        if control.data.urgency == "critical" || control.data.urgency == "high" {
+            applyFpsImmediately(control.data.targetFps, bitrate: control.data.targetBitrate)
+        } else {
+            applyFpsSmoothly(control.data.targetFps, bitrate: control.data.targetBitrate)
+        }
+        
+        // 2. 发送确认
+        let execTime = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+        sendAck(seq: control.seq, appliedFps: control.data.targetFps, execTimeMs: execTime)
+    }
+}
+</pre>
+    </div>
+
+    <h4>4.2.2 帧率切换逻辑（四档平滑）</h4>
+    <div class="code">
+<pre>
+// Swift 伪代码 - 四档帧率切换
+class FpsController {
+    
+    static let fpsLevels: [Int] = [15, 30, 45, 60]
+    
+    private var currentFps: Int = 60
+    private var targetFps: Int = 60
+    private var isTransitioning: Bool = false
+    
+    // 立即切换（用于 high/critical 紧急度）
+    func applyFpsImmediately(_ fps: Int, bitrate: Int?) {
+        let normalizedFps = nearestFpsLevel(fps)
+        currentFps = normalizedFps
+        targetFps = normalizedFps
+        
+        // 直接调用编码器 API
+        encoder.setFrameRate(normalizedFps)
+        if let br = bitrate {
+            encoder.setBitrate(br)
+        }
+    }
+    
+    // 平滑切换（用于 low/normal 紧急度）
+    func applyFpsSmoothly(_ fps: Int, bitrate: Int?) {
+        let normalizedFps = nearestFpsLevel(fps)
+        targetFps = normalizedFps
+        
+        if !isTransitioning {
+            startSmoothTransition()
+        }
+    }
+    
+    // 找到最近的档位
+    private func nearestFpsLevel(_ fps: Int) -> Int {
+        return FpsController.fpsLevels.min(by: { abs($0 - fps) < abs($1 - fps) }) ?? 30
+    }
+    
+    // 平滑过渡（每档间隔 100-200ms）
+    private func startSmoothTransition() {
+        isTransitioning = true
+        
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self else { return }
+            
+            while self.currentFps != self.targetFps {
+                let direction = self.targetFps > self.currentFps ? 1 : -1
+                let currentIndex = FpsController.fpsLevels.firstIndex(of: self.currentFps) ?? 0
+                let nextIndex = currentIndex + direction
+                
+                if nextIndex >= 0 && nextIndex < FpsController.fpsLevels.count {
+                    self.currentFps = FpsController.fpsLevels[nextIndex]
+                    
+                    DispatchQueue.main.async {
+                        self.encoder.setFrameRate(self.currentFps)
+                    }
+                    
+                    // 降帧快（100ms），升帧慢（200ms）
+                    let delay = direction < 0 ? 100 : 200
+                    Thread.sleep(forTimeInterval: Double(delay) / 1000.0)
+                } else {
+                    break
+                }
+            }
+            
+            self.isTransitioning = false
+        }
+    }
+}
+</pre>
+    </div>
+
+    <h4>4.2.3 编码器动态调参</h4>
+    <div class="code">
+<pre>
+// Swift 伪代码 - VideoToolbox 编码器动态调参
+class H264Encoder {
+    
+    private var compressionSession: VTCompressionSession?
+    
+    // 动态设置帧率
+    func setFrameRate(_ fps: Int) {
+        guard let session = compressionSession else { return }
+        
+        let frameRate = CFNumberCreate(nil, .intType, [fps])
+        VTSessionSetProperty(session, 
+                            key: kVTCompressionPropertyKey_ExpectedFrameRate, 
+                            value: frameRate)
+    }
+    
+    // 动态设置码率
+    func setBitrate(_ bitrate: Int) {
+        guard let session = compressionSession else { return }
+        
+        let avgBitrate = CFNumberCreate(nil, .intType, [bitrate])
+        VTSessionSetProperty(session, 
+                            key: kVTCompressionPropertyKey_AverageBitRate, 
+                            value: avgBitrate)
+        
+        // 同时设置数据速率限制（防止突发）
+        let dataRateLimit = CFNumberCreate(nil, .intType, [Int(Double(bitrate) * 1.5)])
+        VTSessionSetProperty(session, 
+                            key: kVTCompressionPropertyKey_DataRateLimits, 
+                            value: [dataRateLimit, 1.0] as CFArray)
+    }
+}
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 完整流程 ==================== -->
+<div class="section">
+    <h2>5. 完整闭环流程</h2>
+    
+    <div class="flow-box">
+        <h4>5.1 降帧流程（弱网触发）</h4>
+        <table>
+            <tr>
+                <th>步骤</th>
+                <th>端</th>
+                <th>动作</th>
+                <th>时限</th>
+            </tr>
+            <tr>
+                <td>1</td>
+                <td>PC</td>
+                <td>检测到抖动 &gt; 30% / 到达率 &lt; 85%</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>2</td>
+                <td>PC</td>
+                <td>计算目标帧率（如 60→30）</td>
+                <td>≤ 10ms</td>
+            </tr>
+            <tr>
+                <td>3</td>
+                <td>PC</td>
+                <td>发送 adaptive_fps_control，urgency=high</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>4</td>
+                <td>iOS</td>
+                <td>收到信令，解析并验证</td>
+                <td>≤ 50ms</td>
+            </tr>
+            <tr>
+                <td>5</td>
+                <td>iOS</td>
+                <td>调用编码器 setFrameRate(30)</td>
+                <td>≤ 30ms</td>
+            </tr>
+            <tr>
+                <td>6</td>
+                <td>iOS</td>
+                <td>发送 adaptive_fps_ack，status=applied</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>7</td>
+                <td>PC</td>
+                <td>收到确认，更新状态机</td>
+                <td>-</td>
+            </tr>
+        </table>
+        <div class="success">
+            <strong>总耗时目标：</strong>≤ 200ms（从检测到生效）
+        </div>
+    </div>
+
+    <div class="flow-box">
+        <h4>5.2 升帧流程（网络恢复）</h4>
+        <table>
+            <tr>
+                <th>步骤</th>
+                <th>端</th>
+                <th>动作</th>
+                <th>时限</th>
+            </tr>
+            <tr>
+                <td>1</td>
+                <td>PC</td>
+                <td>检测到抖动 &lt; 20%、到达率 ≥ 90% 持续 ≥ 1s</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>2</td>
+                <td>PC</td>
+                <td>计算目标帧率（如 30→45，每次升一档）</td>
+                <td>≤ 10ms</td>
+            </tr>
+            <tr>
+                <td>3</td>
+                <td>PC</td>
+                <td>发送 adaptive_fps_control，urgency=low</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>4</td>
+                <td>iOS</td>
+                <td>收到信令，平滑切换 30→45</td>
+                <td>≤ 500ms</td>
+            </tr>
+            <tr>
+                <td>5</td>
+                <td>iOS</td>
+                <td>发送 adaptive_fps_ack，status=applied</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>6</td>
+                <td>PC</td>
+                <td>继续监控，若持续稳定可再升一档</td>
+                <td>-</td>
+            </tr>
+        </table>
+        <div class="note">
+            <strong>升帧原则：</strong>慢升快降，每次只升一档，间隔 ≥ 1s
+        </div>
+    </div>
+</div>
+
+<!-- ==================== 异常处理 ==================== -->
+<div class="section">
+    <h2>6. 异常处理</h2>
+    
+    <table>
+        <tr>
+            <th>场景</th>
+            <th>检测方式</th>
+            <th>处理策略</th>
+        </tr>
+        <tr>
+            <td>信令超时</td>
+            <td>PC 端 500ms 未收到 ack</td>
+            <td>重发一次，仍无响应则记录日志</td>
+        </tr>
+        <tr>
+            <td>iOS 拒绝执行</td>
+            <td>ack.status = rejected</td>
+            <td>PC 调整策略或降低期望</td>
+        </tr>
+        <tr>
+            <td>编码器过载</td>
+            <td>ack.encoderState = overload</td>
+            <td>PC 暂停升帧请求，等待恢复</td>
+        </tr>
+        <tr>
+            <td>DataChannel 断开</td>
+            <td>连接状态监控</td>
+            <td>降级到 WebSocket 信令</td>
+        </tr>
+        <tr>
+            <td>连续降帧失败</td>
+            <td>连续 3 次 ack 失败</td>
+            <td>强制 reset 到最低档 15fps</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 测试验证 ==================== -->
+<div class="section">
+    <h2>7. 测试验证清单</h2>
+    
+    <table>
+        <tr>
+            <th>测试项</th>
+            <th>验证点</th>
+            <th>通过标准</th>
+        </tr>
+        <tr>
+            <td>信令延迟</td>
+            <td>从 PC 发送到 iOS 收到</td>
+            <td>≤ 100ms（P95）</td>
+        </tr>
+        <tr>
+            <td>执行延迟</td>
+            <td>从 iOS 收到到编码器生效</td>
+            <td>≤ 50ms（P95）</td>
+        </tr>
+        <tr>
+            <td>四档切换</td>
+            <td>60→45→30→15 逐级切换</td>
+            <td>每档切换平滑，无卡顿</td>
+        </tr>
+        <tr>
+            <td>紧急降帧</td>
+            <td>critical 级别 60→15</td>
+            <td>总延迟 ≤ 150ms</td>
+        </tr>
+        <tr>
+            <td>升帧滞后</td>
+            <td>升帧需稳定 ≥ 1s</td>
+            <td>不会频繁升降抖动</td>
+        </tr>
+        <tr>
+            <td>弱网模拟</td>
+            <td>丢包 10%、RTT 500ms</td>
+            <td>能稳定在 15fps 档位</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 附录 ==================== -->
+<div class="section">
+    <h2>附录 A：完整 JSON Schema</h2>
+    
+    <div class="code">
+<pre>
+// adaptive_fps_control JSON Schema
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["type", "version", "timestamp", "seq", "data"],
+    "properties": {
+        "type": { "const": "adaptive_fps_control" },
+        "version": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "seq": { "type": "number" },
+        "data": {
+            "type": "object",
+            "required": ["action", "targetFps", "urgency"],
+            "properties": {
+                "action": { "enum": ["adjust", "force", "reset"] },
+                "targetFps": { "enum": [15, 30, 45, 60] },
+                "targetBitrate": { "type": "number" },
+                "urgency": { "enum": ["low", "normal", "high", "critical"] },
+                "reason": { "type": "string" },
+                "metrics": {
+                    "type": "object",
+                    "properties": {
+                        "arrivalRate": { "type": "number" },
+                        "jitterRatio": { "type": "number" },
+                        "lossRate": { "type": "number" },
+                        "rttMs": { "type": "number" },
+                        "queueDepth": { "type": "number" }
+                    }
+                }
+            }
+        }
+    }
+}
+</pre>
+    </div>
+</div>
+
+<div class="section">
+    <h2>附录 B：码率建议表</h2>
+    <table>
+        <tr>
+            <th>帧率档位</th>
+            <th>建议最低码率</th>
+            <th>建议最高码率</th>
+            <th>默认码率</th>
+        </tr>
+        <tr>
+            <td>60 fps</td>
+            <td>6 Mbps</td>
+            <td>15 Mbps</td>
+            <td>10 Mbps</td>
+        </tr>
+        <tr>
+            <td>45 fps</td>
+            <td>4 Mbps</td>
+            <td>10 Mbps</td>
+            <td>7 Mbps</td>
+        </tr>
+        <tr>
+            <td>30 fps</td>
+            <td>3 Mbps</td>
+            <td>8 Mbps</td>
+            <td>5 Mbps</td>
+        </tr>
+        <tr>
+            <td>15 fps</td>
+            <td>1.5 Mbps</td>
+            <td>4 Mbps</td>
+            <td>2.5 Mbps</td>
+        </tr>
+    </table>
+</div>
+
+<div class="success" style="margin-top: 30px;">
+    <strong>✅ 文档完成</strong><br>
+    请根据实际业务需求调整阈值和码率参数。如有疑问请联系 PC 端开发同学。
+</div>
+
+</body>
+</html>

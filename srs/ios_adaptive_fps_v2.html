@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>iOS 自适应帧率对接文档 v2.0 - WebSocket 信令</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; padding: 20px; background: #f5f5f5; line-height: 1.7; }
+        h1 { color: #333; border-bottom: 3px solid #34C759; padding-bottom: 10px; }
+        h2 { color: #34C759; margin-top: 35px; border-left: 4px solid #34C759; padding-left: 12px; }
+        h3 { color: #555; margin-top: 20px; }
+        h4 { color: #666; margin-top: 15px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px 15px; text-align: left; }
+        th { background: #34C759; color: white; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        tr:hover { background: #e8f5e9; }
+        .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .success { background: #d4edda; border-left: 4px solid #28a745; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .warning { background: #f8d7da; border-left: 4px solid #dc3545; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .info { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .code { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; font-family: "Consolas", "Monaco", monospace; margin: 12px 0; overflow-x: auto; font-size: 13px; }
+        .code pre { margin: 0; white-space: pre-wrap; }
+        .json { background: #1e1e1e; color: #9cdcfe; padding: 15px; border-radius: 6px; font-family: "Consolas", monospace; margin: 12px 0; }
+        .section { margin-bottom: 40px; }
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; margin-right: 5px; }
+        .tag-required { background: #dc3545; color: white; }
+        .tag-optional { background: #6c757d; color: white; }
+        .tag-new { background: #34C759; color: white; }
+        .tag-pc { background: #007AFF; color: white; }
+        .tag-ios { background: #34C759; color: white; }
+        .highlight { background: #fff3e0; }
+        .critical { background: #ffebee; }
+    </style>
+</head>
+<body>
+
+<h1>📱 iOS 自适应帧率对接文档 v2.0</h1>
+<p><strong>版本：</strong>v2.0 &nbsp;&nbsp; <strong>更新日期：</strong>2025-01-31 &nbsp;&nbsp; <strong>信令通道：</strong>WebSocket（SRS）</p>
+
+<!-- ==================== 概述 ==================== -->
+<div class="section">
+    <h2>1. 概述</h2>
+    
+    <div class="success">
+        <strong>核心策略：快降慢升</strong>
+        <ul>
+            <li><strong>降帧</strong>：大幅度、快速（四档跳：60→45→30→15）</li>
+            <li><strong>升帧</strong>：小幅度、缓慢（5-10fps 逐步升，每次间隔 ≥1秒）</li>
+        </ul>
+    </div>
+
+    <h3>1.1 职责划分</h3>
+    <table>
+        <tr>
+            <th>端</th>
+            <th>职责</th>
+        </tr>
+        <tr>
+            <td><span class="tag tag-pc">PC端</span></td>
+            <td>
+                <ul>
+                    <li>采集网络指标（到达率、抖动、队列）</li>
+                    <li><strong>预测网络波动</strong>（趋势分析）</li>
+                    <li>计算目标帧率</li>
+                    <li>通过 WebSocket 发送 <code>set_fps</code> 指令</li>
+                </ul>
+            </td>
+        </tr>
+        <tr>
+            <td><span class="tag tag-ios">iOS端</span></td>
+            <td>
+                <ul>
+                    <li>接收 <code>set_fps</code> 指令</li>
+                    <li>根据 <code>urgency</code> 决定执行方式</li>
+                    <li>调整编码器帧率/码率</li>
+                    <li>返回确认</li>
+                </ul>
+            </td>
+        </tr>
+    </table>
+
+    <h3>1.2 帧率四档</h3>
+    <table>
+        <tr>
+            <th>档位</th>
+            <th>帧率</th>
+            <th>建议码率</th>
+            <th>场景</th>
+        </tr>
+        <tr>
+            <td>档位1</td>
+            <td><strong>60 fps</strong></td>
+            <td>8-12 Mbps</td>
+            <td>网络优秀</td>
+        </tr>
+        <tr>
+            <td>档位2</td>
+            <td><strong>45 fps</strong></td>
+            <td>6-8 Mbps</td>
+            <td>网络良好</td>
+        </tr>
+        <tr>
+            <td>档位3</td>
+            <td><strong>30 fps</strong></td>
+            <td>4-6 Mbps</td>
+            <td>网络一般</td>
+        </tr>
+        <tr>
+            <td>档位4</td>
+            <td><strong>15 fps</strong></td>
+            <td>2-3 Mbps</td>
+            <td>极端弱网</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 信令协议 ==================== -->
+<div class="section">
+    <h2>2. 信令协议（WebSocket）</h2>
+    
+    <div class="info">
+        <strong>在现有 <code>set_fps</code> 命令基础上扩展</strong>，新增 <code>urgency</code> 和 <code>reason</code> 字段。
+    </div>
+
+    <h3>2.1 PC → iOS：set_fps 指令</h3>
+    <p><span class="tag tag-pc">PC端发送</span> <span class="tag tag-ios">iOS端接收</span></p>
+    
+    <div class="json">
+<pre>
+{
+    "cmd": "set_fps",
+    "fps": 30,
+    "urgency": "high",
+    "reason": "jitter_high",
+    "bitrate": 5000000,
+    "timestamp": 1706745600000
+}
+</pre>
+    </div>
+
+    <h4>字段说明</h4>
+    <table>
+        <tr>
+            <th>字段</th>
+            <th>类型</th>
+            <th>必填</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>cmd</td>
+            <td>string</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>固定值 <code>"set_fps"</code></td>
+        </tr>
+        <tr>
+            <td>fps</td>
+            <td>number</td>
+            <td><span class="tag tag-required">必填</span></td>
+            <td>目标帧率（15/30/45/60 或任意值）</td>
+        </tr>
+        <tr class="highlight">
+            <td>urgency</td>
+            <td>string</td>
+            <td><span class="tag tag-new">新增</span></td>
+            <td><strong>"critical" | "high" | "normal" | "low"</strong></td>
+        </tr>
+        <tr>
+            <td>reason</td>
+            <td>string</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>触发原因（调试用）</td>
+        </tr>
+        <tr>
+            <td>bitrate</td>
+            <td>number</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>建议码率（bps）</td>
+        </tr>
+        <tr>
+            <td>timestamp</td>
+            <td>number</td>
+            <td><span class="tag tag-optional">可选</span></td>
+            <td>时间戳（毫秒）</td>
+        </tr>
+    </table>
+
+    <h4>⭐ urgency 紧急度（核心字段）</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+            <th>iOS 执行方式</th>
+            <th>响应时限</th>
+            <th>使用场景</th>
+        </tr>
+        <tr class="critical">
+            <td><strong>critical</strong></td>
+            <td>紧急</td>
+            <td><strong>立即执行，无过渡</strong></td>
+            <td>≤ 50ms</td>
+            <td>即将断流（队列≤1帧）</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>high</strong></td>
+            <td>高优先级</td>
+            <td><strong>立即执行，无过渡</strong></td>
+            <td>≤ 200ms</td>
+            <td>网络快速恶化</td>
+        </tr>
+        <tr>
+            <td><strong>normal</strong></td>
+            <td>正常</td>
+            <td>可短暂过渡（100-200ms）</td>
+            <td>≤ 500ms</td>
+            <td>常规降帧</td>
+        </tr>
+        <tr>
+            <td><strong>low</strong></td>
+            <td>低优先级</td>
+            <td>平滑过渡</td>
+            <td>≤ 2000ms</td>
+            <td>升帧建议</td>
+        </tr>
+    </table>
+
+    <div class="warning">
+        <strong>iOS 端必须处理 urgency 字段：</strong>
+        <ul>
+            <li><code>critical</code> / <code>high</code>：必须立即执行，不能有动画或过渡</li>
+            <li><code>normal</code>：可以有短暂过渡</li>
+            <li><code>low</code>：升帧时使用，可以平滑过渡</li>
+            <li>如果字段缺失，默认按 <code>normal</code> 处理</li>
+        </ul>
+    </div>
+
+    <h4>reason 触发原因（调试用）</h4>
+    <table>
+        <tr>
+            <th>值</th>
+            <th>含义</th>
+        </tr>
+        <tr><td>predict_warning</td><td>预测式预警（趋势分析触发）</td></tr>
+        <tr><td>predict_critical</td><td>预测式紧急（趋势急剧恶化）</td></tr>
+        <tr><td>arrival_low</td><td>到达率不足（&lt;85%）</td></tr>
+        <tr><td>jitter_high</td><td>抖动过高（&gt;30%）</td></tr>
+        <tr><td>queue_low</td><td>队列不足（&lt;3帧）</td></tr>
+        <tr><td>rtt_high</td><td>RTT过高（&gt;300ms）</td></tr>
+        <tr><td>network_recover</td><td>网络恢复，可升帧</td></tr>
+    </table>
+</div>
+
+<!-- ==================== iOS → PC 确认 ==================== -->
+<div class="section">
+    <h3>2.2 iOS → PC：set_fps_ack 确认（可选）</h3>
+    <p><span class="tag tag-ios">iOS端发送</span> <span class="tag tag-pc">PC端接收</span></p>
+    
+    <div class="json">
+<pre>
+{
+    "cmd": "set_fps_ack",
+    "fps": 30,
+    "status": "applied",
+    "timestamp": 1706745600050
+}
+</pre>
+    </div>
+
+    <table>
+        <tr>
+            <th>字段</th>
+            <th>类型</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>cmd</td>
+            <td>string</td>
+            <td>固定值 <code>"set_fps_ack"</code></td>
+        </tr>
+        <tr>
+            <td>fps</td>
+            <td>number</td>
+            <td>实际应用的帧率</td>
+        </tr>
+        <tr>
+            <td>status</td>
+            <td>string</td>
+            <td><code>"applied"</code> | <code>"rejected"</code></td>
+        </tr>
+        <tr>
+            <td>timestamp</td>
+            <td>number</td>
+            <td>执行完成时间戳</td>
+        </tr>
+    </table>
+
+    <div class="note">
+        <strong>确认消息为可选</strong>，PC 端不强制等待确认。但建议 iOS 端在执行完成后发送，方便 PC 端记录日志和调试。
+    </div>
+</div>
+
+<!-- ==================== iOS 端实现 ==================== -->
+<div class="section">
+    <h2>3. iOS 端实现要点</h2>
+
+    <h3>3.1 指令处理逻辑</h3>
+    <div class="code">
+<pre>
+// Swift 伪代码
+
+func onWebSocketMessage(_ message: String) {
+    guard let data = message.data(using: .utf8),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let cmd = json["cmd"] as? String else { return }
+    
+    if cmd == "set_fps" {
+        handleSetFps(json)
+    }
+}
+
+func handleSetFps(_ json: [String: Any]) {
+    guard let fps = json["fps"] as? Int else { return }
+    
+    let urgency = json["urgency"] as? String ?? "normal"
+    let bitrate = json["bitrate"] as? Int
+    let reason = json["reason"] as? String
+    
+    // 记录日志
+    print("收到帧率指令: fps=\(fps), urgency=\(urgency), reason=\(reason ?? "")")
+    
+    // 根据 urgency 决定执行方式
+    switch urgency {
+    case "critical", "high":
+        // ⭐ 立即执行，无过渡
+        applyFpsImmediately(fps, bitrate: bitrate)
+        
+    case "normal":
+        // 可短暂过渡
+        applyFpsWithTransition(fps, bitrate: bitrate, duration: 0.15)
+        
+    case "low":
+        // 平滑过渡（升帧）
+        applyFpsWithTransition(fps, bitrate: bitrate, duration: 0.3)
+        
+    default:
+        applyFpsWithTransition(fps, bitrate: bitrate, duration: 0.15)
+    }
+    
+    // 发送确认（可选）
+    sendAck(fps: fps)
+}
+</pre>
+    </div>
+
+    <h3>3.2 编码器调参</h3>
+    <div class="code">
+<pre>
+// Swift 伪代码 - VideoToolbox
+
+class VideoEncoder {
+    private var session: VTCompressionSession?
+    
+    // 立即设置帧率（无过渡）
+    func applyFpsImmediately(_ fps: Int, bitrate: Int?) {
+        guard let session = session else { return }
+        
+        // 设置帧率
+        var fpsValue = fps
+        let fpsNumber = CFNumberCreate(nil, .intType, &fpsValue)
+        VTSessionSetProperty(session, 
+                            key: kVTCompressionPropertyKey_ExpectedFrameRate, 
+                            value: fpsNumber)
+        
+        // 设置码率（如果提供）
+        if let br = bitrate {
+            var bitrateValue = br
+            let bitrateNumber = CFNumberCreate(nil, .intType, &bitrateValue)
+            VTSessionSetProperty(session,
+                                key: kVTCompressionPropertyKey_AverageBitRate,
+                                value: bitrateNumber)
+        }
+    }
+    
+    // 带过渡的帧率切换
+    func applyFpsWithTransition(_ targetFps: Int, bitrate: Int?, duration: TimeInterval) {
+        // 如果需要平滑过渡，可以在这里实现
+        // 简单实现：直接调用 applyFpsImmediately
+        applyFpsImmediately(targetFps, bitrate: bitrate)
+    }
+}
+</pre>
+    </div>
+
+    <h3>3.3 关键约束</h3>
+    <div class="warning">
+        <strong>iOS 端必须保证：</strong>
+        <ul>
+            <li><code>critical</code> 紧急度：从收到指令到编码器生效 <strong>≤ 50ms</strong></li>
+            <li><code>high</code> 紧急度：从收到指令到编码器生效 <strong>≤ 200ms</strong></li>
+            <li>信令处理必须在高优先级线程（<code>DispatchQueue.userInteractive</code>）</li>
+            <li>不能有阻塞操作</li>
+        </ul>
+    </div>
+</div>
+
+<!-- ==================== 降帧升帧策略 ==================== -->
+<div class="section">
+    <h2>4. 降帧/升帧策略详解</h2>
+
+    <h3>4.1 降帧策略（PC 端控制）</h3>
+    
+    <div class="info">
+        <strong>策略：快降、大幅度</strong>
+        <ul>
+            <li>四档跳：60 → 45 → 30 → 15</li>
+            <li>紧急时可跳多档：60 → 30 或 60 → 15</li>
+        </ul>
+    </div>
+
+    <table>
+        <tr>
+            <th>触发条件</th>
+            <th>urgency</th>
+            <th>帧率调整</th>
+            <th>说明</th>
+        </tr>
+        <tr class="critical">
+            <td>队列 ≤ 1帧</td>
+            <td><strong>critical</strong></td>
+            <td>直接降到 15fps</td>
+            <td>即将断流，紧急保护</td>
+        </tr>
+        <tr class="highlight">
+            <td>预测风险分 &gt; 0.7</td>
+            <td><strong>high</strong></td>
+            <td>降两档（如 60→30）</td>
+            <td>趋势急剧恶化</td>
+        </tr>
+        <tr class="highlight">
+            <td>预测风险分 &gt; 0.5</td>
+            <td><strong>high</strong></td>
+            <td>降一档（如 60→45）</td>
+            <td>预测式预警</td>
+        </tr>
+        <tr>
+            <td>到达率 &lt; 85%</td>
+            <td>normal</td>
+            <td>降到到达帧率</td>
+            <td>网络能力不足</td>
+        </tr>
+        <tr>
+            <td>抖动 &gt; 30%</td>
+            <td>normal</td>
+            <td>降一档</td>
+            <td>网络不稳定</td>
+        </tr>
+        <tr>
+            <td>队列 &lt; 3帧</td>
+            <td>normal</td>
+            <td>降一档</td>
+            <td>缓冲不足</td>
+        </tr>
+    </table>
+
+    <h3>4.2 升帧策略（PC 端控制）</h3>
+    
+    <div class="info">
+        <strong>策略：慢升、小幅度</strong>
+        <ul>
+            <li>每次升 5-10fps</li>
+            <li>升帧间隔 ≥ 1秒</li>
+            <li>必须满足所有升帧条件才能升</li>
+        </ul>
+    </div>
+
+    <table>
+        <tr>
+            <th>升帧条件（全部满足）</th>
+            <th>阈值</th>
+        </tr>
+        <tr>
+            <td>抖动稳定</td>
+            <td>抖动比例 &lt; 20%</td>
+        </tr>
+        <tr>
+            <td>抖动趋势稳定</td>
+            <td>抖动变化率 ≤ 0</td>
+        </tr>
+        <tr>
+            <td>到达率充足</td>
+            <td>到达率 ≥ 90%</td>
+        </tr>
+        <tr>
+            <td>队列充足</td>
+            <td>队列 ≥ 5帧</td>
+        </tr>
+        <tr>
+            <td>稳定持续时间</td>
+            <td>≥ 1秒</td>
+        </tr>
+    </table>
+
+    <h4>升帧示例</h4>
+    <div class="code">
+<pre>
+// 升帧路径（慢升）
+当前帧率: 15fps
+    ↓ 稳定1秒后
+升帧到: 20fps (urgency: low)
+    ↓ 稳定1秒后
+升帧到: 25fps (urgency: low)
+    ↓ 稳定1秒后
+升帧到: 30fps (urgency: low)
+    ↓ ...
+最终恢复到: 60fps
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 时序示例 ==================== -->
+<div class="section">
+    <h2>5. 完整时序示例</h2>
+
+    <h3>5.1 降帧时序（网络恶化）</h3>
+    <table>
+        <tr>
+            <th>时间</th>
+            <th>网络状态</th>
+            <th>PC 端</th>
+            <th>发送指令</th>
+            <th>iOS 端</th>
+        </tr>
+        <tr>
+            <td>T+0s</td>
+            <td>正常</td>
+            <td>监控中</td>
+            <td>-</td>
+            <td>60fps</td>
+        </tr>
+        <tr class="highlight">
+            <td>T+1s</td>
+            <td>开始恶化</td>
+            <td>⚡ 检测到趋势恶化</td>
+            <td><code>{"cmd":"set_fps","fps":45,"urgency":"high"}</code></td>
+            <td>立即切换到 45fps</td>
+        </tr>
+        <tr class="highlight">
+            <td>T+1.2s</td>
+            <td>继续恶化</td>
+            <td>风险分继续上升</td>
+            <td><code>{"cmd":"set_fps","fps":30,"urgency":"high"}</code></td>
+            <td>立即切换到 30fps</td>
+        </tr>
+        <tr>
+            <td>T+2s</td>
+            <td>恶化减缓</td>
+            <td>保持观察</td>
+            <td>-</td>
+            <td>保持 30fps</td>
+        </tr>
+        <tr class="critical">
+            <td>T+3s</td>
+            <td>（如果没预测式）</td>
+            <td>被动式才触发</td>
+            <td>-</td>
+            <td>用户已经卡了</td>
+        </tr>
+    </table>
+
+    <h3>5.2 升帧时序（网络恢复）</h3>
+    <table>
+        <tr>
+            <th>时间</th>
+            <th>网络状态</th>
+            <th>PC 端</th>
+            <th>发送指令</th>
+            <th>iOS 端</th>
+        </tr>
+        <tr>
+            <td>T+0s</td>
+            <td>弱网</td>
+            <td>监控中</td>
+            <td>-</td>
+            <td>15fps</td>
+        </tr>
+        <tr>
+            <td>T+1s</td>
+            <td>开始恢复</td>
+            <td>检测到稳定，开始计时</td>
+            <td>-</td>
+            <td>15fps</td>
+        </tr>
+        <tr>
+            <td>T+2s</td>
+            <td>持续稳定</td>
+            <td>稳定满1秒，升帧</td>
+            <td><code>{"cmd":"set_fps","fps":20,"urgency":"low"}</code></td>
+            <td>平滑切换到 20fps</td>
+        </tr>
+        <tr>
+            <td>T+3s</td>
+            <td>持续稳定</td>
+            <td>稳定满1秒，升帧</td>
+            <td><code>{"cmd":"set_fps","fps":25,"urgency":"low"}</code></td>
+            <td>平滑切换到 25fps</td>
+        </tr>
+        <tr>
+            <td>...</td>
+            <td>...</td>
+            <td>...</td>
+            <td>...</td>
+            <td>...</td>
+        </tr>
+        <tr>
+            <td>T+10s</td>
+            <td>完全恢复</td>
+            <td>升到原始帧率</td>
+            <td><code>{"cmd":"set_fps","fps":60,"urgency":"low"}</code></td>
+            <td>平滑切换到 60fps</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 测试验证 ==================== -->
+<div class="section">
+    <h2>6. iOS 端测试验证清单</h2>
+    
+    <table>
+        <tr>
+            <th>测试项</th>
+            <th>测试方法</th>
+            <th>通过标准</th>
+        </tr>
+        <tr>
+            <td>critical 响应</td>
+            <td>发送 urgency=critical 指令</td>
+            <td>编码器生效 ≤ 50ms</td>
+        </tr>
+        <tr>
+            <td>high 响应</td>
+            <td>发送 urgency=high 指令</td>
+            <td>编码器生效 ≤ 200ms</td>
+        </tr>
+        <tr>
+            <td>连续降帧</td>
+            <td>快速连发 60→45→30</td>
+            <td>每次都能正确响应</td>
+        </tr>
+        <tr>
+            <td>升帧平滑</td>
+            <td>发送 urgency=low 指令</td>
+            <td>画面无明显跳变</td>
+        </tr>
+        <tr>
+            <td>兼容性</td>
+            <td>发送无 urgency 字段的指令</td>
+            <td>按 normal 处理</td>
+        </tr>
+        <tr>
+            <td>码率同步</td>
+            <td>发送带 bitrate 的指令</td>
+            <td>码率正确应用</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 总结 ==================== -->
+<div class="section">
+    <h2>7. iOS 端改动总结</h2>
+    
+    <div class="success">
+        <strong>改动量：最小</strong>
+        <ol>
+            <li>在现有 <code>set_fps</code> 处理中，解析新增的 <code>urgency</code> 字段</li>
+            <li>根据 <code>urgency</code> 决定是立即执行还是平滑过渡</li>
+            <li>可选：发送 <code>set_fps_ack</code> 确认</li>
+        </ol>
+    </div>
+
+    <div class="code">
+<pre>
+// iOS 端核心改动（伪代码）
+
+func handleSetFps(_ json: [String: Any]) {
+    let fps = json["fps"] as! Int
+    let urgency = json["urgency"] as? String ?? "normal"  // ⭐ 新增
+    
+    if urgency == "critical" || urgency == "high" {
+        applyFpsImmediately(fps)  // ⭐ 立即执行
+    } else {
+        applyFpsWithTransition(fps)  // 平滑过渡
+    }
+}
+</pre>
+    </div>
+</div>
+
+<!-- ==================== FAQ ==================== -->
+<div class="section">
+    <h2>8. FAQ</h2>
+    
+    <h4>Q: 如果没有 urgency 字段怎么处理？</h4>
+    <p>A: 默认按 <code>normal</code> 处理，保持向后兼容。</p>
+    
+    <h4>Q: fps 值必须是 15/30/45/60 吗？</h4>
+    <p>A: 不是。PC 端升帧时会发送 20/25/35 等值，iOS 端应支持任意帧率。</p>
+    
+    <h4>Q: 需要返回确认吗？</h4>
+    <p>A: 可选。建议返回，方便调试。但 PC 端不会阻塞等待确认。</p>
+    
+    <h4>Q: 码率怎么处理？</h4>
+    <p>A: 如果指令中有 <code>bitrate</code> 字段，同步设置码率。如果没有，iOS 端可以根据帧率自行计算建议码率。</p>
+</div>
+
+<div class="success" style="margin-top: 30px;">
+    <strong>✅ iOS 对接文档完成</strong><br>
+    核心改动：在 <code>set_fps</code> 中增加 <code>urgency</code> 字段处理。<br>
+    PC 端逻辑由我们负责实现。
+</div>
+
+</body>
+</html>
