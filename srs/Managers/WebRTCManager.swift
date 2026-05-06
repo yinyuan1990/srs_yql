@@ -10,6 +10,8 @@ import WebRTC
 import AVFoundation
 import CoreMedia
 import UIKit
+import CoreImage
+import Metal
 
 // MARK: - iPhone型号检测（iPhone 15+ 48MP新架构需要 1080p 采集）
 // iPhone15,4/5 = iPhone 15 / 15 Plus (majorVersion=15, minorVersion>=4)
@@ -52,11 +54,270 @@ extension Array {
     }
 }
 
+// MARK: - ⭐ 视频滤镜管道 (单个 Metal CIColorKernel — GPU 统一处理)
+//
+// v3 重构 (解决发热 + 黑色变灰):
+//   v2 用 3 个独立 CIFilter 串联 (CIColorControls + CIColorMatrix + CISharpenLuminance),
+//   每帧 3 次 GPU dispatch + ISP 上下文切换, 是发热大头.
+//   v3 把所有色彩运算合到 1 个 CIColorKernel, 单 pass 完成:
+//
+//     0. exposure    — 曝光乘法 (rgb × 2^EV, 把传感器伪黑乘出来变成可见暗部)
+//     1. blackPoint  — 黑场压死 (减后归一化, 真正黑色归 0, 不会变灰)
+//     2. brightness  — 中调亮度曲线 (保端点不会让黑变灰, 只弯中调)
+//     3. gamma       — pow 曲线 (保端点, 对暗部敏感, ♠♣ 花纹更清晰)
+//     4. saturation  — Rec.601 luma 加权混合
+//     5. contrast    — 绕中点 0.5 拉
+//     6. redGlow     — 选择性红色发光 (仅 R 高且 G/B 低的纯红区域非线性推向 1.0)
+//     7. highlightLift — 高光提亮 (>0.7 区域非线性推向 1.0, 白色更白)
+//
+//   锐化已移除 — 卷积 9 采样开销最贵, ISP 自带 edge enhancement 已够用.
+//   旧字段 sharpness 保留为 @Published 仅为兼容服务端推送, kernel 不读取.
+//
+// 兼容:
+//   - UserDefaults key 不变, UI 滑块继续可绑定
+//   - 服务端 filterSharpness 推下来不会报错, 只是不生效
+//   - 服务端 filterRedBoost 推下来转作 redGlow 强度
+final class VideoFilterPipeline: ObservableObject {
+
+    // ===== 实际生效参数（kernel 读取）=====
+
+    /// 黑场压死: 输入像素先减去 blackPoint 再归一化, 把暗部彻底推到 0
+    /// 0 = 不动, 0.04 = 暗部下沉 4%, 卡牌黑底/黑桃黑梅花更黑
+    @Published var blackPoint: Float = VideoFilterPipeline.loadDefault(.blackPoint, fallback: 0.04) {
+        didSet { saveDefault(.blackPoint, blackPoint); if oldValue != blackPoint { logChange("blackPoint", blackPoint) } }
+    }
+    /// 中调亮度: 保端点曲线 rgb + b·rgb·(1-rgb), -1..+1
+    /// 0 = 不变, 0.05 = 中调微提, 0.30 = 中调显著提亮
+    /// 黑场 (rgb=0) 和高光 (rgb=1) 都不受影响, 拖动不会把黑变灰
+    @Published var brightness: Float = VideoFilterPipeline.loadDefault(.brightness, fallback: 0.05) {
+        didSet { saveDefault(.brightness, brightness); if oldValue != brightness { logChange("brightness", brightness) } }
+    }
+    /// 曝光: rgb × 2^EV, -3..+3 stops, 乘法增益. 把传感器噪声底"伪黑"乘出来
+    @Published var exposure: Float = VideoFilterPipeline.loadDefault(.exposure, fallback: 0.0) {
+        didSet { saveDefault(.exposure, exposure); if oldValue != exposure { logChange("exposure", exposure) } }
+    }
+    /// 伽马: pow 曲线 rgb' = rgb^(1/gamma), 0.5..2.0, 保端点
+    @Published var gamma: Float = VideoFilterPipeline.loadDefault(.gamma, fallback: 1.0) {
+        didSet { saveDefault(.gamma, gamma); if oldValue != gamma { logChange("gamma", gamma) } }
+    }
+    /// 对比度: 绕 0.5 中点拉
+    @Published var contrast: Float = VideoFilterPipeline.loadDefault(.contrast, fallback: 1.20) {
+        didSet { saveDefault(.contrast, contrast); if oldValue != contrast { logChange("contrast", contrast) } }
+    }
+    /// 饱和度: Rec.601 luma 混合
+    @Published var saturation: Float = VideoFilterPipeline.loadDefault(.saturation, fallback: 1.30) {
+        didSet { saveDefault(.saturation, saturation); if oldValue != saturation { logChange("saturation", saturation) } }
+    }
+    /// ⭐ 红色发光强度: 仅作用于"R 高且 G/B 低"的纯红像素 (♥♦)
+    @Published var redGlow: Float = VideoFilterPipeline.loadDefault(.redGlow, fallback: 0.25) {
+        didSet { saveDefault(.redGlow, redGlow); if oldValue != redGlow { logChange("redGlow", redGlow) } }
+    }
+    /// 高光提亮: > 0.7 的像素非线性推向 1.0
+    @Published var highlightLift: Float = VideoFilterPipeline.loadDefault(.highlightLift, fallback: 0.15) {
+        didSet { saveDefault(.highlightLift, highlightLift); if oldValue != highlightLift { logChange("highlightLift", highlightLift) } }
+    }
+
+    // ===== 兼容旧服务端推送字段 (kernel 不读取, 留着不报错) =====
+    @Published var sharpness: Float = VideoFilterPipeline.loadDefault(.sharpness, fallback: 0.0) {
+        didSet { saveDefault(.sharpness, sharpness) }
+    }
+
+    // ⭐ 主开关
+    @Published var enabled: Bool = UserDefaults.standard.object(forKey: "videoFilter.enabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(enabled, forKey: "videoFilter.enabled"); print("📷 [Filter] enabled=\(enabled)") }
+    }
+
+    private enum Key: String {
+        case brightness    = "videoFilter.brightness"
+        case contrast      = "videoFilter.contrast"
+        case saturation    = "videoFilter.saturation"
+        case sharpness     = "videoFilter.sharpness"
+        case blackPoint    = "videoFilter.blackPoint"
+        case redGlow       = "videoFilter.redGlow"
+        case highlightLift = "videoFilter.highlightLift"
+        case gamma         = "videoFilter.gamma"
+        case exposure      = "videoFilter.exposure"
+    }
+
+    private static func loadDefault(_ key: Key, fallback: Float) -> Float {
+        if UserDefaults.standard.object(forKey: key.rawValue) != nil {
+            return UserDefaults.standard.float(forKey: key.rawValue)
+        }
+        return fallback
+    }
+    private func saveDefault(_ key: Key, _ value: Float) {
+        UserDefaults.standard.set(value, forKey: key.rawValue)
+    }
+    private func logChange(_ name: String, _ v: Float) {
+        print("📷 [Filter] \(name) = \(String(format: "%.3f", v))")
+    }
+
+    // ⭐ 一次性批量更新（避免多次 didSet 触发）
+    func applyAll(brightness: Float?, contrast: Float?, saturation: Float?,
+                  sharpness: Float?, redBoost: Float? = nil,
+                  blackPoint: Float? = nil, redGlow: Float? = nil, highlightLift: Float? = nil,
+                  gamma: Float? = nil, exposure: Float? = nil,
+                  enabled: Bool? = nil, source: String = "remote") {
+        if let v = brightness { self.brightness = v }
+        if let v = contrast   { self.contrast   = v }
+        if let v = saturation { self.saturation = v }
+        if let v = sharpness  { self.sharpness  = v }
+        if let v = redBoost   { self.redGlow    = v }
+        if let v = redGlow    { self.redGlow    = v }
+        if let v = blackPoint { self.blackPoint = v }
+        if let v = highlightLift { self.highlightLift = v }
+        if let v = gamma      { self.gamma      = v }
+        if let v = exposure   { self.exposure   = v }
+        if let v = enabled    { self.enabled    = v }
+        print("📷 [Filter] 批量应用 (\(source)): exp=\(self.exposure) bp=\(self.blackPoint) bright=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) sat=\(self.saturation) redGlow=\(self.redGlow) hi=\(self.highlightLift) enabled=\(self.enabled)")
+    }
+
+    // ===== Metal CIColorKernel: 一次 dispatch 完成所有色彩运算 =====
+    private static let kernelSource: String = """
+    kernel vec4 cardEnhance(__sample s,
+                            float exposure,
+                            float blackPoint,
+                            float brightness,
+                            float gamma,
+                            float contrast,
+                            float saturation,
+                            float redGlow,
+                            float highlightLift) {
+        vec3 rgb = s.rgb;
+
+        // 0. 曝光: rgb × 2^EV
+        rgb = rgb * exp2(exposure);
+
+        // 1. 黑场压死
+        float bpDenom = max(1.0 - blackPoint, 0.001);
+        rgb = max(rgb - vec3(blackPoint), vec3(0.0)) / vec3(bpDenom);
+
+        // 2. 中调亮度 (保端点)
+        rgb = rgb + brightness * rgb * (1.0 - rgb);
+
+        // 3. 伽马
+        float invGamma = 1.0 / max(gamma, 0.01);
+        rgb = pow(max(rgb, vec3(0.0)), vec3(invGamma));
+
+        // 4. 饱和度
+        float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+        rgb = mix(vec3(luma), rgb, saturation);
+
+        // 5. 对比度
+        rgb = (rgb - 0.5) * contrast + 0.5;
+
+        // 6. 红色发光 (仅纯红像素 ♥♦)
+        float gbMax = max(rgb.g, rgb.b);
+        float redMask = smoothstep(0.4, 0.7, rgb.r) * max(0.0, 1.0 - gbMax);
+        rgb.r = rgb.r + redGlow * redMask * (1.0 - rgb.r);
+
+        // 7. 高光提亮
+        vec3 highlightMask = smoothstep(vec3(0.7), vec3(1.0), rgb);
+        rgb = rgb + highlightLift * highlightMask * (1.0 - rgb);
+
+        rgb = clamp(rgb, 0.0, 1.0);
+        return vec4(rgb, s.a);
+    }
+    """
+
+    private let ciContext: CIContext
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var poolWidth: Int = 0
+    private var poolHeight: Int = 0
+    private let cardEnhanceKernel: CIColorKernel?
+
+    init() {
+        let device = MTLCreateSystemDefaultDevice()
+        let options: [CIContextOption: Any] = [
+            .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
+            .cacheIntermediates: false,
+            .useSoftwareRenderer: false,
+        ]
+        if let device = device {
+            ciContext = CIContext(mtlDevice: device, options: options)
+        } else {
+            ciContext = CIContext(options: options)
+        }
+        cardEnhanceKernel = CIColorKernel(source: VideoFilterPipeline.kernelSource)
+        if cardEnhanceKernel == nil {
+            print("❌ [Filter] CIColorKernel 编译失败, 滤镜将走直通")
+        } else {
+            print("✅ [Filter] Metal kernel 已加载 (单 pass GPU 处理)")
+        }
+    }
+
+    /// 直通条件: 主开关关 / kernel 失败 / 所有参数都中性
+    var isPassThrough: Bool {
+        if !enabled { return true }
+        if cardEnhanceKernel == nil { return true }
+        return exposure == 0 && blackPoint == 0 && brightness == 0 && gamma == 1.0
+            && contrast == 1.0 && saturation == 1.0 && redGlow == 0 && highlightLift == 0
+    }
+
+    /// 处理一帧, 返回新的 CVPixelBuffer (BGRA) 或 nil (失败/直通时调用方使用原帧)
+    func processFrame(_ inputPB: CVPixelBuffer) -> CVPixelBuffer? {
+        if isPassThrough { return nil }
+        guard let kernel = cardEnhanceKernel else { return nil }
+
+        let width = CVPixelBufferGetWidth(inputPB)
+        let height = CVPixelBufferGetHeight(inputPB)
+        guard width > 0 && height > 0 else { return nil }
+
+        if pixelBufferPool == nil || poolWidth != width || poolHeight != height {
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                kCVPixelBufferMetalCompatibilityKey: true,
+            ]
+            let poolAttrs: [CFString: Any] = [kCVPixelBufferPoolMinimumBufferCountKey: 4]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(kCFAllocatorDefault,
+                                    poolAttrs as CFDictionary,
+                                    attrs as CFDictionary, &pool)
+            pixelBufferPool = pool
+            poolWidth = width
+            poolHeight = height
+        }
+        guard let pool = pixelBufferPool else { return nil }
+
+        let ciImage = CIImage(cvPixelBuffer: inputPB)
+
+        let outImage = kernel.apply(
+            extent: ciImage.extent,
+            arguments: [ciImage, exposure, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift]
+        )
+        guard let result = outImage else { return nil }
+
+        var outputPB: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outputPB)
+        guard let out = outputPB else { return nil }
+        ciContext.render(result, to: out)
+        return out
+    }
+}
+
 // MARK: - 帧节流器（整除跳帧算法：确保帧时间戳等差分布）
 final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     weak var inner: RTCVideoCapturerDelegate?           // 🔥 推送输出（受后端fps控制）
     weak var previewDelegate: RTCVideoCapturerDelegate? // 🔥 预览输出（固定60fps）
-    
+    var videoFilter: VideoFilterPipeline?               // ⭐ 视频后处理滤镜 (CIColorKernel, GPU)
+
+    /// 应用后处理滤镜 — 直通模式时返回原 buffer (零开销)
+    /// WebRTC RTCCVPixelBuffer 包装 NV12, CIFilter 处理后输出 BGRA, 编码器接受 BGRA 直接编 H264
+    private func applyFilter(_ frame: RTCVideoFrame) -> RTCVideoFrame {
+        guard let filter = videoFilter, !filter.isPassThrough else { return frame }
+        guard let cvBuffer = (frame.buffer as? RTCCVPixelBuffer)?.pixelBuffer else { return frame }
+        guard let processed = filter.processFrame(cvBuffer) else { return frame }
+        let newBuffer = RTCCVPixelBuffer(pixelBuffer: processed)
+        return RTCVideoFrame(
+            buffer: newBuffer,
+            rotation: frame.rotation,
+            timeStampNs: frame.timeStampNs
+        )
+    }
+
     // 🔥 推送FPS硬上限
     private let maxAllowedFps: Int = 60
     
@@ -341,29 +602,29 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     private func sendFrameWithArithmeticTimestamp(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
         sentCounter += 1
         diagPushCount += 1  // 🔥 诊断：实际喂给 WebRTC 的帧数
-        
+
         // 🔥 方案B：90k RTP 时钟 → 纳秒
-        // timestampNs = rtp90kTimestamp * 1_000_000_000 / 90_000
-        // 简化：timestampNs = rtp90kTimestamp * 100_000 / 9
         let timestampNs = rtp90kTimestamp * 1_000_000_000 / rtpClockRate
-        
-        // 步进 90k 时钟（每帧固定步进，如60fps每帧+1500）
         rtp90kTimestamp += rtp90kStep
-        
+
+        // ⭐ 滤镜后处理 (推流路径走滤镜, 预览路径直通省热)
+        let filtered = applyFilter(videoFrame)
         let fixedFrame = RTCVideoFrame(
-            buffer: videoFrame.buffer,
+            buffer: filtered.buffer,
             rotation: ._0,
-            timeStampNs: timestampNs  // 🔥 使用 90k 转换的纳秒时间戳
+            timeStampNs: timestampNs
         )
         inner?.capturer(capturer, didCapture: fixedFrame)
     }
-    
+
     // 🔥 发送到推送（保留原始时间戳，备用）
     private func sendFrame(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
         sentCounter += 1
-        
+
+        // ⭐ 滤镜后处理
+        let filtered = applyFilter(videoFrame)
         let fixedFrame = RTCVideoFrame(
-            buffer: videoFrame.buffer,
+            buffer: filtered.buffer,
             rotation: ._0,
             timeStampNs: videoFrame.timeStampNs
         )
@@ -494,6 +755,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     private var localVideoTrack: RTCVideoTrack?
     private var frameThrottler: FrameThrottler?
+
+    // ⭐ 视频后处理滤镜 (单 Metal CIColorKernel)
+    let videoFilter = VideoFilterPipeline()
     
     
     // MARK: - 动态档位计算
@@ -902,6 +1166,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 throttler.previewDelegate = self.previewVideoSource  // 🔥 预览输出（固定60fps）
                 throttler.captureFps = currentCaptureFPS             // 🔥 设置采集FPS
                 throttler.targetSendFps = targetOutputFPS            // 🔥 设置推送FPS
+                throttler.videoFilter = self.videoFilter             // ⭐ 挂上视频后处理滤镜
                 frameThrottler = throttler
                 print("🔄 [enableAverageThrottling] 创建新节流器，采集=\(currentCaptureFPS)fps，推送=\(targetOutputFPS)fps，预览=60fps")
             }
@@ -1140,7 +1405,25 @@ final class WebRTCManager: NSObject, ObservableObject {
             } else {
                 print("⚠️ ptype=focus 缺少值，忽略")
             }
-        
+
+        // ⭐ v3 滤镜直推 — STOMP 一跳到位, PC sendConfigUpdate("brightness", {"brightness": v}) 直接到这里
+        case "brightness", "contrast", "saturation", "sharpness", "redBoost",
+             "blackPoint", "redGlow", "highlightLift", "gamma", "exposure", "filterEnabled":
+            videoFilter.applyAll(
+                brightness:    cfg.brightness,
+                contrast:      cfg.contrast,
+                saturation:    cfg.saturation,
+                sharpness:     cfg.sharpness,
+                redBoost:      cfg.redBoost,
+                blackPoint:    cfg.blackPoint,
+                redGlow:       cfg.redGlow,
+                highlightLift: cfg.highlightLift,
+                gamma:         cfg.gamma,
+                exposure:      cfg.exposure,
+                enabled:       cfg.filterEnabled,
+                source:        "stomp:\(cfg.ptype)"
+            )
+
         default:
             print("⚠️ 未知 ptype=\(cfg.ptype)，忽略该项")
         }
@@ -1439,6 +1722,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         throttler.previewDelegate = self.previewVideoSource  // 🔥 预览输出（固定60fps）
                         throttler.captureFps = self.currentCaptureFPS   // 🔥 设置采集FPS（整除跳帧）
                         throttler.targetSendFps = self.targetOutputFPS  // 🔥 设置推送FPS
+                        throttler.videoFilter = self.videoFilter        // ⭐ 挂上视频后处理滤镜
                         throttler.fpsReportHandler = { [weak self] cap, snd in
                                 self?.currentCaptureFps = cap
                                 self?.currentSendFps = snd
@@ -2157,7 +2441,33 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: .setFpsRequested,
                 object: nil
         )
-        
+
+        // ⭐ 监听视频滤镜热更新 (登录下发 / STOMP 推送 / UI 滑块)
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onVideoFilterUpdated(_:)),
+                name: NSNotification.Name("videoFilterUpdated"),
+                object: nil
+        )
+    }
+
+    /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
+    @objc private func onVideoFilterUpdated(_ notification: Notification) {
+        guard let info = notification.userInfo else { return }
+        videoFilter.applyAll(
+            brightness:    (info["brightness"]    as? NSNumber)?.floatValue,
+            contrast:      (info["contrast"]      as? NSNumber)?.floatValue,
+            saturation:    (info["saturation"]    as? NSNumber)?.floatValue,
+            sharpness:     (info["sharpness"]     as? NSNumber)?.floatValue,
+            redBoost:      (info["redBoost"]      as? NSNumber)?.floatValue,
+            blackPoint:    (info["blackPoint"]    as? NSNumber)?.floatValue,
+            redGlow:       (info["redGlow"]       as? NSNumber)?.floatValue,
+            highlightLift: (info["highlightLift"] as? NSNumber)?.floatValue,
+            gamma:         (info["gamma"]         as? NSNumber)?.floatValue,
+            exposure:      (info["exposure"]      as? NSNumber)?.floatValue,
+            enabled:       info["enabled"] as? Bool,
+            source:        (info["source"] as? String) ?? "notification"
+        )
     }
     
     // MARK: - 计算快门速度上限
@@ -2511,6 +2821,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             throttler.previewDelegate = previewVideoSource   // 🔥 预览输出（固定60fps）
             throttler.captureFps = currentCaptureFPS         // 🔥 设置采集FPS（整除跳帧）
             throttler.targetSendFps = self.targetOutputFPS   // 🔥 设置推送FPS
+            throttler.videoFilter = self.videoFilter         // ⭐ 挂上视频后处理滤镜
             throttler.fpsReportHandler = { [weak self] cap, snd in
                     self?.currentCaptureFps = cap
                     self?.currentSendFps = snd

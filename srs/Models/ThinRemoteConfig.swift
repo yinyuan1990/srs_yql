@@ -22,13 +22,22 @@ struct ThinRemoteConfig: Codable {
     var bitrate: Int?
     var angle: Int?
     var focus: Float?        // 对焦距离 0.0~1.0 (0.0=近处，1.0=无穷远)
-    var brightness: Float?   // 亮度 -0.02~0.02 ⚠️ 超出范围会被限制
+    var brightness: Float?   // 亮度 (v3.1: 中调曲线, -1~1)
     var saturation: Float?   // 饱和度 0.0~2.0
     var contrast: Float?     // 对比度 0.0~4.0
-    
+    // ⭐ v3 滤镜新字段 — STOMP 直推路径用 (PC sendConfigUpdate)
+    var sharpness: Float?       // 占位兼容, kernel 不读
+    var redBoost: Float?        // 旧字段, 自动映射到 redGlow
+    var blackPoint: Float?      // 黑场压死
+    var redGlow: Float?         // 红色发光强度
+    var highlightLift: Float?   // 高光提亮
+    var gamma: Float?           // 伽马 0.5..2.0
+    var exposure: Float?        // 曝光 -3..+3 stops
+    var filterEnabled: Bool?    // 滤镜主开关
+
     let lastUpdated: String?
     let updatedBy: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case deviceId = "device_id"
         case type
@@ -44,6 +53,14 @@ struct ThinRemoteConfig: Codable {
         case brightness
         case saturation
         case contrast
+        case sharpness
+        case redBoost
+        case blackPoint
+        case redGlow
+        case highlightLift
+        case gamma
+        case exposure
+        case filterEnabled
         case lastUpdated = "last_updated"
         case updatedBy = "updated_by"
     }
@@ -89,13 +106,21 @@ struct ThinRemoteConfig: Codable {
         brightness = try container.decodeIfPresent(Float.self, forKey: .brightness)
         saturation = try container.decodeIfPresent(Float.self, forKey: .saturation)
         contrast = try container.decodeIfPresent(Float.self, forKey: .contrast)
+        sharpness = try container.decodeIfPresent(Float.self, forKey: .sharpness)
+        redBoost = try container.decodeIfPresent(Float.self, forKey: .redBoost)
+        blackPoint = try container.decodeIfPresent(Float.self, forKey: .blackPoint)
+        redGlow = try container.decodeIfPresent(Float.self, forKey: .redGlow)
+        highlightLift = try container.decodeIfPresent(Float.self, forKey: .highlightLift)
+        gamma = try container.decodeIfPresent(Float.self, forKey: .gamma)
+        exposure = try container.decodeIfPresent(Float.self, forKey: .exposure)
+        filterEnabled = try container.decodeIfPresent(Bool.self, forKey: .filterEnabled)
         lastUpdated = try container.decodeIfPresent(String.self, forKey: .lastUpdated)
         updatedBy = try container.decodeIfPresent(String.self, forKey: .updatedBy)
     }
-    
+
     // 初始化方法，用于创建更新请求
     init(type: String, zoom: CGFloat, ptype: String, direction: String = "-1", exposureBias: Float? = nil
-         ,fps: Int? = nil, cjfps: Int? = nil, bitrate: Int? = nil, angle: Int? = nil, focus: Float? = nil, 
+         ,fps: Int? = nil, cjfps: Int? = nil, bitrate: Int? = nil, angle: Int? = nil, focus: Float? = nil,
          brightness: Float? = nil, saturation: Float? = nil, contrast: Float? = nil) {
         self.deviceId = nil
         self.type = type
@@ -111,6 +136,14 @@ struct ThinRemoteConfig: Codable {
         self.brightness = brightness
         self.saturation = saturation
         self.contrast = contrast
+        self.sharpness = nil
+        self.redBoost = nil
+        self.blackPoint = nil
+        self.redGlow = nil
+        self.highlightLift = nil
+        self.gamma = nil
+        self.exposure = nil
+        self.filterEnabled = nil
         self.lastUpdated = nil
         self.updatedBy = nil
     }
