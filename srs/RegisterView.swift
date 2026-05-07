@@ -27,6 +27,16 @@ struct DeviceRegisterResponse: Codable {
     let message: String
 }
 
+// ⭐ 注册错误 — 当后端返回 "设备已注册" 类错误时, 会附带 existingUsername / existingNickname
+//   iOS 检测到这两个字段就引导用户用现有账号登录, 避免"登录失败 → 注册失败"死循环
+struct DeviceRegisterError: Error, LocalizedError {
+    let message: String
+    let existingUsername: String?
+    let existingNickname: String?
+    var errorDescription: String? { message }
+    var hasRecoveryUser: Bool { (existingUsername ?? "").isEmpty == false }
+}
+
 // 注册数据（用于界面显示）
 struct RegisterData {
     let username: String
@@ -56,6 +66,12 @@ struct RegisterView: View {
     @State private var alertMessage = ""
     @State private var registerResult: RegisterData?
     @State private var showSuccessView = false
+
+    // ⭐ 死循环恢复 — 当注册返回 "设备已注册" 且后端给出 existingUsername 时弹此对话框,
+    //   一键回到登录页用现有账号登录 (用户只需输密码即可).
+    @State private var showRecoveryAlert: Bool = false
+    @State private var recoveryUsername: String = ""
+    @State private var recoveryNickname: String = ""
     
     // 用户输入
     @State private var username = ""
@@ -280,6 +296,18 @@ struct RegisterView: View {
         } message: {
             Text(alertMessage)
         }
+        // ⭐ 死循环恢复对话框 — 此设备已注册过账号, 引导用户用现有账号登录
+        .alert("此设备已注册账号", isPresented: $showRecoveryAlert) {
+            Button("用此账号登录") {
+                let displayUser = recoveryUsername
+                onRegisterSuccess?(displayUser, "")  // 密码留空, 用户在登录页手动输入
+                dismiss()
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            let nameHint = recoveryNickname.isEmpty ? "" : "（昵称: \(recoveryNickname)）"
+            Text("此设备已绑定账号「\(recoveryUsername)」\(nameHint)\n\n请用该账号登录, 然后输入对应密码。\n如已忘记密码, 请联系客服解绑此设备。")
+        }
         .sheet(isPresented: $showUserAgreement) {
             LocalWebView(fileName: "user_agreement", title: "用户协议")
         }
@@ -487,7 +515,15 @@ struct RegisterView: View {
                     
                 case .failure(let error):
                     print("❌ 注册失败: \(error.localizedDescription)")
-                    showAlert(message: "注册失败：\(error.localizedDescription)")
+                    // ⭐ 死循环修复: 如果后端给出已存在的账号, 引导用户用此账号登录
+                    if let regErr = error as? DeviceRegisterError, regErr.hasRecoveryUser {
+                        recoveryUsername = regErr.existingUsername ?? ""
+                        recoveryNickname = regErr.existingNickname ?? ""
+                        showRecoveryAlert = true
+                        print("🔁 [Recovery] 检测到设备已注册账号: \(recoveryUsername), 弹恢复对话框")
+                    } else {
+                        showAlert(message: "注册失败：\(error.localizedDescription)")
+                    }
                 }
             }
         }
@@ -562,9 +598,16 @@ struct RegisterView: View {
             guard (200...299).contains(status), let data = data else {
                 // 解析错误信息
                 if let data = data,
-                   let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let errorMsg = errorJson["error"] as? String {
-                    return completion(.failure(NSError(domain: errorMsg, code: status)))
+                   let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let errorMsg = (errorJson["error"] as? String) ?? "HTTP \(status)"
+                    // ⭐ 死循环恢复字段 (后端在 "设备已注册" 错误时会附带)
+                    let existingUser = errorJson["existingUsername"] as? String
+                    let existingNick = errorJson["existingNickname"] as? String
+                    return completion(.failure(DeviceRegisterError(
+                        message: errorMsg,
+                        existingUsername: existingUser,
+                        existingNickname: existingNick
+                    )))
                 }
                 return completion(.failure(NSError(domain: "HTTP \(status)", code: status)))
             }
