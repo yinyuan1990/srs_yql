@@ -971,9 +971,11 @@ struct ContentView: View {
             }
             Button("取消", role: .cancel) {
                 showTrialEndAlert = false
-                // 返回首页
-                appState.navigateToHome()
-                }
+                // ⭐ 跳到登录页让用户重新登录 (清 token 防止旧账号 auto-skip)
+                UserDefaults.standard.set("", forKey: "jwt_token")
+                UserDefaults.standard.set("", forKey: "permanent_token")
+                appState.navigateToMonitorLogin()
+            }
         } message: {
             Text(trialEndMessage.isEmpty ? "试用已结束，请扫码绑定设备后继续使用" : trialEndMessage)
         }
