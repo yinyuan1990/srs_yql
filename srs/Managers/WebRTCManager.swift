@@ -82,8 +82,10 @@ final class VideoFilterPipeline: ObservableObject {
     // ===== 实际生效参数（kernel 读取）=====
 
     /// 黑场压死: 输入像素先减去 blackPoint 再归一化, 把暗部彻底推到 0
-    /// 0 = 不动, 0.04 = 暗部下沉 4%, 卡牌黑底/黑桃黑梅花更黑
-    @Published var blackPoint: Float = VideoFilterPipeline.loadDefault(.blackPoint, fallback: 0.04) {
+    /// 0 = 不动, 0.10 = 暗部下沉 10% (压死 H.264 limited-range 的 16/255≈6% 伪黑)
+    /// 默认 0.10 是为了对抗 limited-range YUV 编码的"黑色 = 0.063 灰" 现象,
+    /// 让 ♠♣ 黑牌真正黑下去, 不再灰蒙蒙. 对中调影响极小 (<0.5% 失真).
+    @Published var blackPoint: Float = VideoFilterPipeline.loadDefault(.blackPoint, fallback: 0.10) {
         didSet { saveDefault(.blackPoint, blackPoint); if oldValue != blackPoint { logChange("blackPoint", blackPoint) } }
     }
     /// 中调亮度: 保端点曲线 rgb + b·rgb·(1-rgb), -1..+1
