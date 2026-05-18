@@ -239,12 +239,9 @@ struct MonitorLoginView: View {
                         
                         // 注册按钮（样式与登录按钮一致）
                         Button(action: {
-                            if hasLocalAccount {
-                                // 已有本地账号，弹出提示
-                                showAlreadyBoundAlert = true
-                            } else {
-                                showRegisterView = true
-                            }
+                            // 不依赖本地缓存判断，直接进注册页
+                            // RegisterView 内部会调 check-device 做真正的设备检查
+                            showRegisterView = true
                         }) {
                             Text("注册")
                                 .font(.system(size: 18, weight: .semibold))

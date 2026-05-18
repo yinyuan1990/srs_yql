@@ -176,7 +176,7 @@ struct StreamPreset {
             audioBitrate: 128_000,
             sampleRate: 44100,
             keyframeIntervalSec: 1,
-            h264ProfileLevel: "H264_Baseline_AutoLevel"
+            h264ProfileLevel: "H264_High_AutoLevel"
         ),
         .high: .init(
             width: 1920, height: 1080,
@@ -185,7 +185,7 @@ struct StreamPreset {
             audioBitrate: 128_000,
             sampleRate: 44100,
             keyframeIntervalSec: 1,
-            h264ProfileLevel: "H264_Baseline_AutoLevel"
+            h264ProfileLevel: "H264_High_AutoLevel"
         )
     ]
 }

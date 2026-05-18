@@ -467,6 +467,46 @@ struct RegisterView: View {
         
         isRegistering = true
         
+        // 先做设备检查，避免"账号已删但设备仍绑定"的死循环
+        Task {
+            do {
+                let checkResult = try await checkDeviceStatus()
+                await MainActor.run {
+                    if checkResult.exists && checkResult.userType == "ios" {
+                        // 设备已绑定 iOS 账号，但用户来这里说明登录失败了
+                        // → 账号被删除但绑定未清，死循环状态
+                        isRegistering = false
+                        showAlert(message: "此设备已绑定的账号已被删除，设备绑定仍存在。\n\n请联系管理员在后台解除此设备绑定后，再重新注册。")
+                        return
+                    }
+                    // 设备未绑定，正常走注册
+                    proceedWithRegister()
+                }
+            } catch {
+                // check-device 失败不阻断，继续注册（后端会兜底）
+                await MainActor.run { proceedWithRegister() }
+            }
+        }
+    }
+    
+    // check-device API
+    private struct CheckDeviceResponse: Decodable {
+        let exists: Bool
+        let userType: String?
+    }
+    
+    private func checkDeviceStatus() async throws -> CheckDeviceResponse {
+        let url = URL(string: "\(APIConfig.shared.baseURL)/api/auth/check-device")!
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["deviceId": deviceId])
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONDecoder().decode(CheckDeviceResponse.self, from: data)
+    }
+    
+    // 实际注册逻辑（check-device 通过后调用）
+    private func proceedWithRegister() {
         // 🔥 直接使用用户输入的账号（9-12位，不加前缀）
         let finalUsername = username.trimmingCharacters(in: .whitespaces)
         // 🔥 昵称自动生成为账号前8位
@@ -527,7 +567,7 @@ struct RegisterView: View {
                 }
             }
         }
-    }
+    }   // end proceedWithRegister
     
     // 验证输入
     private func validateInput() -> Bool {

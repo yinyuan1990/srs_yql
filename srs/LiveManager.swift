@@ -284,7 +284,7 @@ final class LiveManager: ObservableObject {
                 var previewV = VideoCodecSettings(
                     videoSize: CGSize(width: 1280, height: 720),
                     bitRate: 800_000,
-                    profileLevel: "H264_Baseline_AutoLevel",
+                    profileLevel: "H264_High_AutoLevel",
                     maxKeyFrameIntervalDuration: 1,
                     dataRateLimits: nil,
                     isHardwareEncoderEnabled: false

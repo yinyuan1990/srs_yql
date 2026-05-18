@@ -197,7 +197,7 @@ class ConfigManager: ObservableObject {
             type: StreamProfile.standard.rawValue,
             zoom: 1.0,  // 🔥 默认标准焦距
             ptype: "standard",
-            focus: 0.6  // 🔥 默认对焦距离（与后端默认一致）
+            focus: 0.0  // 超焦距默认值：远近都清楚
         )
     }
     

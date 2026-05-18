@@ -231,7 +231,7 @@ final class VideoFilterPipeline: ObservableObject {
     init() {
         let device = MTLCreateSystemDefaultDevice()
         let options: [CIContextOption: Any] = [
-            .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
+            .workingColorSpace: CGColorSpace(name: CGColorSpace.itur_709) as Any,  // BT.709 视频色域，替代 sRGB 避免颜色偏淡
             .cacheIntermediates: false,
             .useSoftwareRenderer: false,
         ]
@@ -885,6 +885,21 @@ final class WebRTCManager: NSObject, ObservableObject {
         if adaptiveFpsEnabled {
             adaptiveFps = clamped
         }
+        
+        // 同步相机采集帧率（服务器下发fps时）
+        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+            let dev = input.device
+            let captureFps = max(clamped, minCaptureFps)
+            if currentCaptureFPS != captureFps {
+                lockFrameRate(dev: dev, fps: captureFps)
+                currentCaptureFPS = captureFps
+                print("🎯 [FPS同步] 推流:\(clamped)fps → 采集:\(captureFps)fps ✅已调整 (后端下发\(fps)/4=\(actualTargetFps))")
+            } else {
+                print("🎯 [FPS同步] 推流:\(clamped)fps → 采集:\(captureFps)fps（无变化）")
+            }
+        } else {
+            print("🎯 [FPS同步] 推流:\(clamped)fps → 采集:未知（capturer未就绪，将在启动后同步）")
+        }
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1019,7 +1034,22 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 1. 更新节流器
         frameThrottler?.targetSendFps = fps
         
-        // 2. 更新WebRTC编码参数
+        // 2. 同步相机采集帧率（避免 ISP 全速空跑）
+        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+            let dev = input.device
+            let captureFps = max(fps, minCaptureFps)
+            if currentCaptureFPS != captureFps {
+                lockFrameRate(dev: dev, fps: captureFps)
+                currentCaptureFPS = captureFps
+                print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
+            } else {
+                print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:\(captureFps)fps（无变化）")
+            }
+        } else {
+            print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:未知（capturer未就绪）")
+        }
+        
+        // 3. 更新WebRTC编码参数
         if let sender = videoSender {
             let params = sender.parameters
             if !params.encodings.isEmpty {
@@ -1028,10 +1058,9 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
         
-        // 3. 通知PC端（避免重复发送）
+        // 4. 通知PC端（避免重复发送）
         if fps != lastNotifiedFps {
             lastNotifiedFps = fps
-            // 🔥 发送消息到服务器，PC端会收到并调整缓存
             WebSocketManager.shared.sendFpsUpdate(fps: fps)
         }
         
@@ -1127,13 +1156,27 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 1. 更新节流器
         frameThrottler?.targetSendFps = fps
         
-        // 2. 更新 WebRTC 编码参数
+        // 2. 同步相机采集帧率（避免相机 ISP 全速采集浪费功耗）
+        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+            let dev = input.device
+            let captureFps = max(fps, minCaptureFps)
+            if currentCaptureFPS != captureFps {
+                lockFrameRate(dev: dev, fps: captureFps)
+                currentCaptureFPS = captureFps
+                print("🎯 [FPS同步] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
+            } else {
+                print("🎯 [FPS同步] 推流:\(fps)fps → 采集:\(captureFps)fps（无变化）")
+            }
+        } else {
+            print("🎯 [FPS同步] 推流:\(fps)fps → 采集:未知（capturer未就绪）")
+        }
+        
+        // 3. 更新 WebRTC 编码参数
         if let sender = videoSender {
             let params = sender.parameters
             if !params.encodings.isEmpty {
                 params.encodings[0].maxFramerate = NSNumber(value: fps)
                 
-                // 如果提供了码率，同时更新码率
                 if bitrate > 0 {
                     params.encodings[0].maxBitrateBps = NSNumber(value: bitrate)
                 }
@@ -1142,7 +1185,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
         
-        // 3. 更新 lastNotifiedFps 避免本地自适应再次发送
+        // 4. 更新 lastNotifiedFps 避免本地自适应再次发送
         lastNotifiedFps = fps
     }
     
@@ -1203,57 +1246,25 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("⚠️ [applyShutterSpeedChange] device 不存在")
             return
         }
-        
-        // 🔥 直接使用 cjfpsValue（后端下发 60-600）
-        let targetShutterSpeed = cjfpsValue
-        
         do {
             try device.lockForConfiguration()
-            
-            if device.isExposureModeSupported(.custom) {
-                let duration = CMTime(value: 1, timescale: CMTimeScale(targetShutterSpeed))
-                
-                let minDuration = device.activeFormat.minExposureDuration
-                let maxDuration = device.activeFormat.maxExposureDuration
-                
-                let safeDuration: CMTime
-                let actualShutterSpeed: Int
-                if duration < minDuration {
-                    safeDuration = minDuration
-                    actualShutterSpeed = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                    print("📸 快门调整: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s (硬件最快)")
-                } else if duration > maxDuration {
-                    safeDuration = maxDuration
-                    actualShutterSpeed = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                    print("📸 快门调整: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s (硬件最慢)")
-                } else {
-                    safeDuration = duration
-                    actualShutterSpeed = targetShutterSpeed
-                    print("📸 快门调整: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s")
-                }
-                
-                // 🔥 ISO 固定为合理值，亮度由 cjfps（快门速度）控制
-                // cjfps 越大（快门越快）→ 越暗
-                // cjfps 越小（快门越慢）→ 越亮
-                let minISO = device.activeFormat.minISO
-                let maxISO = device.activeFormat.maxISO
-                // 使用 1/3 位置的 ISO，提供正常亮度
-                let fixedISO = minISO + (maxISO - minISO) / 3
-                device.setExposureModeCustom(duration: safeDuration, iso: fixedISO, completionHandler: nil)
-                print("📸 曝光设置: 快门=1/\(cjfpsValue)s, ISO=\(fixedISO)(固定,范围\(minISO)-\(maxISO))")
-                
-                // 🔥🔥 关键：显式锁定帧率，防止手动曝光后帧率被自动降低
-                // 直接使用 currentCaptureFPS（采集时已正确设置）
-                let targetFps = currentCaptureFPS
-                if targetFps > 0 {
-                    let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-                    device.activeVideoMinFrameDuration = frameDuration
-                    device.activeVideoMaxFrameDuration = frameDuration
-                    print("📹 帧率锁定: \(targetFps)fps")
-                }
+
+            // Step 1：锁帧率 + 快门上限 = 1/cjfps（快门第一）
+            let targetFps = max(currentCaptureFPS, 15)
+            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
+            device.activeVideoMinFrameDuration = frameDuration
+            device.activeVideoMaxFrameDuration = frameDuration
+            let shutterDuration = CMTime(value: 1, timescale: CMTimeScale(cjfpsValue))
+            let clampedShutter = CMTimeMinimum(shutterDuration, frameDuration)
+            device.activeMaxExposureDuration = clampedShutter
+
+            // Step 2：自动曝光 — iOS anti-banding 防频闪 + 自动 ISO 维持亮度（防频闪第二，亮度不牺牲）
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
             }
-            
+
             device.unlockForConfiguration()
+            print("📸 [快门] cjfps=1/\(cjfpsValue)s, 锁帧:\(targetFps)fps, 曝光上限:1/\(Int(1.0/CMTimeGetSeconds(clampedShutter)))s")
         } catch {
             print("❌ [快门调整] 失败: \(error.localizedDescription)")
         }
@@ -2301,7 +2312,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 4. 升降帧后3秒冷却期（防止抖动）
     /// 5. 计数器以"秒"为单位，每秒只更新一次
     
-    private let minAdaptiveFps: Int = 10     // 🔥 极端弱网最低10fps（用户要求）
+    private let minAdaptiveFps: Int = 15     // 최저 push fps (약한 네트워크)
+    private let minCaptureFps: Int = 15      // 최저 camera capture fps (발열/화면 끊김 균형)
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
     
     /// 丢包率阈值（基于3秒移动平均，比瞬时更稳定）
@@ -2369,7 +2381,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     private let GOOD_HOLD_SEC = 15
 
     // 手动对焦距离（默认0.6，与后端默认值一致）
-    @Published var focusDistance: Float = 0.6  // 0.0~1.0
+    @Published var focusDistance: Float = 0.0  // 0.0~1.0，默认超焦距（远近都清楚）
     private var pendingFocus: Float?
     private var userHasManuallyAdjustedFocus = false  // ✅ 标记用户是否手动调整过对焦
     private var savedUserFocusDistance: Float?  // 🔥 保存用户设置的对焦距离（用于自动对焦后恢复）
@@ -3019,7 +3031,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                     if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
                 }
                 dict["packetization-mode"] = "1"
-                dict["profile-level-id"] = dict["profile-level-id"] ?? "42e01f"
+                dict["profile-level-id"] = "640028"   // High 4.0 (支持 1080p，取代 Baseline 3.1)
                 dict["level-asymmetry-allowed"] = "1"
                 
                 // 🔒 极限CBR：按FPS比例调整码率，min=max强制恒定
@@ -3040,7 +3052,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
         if !modified {
-            let appended = "a=fmtp:\(pt) level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            let appended = "a=fmtp:\(pt) level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028"
             if let idx = lines.firstIndex(where: { $0.lowercased().hasPrefix("a=rtpmap:\(pt)") }) {
                 lines.insert(appended, at: idx + 1)
             } else {
@@ -3343,8 +3355,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                         focusValue = bf
                         print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (后端配置)")
                     } else {
-                    focusValue = 0.6  // 默认值（与后端默认一致）
-                    print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (默认值0.6)")
+                    focusValue = 0.0  // 超焦距：景深最大，远近都清楚
+                    print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (默认超焦距)")
                     }
                     
                     device.focusMode = .locked
@@ -3354,54 +3366,19 @@ final class WebRTCManager: NSObject, ObservableObject {
                     }
             }
             
-            // 🔥🔥 快门速度由 cjfps 控制（后端直接下发 60-600）
-            if device.isExposureModeSupported(.custom) {
-                let targetShutterSpeed = cjfpsValue
-                let duration = CMTime(value: 1, timescale: CMTimeScale(targetShutterSpeed))
-                
-                let minDuration = device.activeFormat.minExposureDuration
-                let maxDuration = device.activeFormat.maxExposureDuration
-                
-                let safeDuration: CMTime
-                let actualShutterSpeed: Int
-                if duration < minDuration {
-                    safeDuration = minDuration
-                    actualShutterSpeed = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                    print("📸 快门速度: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s (硬件最快)")
-                } else if duration > maxDuration {
-                    safeDuration = maxDuration
-                    actualShutterSpeed = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                    print("📸 快门速度: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s (硬件最慢)")
-                } else {
-                    safeDuration = duration
-                    actualShutterSpeed = targetShutterSpeed
-                    print("📸 快门速度: cjfps=\(cjfpsValue) → 1/\(actualShutterSpeed)s")
-                }
-                
-                // 🔥 ISO 固定为合理值，亮度由 cjfps（快门速度）控制
-                // cjfps 越大（快门越快）→ 越暗
-                // cjfps 越小（快门越慢）→ 越亮
-                let minISO = device.activeFormat.minISO
-                let maxISO = device.activeFormat.maxISO
-                // 使用 1/3 位置的 ISO，提供正常亮度
-                let fixedISO = minISO + (maxISO - minISO) / 3
-                device.setExposureModeCustom(duration: safeDuration, iso: fixedISO, completionHandler: nil)
-                print("📸 曝光设置: 快门=1/\(cjfpsValue)s, ISO=\(fixedISO)(固定,范围\(minISO)-\(maxISO))")
-                
-                // 🔥🔥 关键：显式锁定帧率，防止手动曝光后帧率被自动降低
-                // 直接使用 currentCaptureFPS（在 startCapture 前已正确设置）
-                // 不从 activeFormat 读取，因为 startCapture 是异步的，格式可能还没更新
-                let targetFps = currentCaptureFPS
-                if targetFps > 0 {
-                    let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-                    device.activeVideoMinFrameDuration = frameDuration
-                    device.activeVideoMaxFrameDuration = frameDuration
-                    print("📹 帧率锁定: \(targetFps)fps")
-                }
-            } else if device.isExposureModeSupported(.continuousAutoExposure) {
+            // 快门第一：上限锁 1/cjfps；防频闪第二 + 亮度不牺牲：continuousAutoExposure 自动调 ISO
+            let targetFps2 = max(currentCaptureFPS, 15)
+            let frameDuration2 = CMTime(value: 1, timescale: CMTimeScale(targetFps2))
+            device.activeVideoMinFrameDuration = frameDuration2
+            device.activeVideoMaxFrameDuration = frameDuration2
+            let shutterDuration2 = CMTime(value: 1, timescale: CMTimeScale(cjfpsValue))
+            let clampedShutter2 = CMTimeMinimum(shutterDuration2, frameDuration2)
+            device.activeMaxExposureDuration = clampedShutter2
+
+            if device.isExposureModeSupported(.continuousAutoExposure) {
                 device.exposureMode = .continuousAutoExposure
-                print("📸 快门速度: 自动（设备不支持手动快门）")
             }
+            print("📸 [快门] cjfps=1/\(cjfpsValue)s, 锁帧:\(targetFps2)fps, 曝光上限:1/\(Int(1.0/CMTimeGetSeconds(clampedShutter2)))s")
             
             // ✅ 白平衡自动
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
@@ -4221,6 +4198,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
             dev.activeVideoMinFrameDuration = frameDuration
             dev.activeVideoMaxFrameDuration = frameDuration
+            dev.activeMaxExposureDuration = frameDuration  // 同步曝光上限，防止慢快门降帧率
             dev.unlockForConfiguration()
             print("📹 帧率锁定: \(fps)fps (recapture后)")
             
@@ -4244,6 +4222,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     // 保存当前目标码率，用于周期性强制重置
     private var targetBitrateKbps: Int = 2000
     private var bitrateEnforceTimer: Timer?
+    private var iceReconnectTimer: Timer?
     
     func setMaxBitrateKbps(_ kbps: Int) {
         // 记录目标码率
@@ -5301,17 +5280,15 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
                 print("✅ ICE Connection: Completed")
             case .failed:
                 print("❌ ICE Connection: Failed")
-                // ICE 连接失败，停止推流
+                // ICE failed 才真正重连（比 disconnected 更严重）
                 if self.isPublishing {
-                    print("⚠️ [原因] ICE连接失败")
-                    self.stopPublish()
+                    self.scheduleIceReconnect(delay: 2.0, reason: "ICE failed")
                 }
             case .disconnected:
                 print("⚠️ ICE Connection: Disconnected")
-                // 断开连接，停止推流
+                // disconnected 可能是网络抖动，给 WebRTC 8 秒自愈机会再重连
                 if self.isPublishing {
-                    print("⚠️ [原因] ICE断开")
-                    self.stopPublish()
+                    self.scheduleIceReconnect(delay: 8.0, reason: "ICE disconnected")
                 }
             case .closed:
                 print("🔴 ICE Connection: Closed")
@@ -5338,6 +5315,34 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     // DataChannel 打开
     func peerConnection(_ peerConnection: RTCPeerConnection,
                         didOpen dataChannel: RTCDataChannel) {}
+    
+    // MARK: - ICE 重连
+    private func scheduleIceReconnect(delay: TimeInterval, reason: String) {
+        iceReconnectTimer?.invalidate()
+        print("⏳ [ICE] \(reason)，\(delay)秒后检查是否需要重连...")
+        iceReconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self, self.isPublishing else { return }
+            let state = self.pc?.iceConnectionState
+            // 如果还在 disconnected/failed 状态，才真正重连
+            if state == .disconnected || state == .failed || state == .closed {
+                print("🔄 [ICE] 自愈失败，触发重连 (state=\(String(describing: state)))")
+                self.stopPublish()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.reconnectPublish()
+                }
+            } else {
+                print("✅ [ICE] 自愈成功，state=\(String(describing: state))，无需重连")
+            }
+        }
+    }
+    
+    private func reconnectPublish() {
+        guard !isPublishing else { return }
+        print("🔄 [ICE] 自动重新推流...")
+        Task { @MainActor [weak self] in
+            self?.startPublish()
+        }
+    }
 
     // Unified Plan：收到远端轨（拉流时用得到）
     func peerConnection(_ peerConnection: RTCPeerConnection,
@@ -5368,17 +5373,15 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
                 print("✅ PeerConnection State: Connected")
             case .disconnected:
                 print("⚠️ PeerConnection State: Disconnected")
-                // 连接断开，停止推流
+                // disconnected 可能是网络抖动，给 8 秒自愈机会
                 if self.isPublishing {
-                    print("⚠️ [原因] PeerConnection断开")
-                    self.stopPublish()
+                    self.scheduleIceReconnect(delay: 8.0, reason: "PeerConnection disconnected")
                 }
             case .failed:
                 print("❌ PeerConnection State: Failed")
-                // 连接失败，停止推流
+                // failed 立刻重连
                 if self.isPublishing {
-                    print("⚠️ [原因] PeerConnection失败")
-                    self.stopPublish()
+                    self.scheduleIceReconnect(delay: 2.0, reason: "PeerConnection failed")
                 }
             case .closed:
                 print("🔴 PeerConnection State: Closed")
