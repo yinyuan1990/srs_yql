@@ -1240,36 +1240,124 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
     
-    /// 应用快门速度变化
+    /// 将快门速度对齐到防频闪安全值（50Hz/60Hz 整数倍）
+    private func snapToAntiFlicker(_ shutterSpeed: Int) -> Int {
+        let safe50Hz = stride(from: 50, through: 600, by: 50).map { $0 }
+        let safe60Hz = stride(from: 60, through: 600, by: 60).map { $0 }
+        let allSafe = Array(Set(safe50Hz + safe60Hz)).sorted()
+        let nearest = allSafe.min(by: { abs($0 - shutterSpeed) < abs($1 - shutterSpeed) }) ?? shutterSpeed
+        return nearest
+    }
+
+    /// 应用快门速度变化 — 快门优先模式（精确锁定快门 + 自动 ISO 闭环）
     private func applyShutterSpeedChange() {
         guard let device = getCurrentCaptureDevice() else {
             print("⚠️ [applyShutterSpeedChange] device 不存在")
             return
         }
+
+        let snappedShutter = snapToAntiFlicker(cjfpsValue)
+
         do {
             try device.lockForConfiguration()
 
-            // Step 1：锁帧率 + 快门上限 = 1/cjfps（快门第一）
-            let targetFps = max(currentCaptureFPS, 15)
-            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-            device.activeVideoMinFrameDuration = frameDuration
-            device.activeVideoMaxFrameDuration = frameDuration
-            let shutterDuration = CMTime(value: 1, timescale: CMTimeScale(cjfpsValue))
-            let clampedShutter = CMTimeMinimum(shutterDuration, frameDuration)
-            device.activeMaxExposureDuration = clampedShutter
+            if device.isExposureModeSupported(.custom) {
+                let duration = CMTime(value: 1, timescale: CMTimeScale(snappedShutter))
+                let minDuration = device.activeFormat.minExposureDuration
+                let maxDuration = device.activeFormat.maxExposureDuration
 
-            // Step 2：自动曝光 — iOS anti-banding 防频闪 + 自动 ISO 维持亮度（防频闪第二，亮度不牺牲）
-            if device.isExposureModeSupported(.continuousAutoExposure) {
-                device.exposureMode = .continuousAutoExposure
+                let safeDuration: CMTime
+                let actualShutter: Int
+                if duration < minDuration {
+                    safeDuration = minDuration
+                    actualShutter = Int(1.0 / CMTimeGetSeconds(safeDuration))
+                } else if duration > maxDuration {
+                    safeDuration = maxDuration
+                    actualShutter = Int(1.0 / CMTimeGetSeconds(safeDuration))
+                } else {
+                    safeDuration = duration
+                    actualShutter = snappedShutter
+                }
+
+                // ISO: 闭环开启时保留当前值，否则用中位
+                let minISO = device.activeFormat.minISO
+                let maxISO = device.activeFormat.maxISO
+                let fixedISO: Float
+                if autoIsoEnabled {
+                    fixedISO = device.iso
+                } else {
+                    fixedISO = minISO + (maxISO - minISO) / 2
+                }
+
+                device.setExposureModeCustom(duration: safeDuration, iso: fixedISO, completionHandler: nil)
+
+                // 锁帧率，防止手动曝光后帧率被降低
+                let targetFps = max(currentCaptureFPS, 15)
+                let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
+                device.activeVideoMinFrameDuration = frameDuration
+                device.activeVideoMaxFrameDuration = frameDuration
+
+                print("📸 [快门优先] 快门=1/\(actualShutter)s(snap:\(cjfpsValue)→\(snappedShutter)), ISO=\(Int(fixedISO))[\(autoIsoEnabled ? "闭环" : "中位")], 帧率=\(targetFps)fps")
             }
 
             device.unlockForConfiguration()
-            print("📸 [快门] cjfps=1/\(cjfpsValue)s, 锁帧:\(targetFps)fps, 曝光上限:1/\(Int(1.0/CMTimeGetSeconds(clampedShutter)))s")
         } catch {
             print("❌ [快门调整] 失败: \(error.localizedDescription)")
         }
+
+        if autoIsoEnabled { startAutoIsoLoop() }
     }
-    
+
+    // MARK: - 自动 ISO 闭环 (S 档: 快门固定, ISO 跟随光线)
+
+    private func startAutoIsoLoop() {
+        stopAutoIsoLoop()
+        print("🔄 [AutoISO] 启动闭环 ISO 调整 (1Hz, 快门固定 ISO 跟随)")
+        DispatchQueue.main.async { [weak self] in
+            self?.autoIsoTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.adjustIsoTowardsTarget()
+            }
+        }
+    }
+
+    private func stopAutoIsoLoop() {
+        DispatchQueue.main.async { [weak self] in
+            self?.autoIsoTimer?.invalidate()
+            self?.autoIsoTimer = nil
+        }
+    }
+
+    private func adjustIsoTowardsTarget() {
+        guard autoIsoEnabled else { return }
+        guard let device = getCurrentCaptureDevice() else { return }
+
+        let offset = device.exposureTargetOffset
+        if abs(offset) < 0.3 { return }
+
+        let currentISO = device.iso
+        let factor = pow(2.0, Double(offset) * 0.5)
+        let newISO = Float(Double(currentISO) * factor)
+
+        let minISO = device.activeFormat.minISO
+        let maxISO = device.activeFormat.maxISO
+        let clampedISO = max(minISO, min(maxISO, newISO))
+
+        if abs(clampedISO - currentISO) < (maxISO - minISO) * 0.05 { return }
+
+        do {
+            try device.lockForConfiguration()
+            device.setExposureModeCustom(
+                duration: device.exposureDuration,
+                iso: clampedISO,
+                completionHandler: nil
+            )
+            device.unlockForConfiguration()
+            print("🔄 [AutoISO] EV=\(String(format: "%+.2f", offset)), ISO: \(Int(currentISO)) → \(Int(clampedISO))")
+        } catch {
+            print("❌ [AutoISO] 调整失败: \(error.localizedDescription)")
+        }
+    }
+
     /// 获取当前采集设备
     private func getCurrentCaptureDevice() -> AVCaptureDevice? {
         guard let session = capturer?.captureSession else { return nil }
@@ -2270,6 +2358,20 @@ final class WebRTCManager: NSObject, ObservableObject {
     // 🔥 快门速度值（后端下发 60-600，直接应用）
     // 60 = 1/60s, 600 = 1/600s
     @Published var cjfpsValue: Int = 240  // 默认 1/240s
+
+    // 自动 ISO 闭环 (S 档: 快门固定, ISO 跟随光线)
+    @Published var autoIsoEnabled: Bool = false {
+        didSet {
+            if oldValue == autoIsoEnabled { return }
+            if autoIsoEnabled {
+                startAutoIsoLoop()
+            } else {
+                stopAutoIsoLoop()
+                setCaptureFrameRate(shutterSpeed: cjfpsValue, forceApply: true)
+            }
+        }
+    }
+    private var autoIsoTimer: Timer?
 
     // 统计 & 自适应
     private var statsTimer: Timer?
@@ -3366,19 +3468,28 @@ final class WebRTCManager: NSObject, ObservableObject {
                     }
             }
             
-            // 快门第一：上限锁 1/cjfps；防频闪第二 + 亮度不牺牲：continuousAutoExposure 自动调 ISO
+            // 快门优先：精确锁定快门 + 防频闪对齐 + 自动 ISO
+            let snappedShutter2 = snapToAntiFlicker(cjfpsValue)
             let targetFps2 = max(currentCaptureFPS, 15)
             let frameDuration2 = CMTime(value: 1, timescale: CMTimeScale(targetFps2))
             device.activeVideoMinFrameDuration = frameDuration2
             device.activeVideoMaxFrameDuration = frameDuration2
-            let shutterDuration2 = CMTime(value: 1, timescale: CMTimeScale(cjfpsValue))
-            let clampedShutter2 = CMTimeMinimum(shutterDuration2, frameDuration2)
-            device.activeMaxExposureDuration = clampedShutter2
 
-            if device.isExposureModeSupported(.continuousAutoExposure) {
-                device.exposureMode = .continuousAutoExposure
+            if device.isExposureModeSupported(.custom) {
+                let duration2 = CMTime(value: 1, timescale: CMTimeScale(snappedShutter2))
+                let minDur2 = device.activeFormat.minExposureDuration
+                let maxDur2 = device.activeFormat.maxExposureDuration
+                let safeDur2: CMTime
+                if duration2 < minDur2 { safeDur2 = minDur2 }
+                else if duration2 > maxDur2 { safeDur2 = maxDur2 }
+                else { safeDur2 = duration2 }
+
+                let minISO2 = device.activeFormat.minISO
+                let maxISO2 = device.activeFormat.maxISO
+                let iso2: Float = autoIsoEnabled ? device.iso : (minISO2 + (maxISO2 - minISO2) / 2)
+                device.setExposureModeCustom(duration: safeDur2, iso: iso2, completionHandler: nil)
+                print("📸 [快门优先-recapture] 快门=1/\(snappedShutter2)s, ISO=\(Int(iso2)), 帧率=\(targetFps2)fps")
             }
-            print("📸 [快门] cjfps=1/\(cjfpsValue)s, 锁帧:\(targetFps2)fps, 曝光上限:1/\(Int(1.0/CMTimeGetSeconds(clampedShutter2)))s")
             
             // ✅ 白平衡自动
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
