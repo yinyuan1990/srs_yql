@@ -487,6 +487,21 @@ extension WebSocketManager: SwiftStompDelegate {
             if let cmd = msgDict?["cmd"] as? String, cmd == "set_fps" {
                 handleSetFpsCommand(messageDict: msgDict)
             }
+
+            // 抗频闪指令：PC 端开关 + 帧率档位（从 config 对象里提取）
+            if let config = msgDict?["config"] as? [String: Any],
+               let cmd = config["cmd"] as? String, cmd == "anti_flicker" {
+                let enabled = config["enabled"] as? Bool ?? false
+                let fps = config["fps"] as? Int ?? 80
+                print("🔦 [anti_flicker] 收到PC指令: enabled=\(enabled), fps=\(fps)")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("AntiFlickerCommand"),
+                        object: nil,
+                        userInfo: ["enabled": enabled, "fps": fps]
+                    )
+                }
+            }
             
         }
         if destination.contains("/queue/heartbeat") {

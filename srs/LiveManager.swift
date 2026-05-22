@@ -54,6 +54,11 @@ final class LiveManager: ObservableObject {
     @Published var exposureBiasEV: Float = 0
     private var pendingExposureBias: Float?
 
+    // MARK: - 防频闪快门
+    @Published var antiFlickerEnabled = true
+    @Published var powerLineFrequency: Int = 50       // 50Hz(中国) 或 60Hz
+    @Published var shutterSpeedDenominator: Int = 100  // 1/100s，用户可动态调高
+
     // MARK: - 音频（保留占位，不使用也不影响）
     private var hasAttachedMic = false
 
@@ -188,6 +193,46 @@ final class LiveManager: ObservableObject {
         }
     }
 
+    // MARK: - 防频闪快门控制（方案B：fps同步 + 任意快门）
+    // 前提：fps 必须是 50 的倍数（50/100），帧间隔与50Hz同步
+    // 快门可以任意设，不需要 snap，因为帧率同步保证每帧相位一致
+    func applyAntiFlickerShutter(_ denominator: Int) {
+        guard let dev = cameraDevice else {
+            print("📷 快门设置暂存: 1/\(denominator)s（相机未挂）")
+            shutterSpeedDenominator = denominator
+            return
+        }
+
+        let clamped = max(50, min(denominator, 8000))
+        let desiredDuration = 1.0 / Double(clamped)
+
+        // 确保不超过设备支持范围
+        let minDur = dev.activeFormat.minExposureDuration.seconds
+        let maxDur = dev.activeFormat.maxExposureDuration.seconds
+        let finalDuration = max(minDur, min(desiredDuration, maxDur))
+        let finalDenominator = Int(round(1.0 / finalDuration))
+
+        do {
+            try dev.lockForConfiguration()
+
+            let duration = CMTime(value: 1, timescale: CMTimeScale(finalDenominator))
+
+            // ISO 补偿：维持当前亮度
+            let currentDuration = dev.exposureDuration.seconds
+            let currentISO = dev.iso
+            var newISO = Float(Double(currentISO) * currentDuration / finalDuration)
+            newISO = max(dev.activeFormat.minISO, min(newISO, dev.activeFormat.maxISO))
+
+            dev.setExposureModeCustom(duration: duration, iso: newISO, completionHandler: nil)
+            dev.unlockForConfiguration()
+
+            shutterSpeedDenominator = finalDenominator
+            print("🔒 快门: 1/\(finalDenominator)s, ISO=\(Int(newISO)) (fps=\(fps)同步防频闪)")
+        } catch {
+            print("❌ 快门设置失败: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - 服务器轻配置入口（type+zoom+direction+EV）
     func applyRemoteConfig(_ cfg: ThinRemoteConfig) {
         print("📥 远端配置: type=\(cfg.type), zoom=\(cfg.zoom), direction=\(cfg.direction), hasAttachedCamera=\(hasAttachedCamera), isPublishing=\(isPublishing), exposureBias=\(cfg.exposureBias)")
@@ -258,6 +303,11 @@ final class LiveManager: ObservableObject {
         // 后端/用户指定 fps（可选）
         if let wantFPS = cfg.fps {                 // 新增：10–60
             Task { await self.applyFPSOverride(wantFPS) }
+        }
+
+        // 后端/用户指定快门（可选），如 100 表示 1/100s
+        if let wantShutter = cfg.shutterSpeed {
+            applyAntiFlickerShutter(wantShutter)
         }
     }
 
@@ -441,8 +491,16 @@ final class LiveManager: ObservableObject {
                     print("✅ \(position == .back ? "后" : "前")置摄像头已连接 (hasAttachedCamera=\(self.hasAttachedCamera))")
                 }
 
-                // 首挂后应用暂存 EV
-                if let ev = self.pendingExposureBias {
+                // 等自动曝光稳定后再切自定义快门
+                try await Task.sleep(nanoseconds: 500_000_000)
+
+                // 防频闪快门
+                if self.antiFlickerEnabled {
+                    self.applyAntiFlickerShutter(self.shutterSpeedDenominator)
+                }
+
+                // 首挂后应用暂存 EV（防频闪模式下 EV 不生效，跳过）
+                if !self.antiFlickerEnabled, let ev = self.pendingExposureBias {
                     self.pendingExposureBias = nil
                     self.setExposureBias(ev: ev)
                     await MainActor.run { print("🔁 首挂后应用EV: \(ev)") }

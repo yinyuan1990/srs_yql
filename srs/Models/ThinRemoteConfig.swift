@@ -18,6 +18,7 @@ struct ThinRemoteConfig: Codable {
     var direction: String  // "-1"后置相机 or "1"前置相机  ✅ 修正
     var exposureBias: Float?   // ✅ 曝光补偿 EV [-2 ~ 2] - 控制画面亮度
     var fps: Int?            // 新增：后端/
+    var shutterSpeed: Int?   // 防频闪快门，如 100 表示 1/100s
     var cjfps: Int?          // 🔥 采集FPS百分比 (0-100)，前置60-120fps，后置60-240fps
     var bitrate: Int?
     var angle: Int?
@@ -46,6 +47,7 @@ struct ThinRemoteConfig: Codable {
         case direction
         case exposureBias// ✅ 后端字段
         case fps
+        case shutterSpeed
         case cjfps       // 🔥 采集FPS百分比
         case bitrate
         case angle
@@ -99,6 +101,7 @@ struct ThinRemoteConfig: Codable {
         
         exposureBias = try container.decodeIfPresent(Float.self, forKey: .exposureBias)
         fps = try container.decodeIfPresent(Int.self, forKey: .fps)
+        shutterSpeed = try container.decodeIfPresent(Int.self, forKey: .shutterSpeed)
         cjfps = try container.decodeIfPresent(Int.self, forKey: .cjfps)  // 🔥 采集FPS百分比
         bitrate = try container.decodeIfPresent(Int.self, forKey: .bitrate)
         angle = try container.decodeIfPresent(Int.self, forKey: .angle)
@@ -129,6 +132,7 @@ struct ThinRemoteConfig: Codable {
         self.direction = direction  // 默认为"-1"（后置相机）✅ 修正
         self.exposureBias = exposureBias
         self.fps = fps
+        self.shutterSpeed = nil
         self.cjfps = cjfps  // 🔥 采集FPS百分比
         self.bitrate = bitrate
         self.angle = angle

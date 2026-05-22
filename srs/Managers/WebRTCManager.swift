@@ -94,8 +94,8 @@ final class VideoFilterPipeline: ObservableObject {
     @Published var brightness: Float = VideoFilterPipeline.loadDefault(.brightness, fallback: 0.05) {
         didSet { saveDefault(.brightness, brightness); if oldValue != brightness { logChange("brightness", brightness) } }
     }
-    /// 曝光: rgb × 2^EV, -3..+3 stops, 乘法增益. 把传感器噪声底"伪黑"乘出来
-    @Published var exposure: Float = VideoFilterPipeline.loadDefault(.exposure, fallback: 0.0) {
+    /// 曝光: rgb × 2^EV, -3..+3 stops, 乘法增益. 默认 0.3 提亮中间调（对标看家宝双层亮度）
+    @Published var exposure: Float = VideoFilterPipeline.loadDefault(.exposure, fallback: 0.3) {
         didSet { saveDefault(.exposure, exposure); if oldValue != exposure { logChange("exposure", exposure) } }
     }
     /// 伽马: pow 曲线 rgb' = rgb^(1/gamma), 0.5..2.0, 保端点
@@ -119,6 +119,16 @@ final class VideoFilterPipeline: ObservableObject {
         didSet { saveDefault(.highlightLift, highlightLift); if oldValue != highlightLift { logChange("highlightLift", highlightLift) } }
     }
 
+    // ===== 编码前降噪 + 锐化（对标看家宝 TAA+hqdn3d+sharpen 链路）=====
+    /// 降噪强度: 0=关闭, 0.02=轻度(推荐), 0.05=强力. 消除传感器噪点，节省码率
+    @Published var noiseLevel: Float = VideoFilterPipeline.loadDefault(.noiseLevel, fallback: 0.02) {
+        didSet { saveDefault(.noiseLevel, noiseLevel); if oldValue != noiseLevel { logChange("noiseLevel", noiseLevel) } }
+    }
+    /// 锐化强度: 0=关闭, 0.4=轻度(推荐), 1.0=强力. 2米远牌面必须锐化
+    @Published var sharpenAmount: Float = VideoFilterPipeline.loadDefault(.sharpenAmount, fallback: 0.4) {
+        didSet { saveDefault(.sharpenAmount, sharpenAmount); if oldValue != sharpenAmount { logChange("sharpenAmount", sharpenAmount) } }
+    }
+
     // ===== 兼容旧服务端推送字段 (kernel 不读取, 留着不报错) =====
     @Published var sharpness: Float = VideoFilterPipeline.loadDefault(.sharpness, fallback: 0.0) {
         didSet { saveDefault(.sharpness, sharpness) }
@@ -139,6 +149,8 @@ final class VideoFilterPipeline: ObservableObject {
         case highlightLift = "videoFilter.highlightLift"
         case gamma         = "videoFilter.gamma"
         case exposure      = "videoFilter.exposure"
+        case noiseLevel    = "videoFilter.noiseLevel"
+        case sharpenAmount = "videoFilter.sharpenAmount"
     }
 
     private static func loadDefault(_ key: Key, fallback: Float) -> Float {
@@ -208,9 +220,9 @@ final class VideoFilterPipeline: ObservableObject {
         // 5. 对比度
         rgb = (rgb - 0.5) * contrast + 0.5;
 
-        // 6. 红色发光 (仅纯红像素 ♥♦)
+        // 6. 红色发光 (仅纯红像素 ♥♦, 阈值降低以覆盖2米远暗红牌面)
         float gbMax = max(rgb.g, rgb.b);
-        float redMask = smoothstep(0.4, 0.7, rgb.r) * max(0.0, 1.0 - gbMax);
+        float redMask = smoothstep(0.15, 0.45, rgb.r) * max(0.0, 1.0 - gbMax);
         rgb.r = rgb.r + redGlow * redMask * (1.0 - rgb.r);
 
         // 7. 高光提亮
@@ -254,6 +266,7 @@ final class VideoFilterPipeline: ObservableObject {
         if cardEnhanceKernel == nil { return true }
         return exposure == 0 && blackPoint == 0 && brightness == 0 && gamma == 1.0
             && contrast == 1.0 && saturation == 1.0 && redGlow == 0 && highlightLift == 0
+            && noiseLevel == 0 && sharpenAmount == 0
     }
 
     /// 处理一帧, 返回新的 CVPixelBuffer (BGRA) 或 nil (失败/直通时调用方使用原帧)
@@ -284,18 +297,35 @@ final class VideoFilterPipeline: ObservableObject {
         }
         guard let pool = pixelBufferPool else { return nil }
 
-        let ciImage = CIImage(cvPixelBuffer: inputPB)
+        var ciImage = CIImage(cvPixelBuffer: inputPB)
 
-        let outImage = kernel.apply(
+        // Step 1: 编码前降噪（消除传感器噪点，节省码率给真实细节）
+        if noiseLevel > 0 {
+            let denoised = ciImage.applyingFilter("CINoiseReduction", parameters: [
+                "inputNoiseLevel": noiseLevel,
+                "inputSharpness": 0.5
+            ])
+            ciImage = denoised
+        }
+
+        // Step 2: 色彩增强 (CIColorKernel 单 pass)
+        guard let colorResult = kernel.apply(
             extent: ciImage.extent,
             arguments: [ciImage, exposure, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift]
-        )
-        guard let result = outImage else { return nil }
+        ) else { return nil }
+
+        // Step 3: 锐化（2米远牌面天然偏软，必须锐化）
+        var finalImage = colorResult
+        if sharpenAmount > 0 {
+            finalImage = colorResult.applyingFilter("CISharpenLuminance", parameters: [
+                kCIInputSharpnessKey: sharpenAmount
+            ])
+        }
 
         var outputPB: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outputPB)
         guard let out = outputPB else { return nil }
-        ciContext.render(result, to: out)
+        ciContext.render(finalImage, to: out)
         return out
     }
 }
@@ -935,6 +965,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     ///   - rttMs: 往返延迟（毫秒）
     ///   - bitrateRatio: 码率达成率（v2.1不再使用，仅日志记录）
     private func processAdaptiveFps(instantLossRate: Double, packetsLostPerSec: Int, rttMs: Int, bitrateRatio: Double) {
+        // 抗频闪模式下不触发自适应升降帧
+        if antiFlickerEnabled { return }
+
         let now = Date()
         
         // 🔥 v2.1: 每秒只执行一次核心逻辑（statsTimer是200ms，但自适应以1秒为单位）
@@ -952,10 +985,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             return
         }
         
-        // 🔥 v2.1: 冷却期检查（升降帧后3秒内不再变）
+        // 冷却期检查（降帧后1秒，升帧后2秒）
         let timeSinceLastChange = now.timeIntervalSince(lastFpsChangeTime)
-        if timeSinceLastChange < cooldownSec {
-           // print("📊 [自适应] fps=\(adaptiveFps) ❄️冷却中(\(String(format: "%.1f", cooldownSec - timeSinceLastChange))s后可变)")
+        let cooldown = lastFpsDirection == .down ? cooldownAfterDown : cooldownAfterUp
+        if timeSinceLastChange < cooldown {
             return
         }
         
@@ -988,41 +1021,43 @@ final class WebRTCManager: NSObject, ObservableObject {
         let oldFps = adaptiveFps
         
         if isNetworkBad {
-            // 🔴 网络差：累积计数，达到阈值降帧
+            // 🔴 网络差：累积计数，达到阈值降帧（档位切换：直接减半）
             highLossCounter += 1
             lowLossCounter = 0
-            
+
             if highLossCounter >= downgradeHoldSec {
-                let newFps = max(minAdaptiveFps, adaptiveFps - fpsDownStep)
+                let newFps = fpsLadder.first(where: { $0 < adaptiveFps }) ?? fpsLadder.last ?? minAdaptiveFps
                 if newFps != adaptiveFps {
                     adaptiveFps = newFps
                     fpsChanged = true
-                    lastFpsChangeTime = now  // 🔥 记录变化时间，启动冷却
+                    lastFpsChangeTime = now
+                    lastFpsDirection = .down
                     print("⬇️ [降帧] \(oldFps)→\(adaptiveFps)fps (RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%)")
                 }
                 highLossCounter = 0
             }
         } else if isNetworkGood {
-            // 🟢 网络好：累积计数，达到阈值升帧
+            // 🟢 网络好：累积计数，达到阈值升帧（档位切换：直接翻倍）
             lowLossCounter += 1
             highLossCounter = 0
-            
+
             if lowLossCounter >= upgradeHoldSec {
-                let newFps = min(maxFps, adaptiveFps + fpsUpStep)
+                let newFps = min(maxFps, fpsLadder.last(where: { $0 > adaptiveFps }) ?? fpsLadder.first ?? 60)
                 if newFps != adaptiveFps {
                     adaptiveFps = newFps
                     fpsChanged = true
-                    lastFpsChangeTime = now  // 🔥 记录变化时间，启动冷却
+                    lastFpsChangeTime = now
+                    lastFpsDirection = .up
                     print("⬆️ [升帧] \(oldFps)→\(adaptiveFps)fps (上限\(maxFps)fps, RTT=\(rttMs)ms)")
                 }
                 lowLossCounter = 0
             }
         } else {
-            // 🟡 网络中等：每秒衰减1（比旧版每200ms衰减1慢5倍）
+            // 🟡 网络中等：每秒衰减1
             highLossCounter = max(0, highLossCounter - 1)
             lowLossCounter = max(0, lowLossCounter - 1)
         }
-        
+
         if fpsChanged {
             applyAdaptiveFps(adaptiveFps)
         }
@@ -1068,7 +1103,26 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     // MARK: - 🔥 v2.0 PC端自适应FPS指令处理
-    
+
+    @objc private func onAntiFlickerCommand(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        let enabled = userInfo["enabled"] as? Bool ?? false
+        let serverFps = userInfo["fps"] as? Int ?? 80
+        let actualFps = serverFps / 4
+
+        antiFlickerEnabled = enabled
+        antiFlickerFps = actualFps
+
+        if enabled {
+            applyAdaptiveFps(actualFps)
+            print("🔦 [抗频闪] 开启，锁定 \(actualFps)fps（服务器值=\(serverFps)）")
+        } else {
+            let restoreFps = targetOutputFPS
+            applyAdaptiveFps(restoreFps)
+            print("🔦 [抗频闪] 关闭，恢复 \(restoreFps)fps")
+        }
+    }
+
     /// 处理 PC 端发来的 set_fps 通知
     @objc private func onSetFpsRequested(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
@@ -1110,20 +1164,18 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 🔥 v10.1 防花屏：根据 urgency 决定执行方式 + 降码率 + 插I帧
         switch urgency {
         case "critical":
-            // 🚨 紧急：50ms内执行，码率降50%，立即插I帧
-            let reducedBitrate = bitrate > 0 ? bitrate : Int(Double(targetBitrateKbps * 1000) * 0.5)
-            applyFpsImmediately(targetFps, bitrate: reducedBitrate)
-            forceKeyframe()  // 🔑 立即插I帧
-            keyframeIntervalSec = gopExtreme  // GOP调整为0.5秒
-            print("🚨 [critical] 码率降50%=\(reducedBitrate/1000)kbps, GOP=\(gopExtreme)s, 立即插I帧")
-            
+            // 🚨 紧急：50ms内执行，保码率不降（降FPS已足够，降码率会双重恶化画质）
+            applyFpsImmediately(targetFps, bitrate: bitrate)
+            forceKeyframe()
+            keyframeIntervalSec = gopExtreme
+            print("🚨 [critical] 保码率+降FPS→\(targetFps)fps, GOP=\(gopExtreme)s, 立即插I帧")
+
         case "high":
-            // ⚡ 高优先级：200ms内执行，码率降30%，立即插I帧
-            let reducedBitrate = bitrate > 0 ? bitrate : Int(Double(targetBitrateKbps * 1000) * 0.7)
-            applyFpsImmediately(targetFps, bitrate: reducedBitrate)
-            forceKeyframe()  // 🔑 立即插I帧
-            keyframeIntervalSec = gopWeak  // GOP调整为0.5秒
-            print("⚡ [high] 码率降30%=\(reducedBitrate/1000)kbps, GOP=\(gopWeak)s, 立即插I帧")
+            // ⚡ 高优先级：保码率不降，只降FPS + 插I帧
+            applyFpsImmediately(targetFps, bitrate: bitrate)
+            forceKeyframe()
+            keyframeIntervalSec = gopWeak
+            print("⚡ [high] 保码率+降FPS→\(targetFps)fps, GOP=\(gopWeak)s, 立即插I帧")
             
         case "normal":
             // 正常：可短暂过渡，码率不变
@@ -2402,6 +2454,10 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     /// 自适应FPS开关（默认开启，基于丢包率动态调整推流FPS）
     var adaptiveFpsEnabled: Bool = true
+
+    /// 抗频闪模式（PC端控制，开启后锁定FPS，自适应不触发）
+    var antiFlickerEnabled: Bool = false
+    var antiFlickerFps: Int = 20  // 实际帧率（80/4=20, 100/4=25, 200/4=50）
     
     /// 当前自适应FPS值（独立于后端下发的targetOutputFPS）
     private var adaptiveFps: Int = 30
@@ -2414,26 +2470,29 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 4. 升降帧后3秒冷却期（防止抖动）
     /// 5. 计数器以"秒"为单位，每秒只更新一次
     
-    private let minAdaptiveFps: Int = 15     // 최저 push fps (약한 네트워크)
+    private let minAdaptiveFps: Int = 20     // 最低20fps（档位切换最低档）
     private let minCaptureFps: Int = 15      // 최저 camera capture fps (발열/화면 끊김 균형)
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
-    
-    /// 丢包率阈值（基于3秒移动平均，比瞬时更稳定）
-    private let lossRateDownThreshold: Double = 0.03   // 3秒均值>3%，降级
-    private let lossRateUpThreshold: Double = 0.005    // 3秒均值<0.5%，恢复
-    
-    /// RTT阈值
-    private let rttDownThreshold: Int = 300   // RTT>300ms 网络差
-    private let rttUpThreshold: Int = 150     // RTT<150ms 且 >0 网络好
-    
-    /// 🔥🔥 v2.1 自适应算法核心参数（以"秒"为真实单位）
-    private let downgradeHoldSec: Int = 3    // 连续3秒网络差 → 降级
-    private let upgradeHoldSec: Int = 8      // 连续8秒网络好 → 升级
-    private let cooldownSec: Double = 3.0    // 🔥 升降帧后冷却3秒
-    
-    /// 步长设计：降快升慢
-    private let fpsDownStep: Int = 5         // 降帧快：每次降5fps
-    private let fpsUpStep: Int = 2           // 升帧慢：每次升2fps
+
+    /// 帧率档位表（直接切档，不逐步微调）
+    private let fpsLadder: [Int] = [60, 30, 20]
+
+    /// 丢包率阈值（基于3秒移动平均）
+    private let lossRateDownThreshold: Double = 0.025   // 3秒均值>2.5%，降级
+    private let lossRateUpThreshold: Double = 0.01      // 3秒均值<1%，恢复
+
+    /// RTT阈值（SRS 多一跳，比 P2P 宽松）
+    private let rttDownThreshold: Int = 200    // RTT>200ms 网络差
+    private let rttUpThreshold: Int = 100      // RTT<100ms 且 >0 网络好
+
+    /// 档位切换核心参数
+    private let downgradeHoldSec: Int = 1     // 连续1秒网络差 → 降级（快速响应）
+    private let upgradeHoldSec: Int = 3       // 连续3秒网络好 → 升级
+    private let cooldownAfterDown: Double = 1.0  // 降帧后冷却1秒
+    private let cooldownAfterUp: Double = 2.0    // 升帧后冷却2秒
+
+    /// 步长设计：档位切换（直接减半/翻倍）
+    // fpsDownStep/fpsUpStep 已废弃，改用 fpsLadder 档位切换
     
     /// 🔥 v2.1 丢包率移动平均（3秒窗口）
     private var lossRateHistory: [Double] = []
@@ -2442,9 +2501,11 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 连续计数器（每秒更新一次）
     private var highLossCounter: Int = 0
     private var lowLossCounter: Int = 0
-    
-    /// 🔥 v2.1 上次FPS变化时间（冷却期保护）
+
+    /// 上次FPS变化时间和方向（冷却期保护）
+    private enum FpsDirection { case up, down }
     private var lastFpsChangeTime: Date = Date.distantPast
+    private var lastFpsDirection: FpsDirection = .down
     
     /// 🔥 v2.1 上次自适应逻辑执行时间（确保每秒只执行一次）
     private var lastAdaptiveProcessTime: Date = Date.distantPast
@@ -2563,6 +2624,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self,
                 selector: #selector(onVideoFilterUpdated(_:)),
                 name: NSNotification.Name("videoFilterUpdated"),
+                object: nil
+        )
+
+        // 抗频闪指令监听（PC端控制）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onAntiFlickerCommand(_:)),
+                name: NSNotification.Name("AntiFlickerCommand"),
                 object: nil
         )
     }
@@ -4334,6 +4403,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var targetBitrateKbps: Int = 2000
     private var bitrateEnforceTimer: Timer?
     private var iceReconnectTimer: Timer?
+    private var iceRestartAttempts = 0
+    private let maxIceRestartAttempts = 3
     
     func setMaxBitrateKbps(_ kbps: Int) {
         // 记录目标码率
@@ -5427,26 +5498,73 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection,
                         didOpen dataChannel: RTCDataChannel) {}
     
-    // MARK: - ICE 重连
+    // MARK: - ICE 重连（分级恢复：ICE Restart → 全重建）
+
     private func scheduleIceReconnect(delay: TimeInterval, reason: String) {
         iceReconnectTimer?.invalidate()
         print("⏳ [ICE] \(reason)，\(delay)秒后检查是否需要重连...")
         iceReconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self = self, self.isPublishing else { return }
             let state = self.pc?.iceConnectionState
-            // 如果还在 disconnected/failed 状态，才真正重连
             if state == .disconnected || state == .failed || state == .closed {
-                print("🔄 [ICE] 自愈失败，触发重连 (state=\(String(describing: state)))")
-                self.stopPublish()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    self?.reconnectPublish()
+                if self.iceRestartAttempts < self.maxIceRestartAttempts {
+                    // 先尝试 ICE Restart（保持采集和编码不停）
+                    self.iceRestartAttempts += 1
+                    print("🔄 [ICE] 自愈失败，尝试 ICE Restart (\(self.iceRestartAttempts)/\(self.maxIceRestartAttempts))")
+                    self.triggerICERestart()
+                    // 5秒后再检查，如果还没恢复则继续重试或全重建
+                    self.scheduleIceReconnect(delay: 5.0, reason: "ICE Restart 后等待恢复")
+                } else {
+                    // ICE Restart 耗尽，全重建
+                    print("🔄 [ICE] ICE Restart \(self.maxIceRestartAttempts)次均失败，全重建连接")
+                    self.iceRestartAttempts = 0
+                    self.stopPublish()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        self?.reconnectPublish()
+                    }
                 }
             } else {
                 print("✅ [ICE] 自愈成功，state=\(String(describing: state))，无需重连")
+                self.iceRestartAttempts = 0
             }
         }
     }
-    
+
+    /// ICE Restart: 重新生成 Offer 带 IceRestart 约束，不销毁 PeerConnection
+    private func triggerICERestart() {
+        guard let pc = self.pc else { return }
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: ["IceRestart": kRTCMediaConstraintsValueTrue],
+            optionalConstraints: nil
+        )
+        pc.offer(for: constraints) { [weak self] sdp, error in
+            guard let self = self, let sdp = sdp else {
+                print("❌ [ICE Restart] 生成 Offer 失败: \(error?.localizedDescription ?? "unknown")")
+                return
+            }
+            pc.setLocalDescription(sdp) { _ in }
+            Task {
+                do {
+                    let ans = try await self.postOfferToSRS(
+                        apiPath: "/rtc/v1/publish/",
+                        streamurl: "webrtc://\(self.srsIP)/\(self.app)/\(self.streamKey)",
+                        offer: sdp.sdp
+                    )
+                    guard let pc = self.pc else { return }
+                    pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { err in
+                        if let err {
+                            print("❌ [ICE Restart] setRemoteDescription 失败: \(err.localizedDescription)")
+                        } else {
+                            print("✅ [ICE Restart] 重新协商完成，等待 ICE 恢复")
+                        }
+                    }
+                } catch {
+                    print("❌ [ICE Restart] postOfferToSRS 失败: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     private func reconnectPublish() {
         guard !isPublishing else { return }
         print("🔄 [ICE] 自动重新推流...")
