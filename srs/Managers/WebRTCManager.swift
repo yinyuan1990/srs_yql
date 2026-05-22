@@ -3539,7 +3539,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             
             // 快门优先：精确锁定快门 + 防频闪对齐 + 自动 ISO
             let snappedShutter2 = snapToAntiFlicker(cjfpsValue)
-            let targetFps2 = max(currentCaptureFPS, 15)
+            let formatMaxFps2 = Int(device.activeFormat.videoSupportedFrameRateRanges.first?.maxFrameRate ?? 60)
+            let targetFps2 = min(max(currentCaptureFPS, 15), formatMaxFps2)
             let frameDuration2 = CMTime(value: 1, timescale: CMTimeScale(targetFps2))
             device.activeVideoMinFrameDuration = frameDuration2
             device.activeVideoMaxFrameDuration = frameDuration2
