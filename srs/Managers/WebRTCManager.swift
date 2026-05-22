@@ -1117,9 +1117,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             applyAdaptiveFps(actualFps)
             print("🔦 [抗频闪] 开启，锁定 \(actualFps)fps（服务器值=\(serverFps)）")
         } else {
-            let restoreFps = targetOutputFPS
-            applyAdaptiveFps(restoreFps)
-            print("🔦 [抗频闪] 关闭，恢复 \(restoreFps)fps")
+            // 关闭时不还原参数，保持当前状态
+            print("🔦 [抗频闪] 关闭，保持当前帧率不变")
         }
     }
 
