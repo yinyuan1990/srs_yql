@@ -1000,7 +1000,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         let avgLossRate = lossRateHistory.reduce(0, +) / Double(max(1, lossRateHistory.count))
         
         // 使用后端下发的 targetOutputFPS 作为升帧上限
-        let maxFps = min(targetOutputFPS, getMaxPushFpsForCurrentProfile())
+        let maxFps = getMaxPushFpsForCurrentProfile()  // 升帧上限=format最大值（60fps）
         
         // 🔥 v2.1: 网络状态判断（只用RTT + 平均丢包率，不用bitrateRatio）
         // RTT=0 当"中等"处理（可能是没获取到数据）
