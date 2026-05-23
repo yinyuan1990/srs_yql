@@ -746,6 +746,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     // MARK: - 对外状态
     @Published var isPublishing = false
+    @Published var viewerConnected: Bool = false
+    private var lastViewerHeartbeatTime: Date = Date.distantPast
+    private var viewerHeartbeatChecker: Timer?
     var currentKbps: Int = 0       // 🔥 去掉@Published，纯统计不触发UI刷新
     var currentFps: Int = 0         // 🔥 去掉@Published，纯统计不触发UI刷新
     @Published var currentProfile: LadderProfile = .standard
@@ -1103,6 +1106,15 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     // MARK: - 🔥 v2.0 PC端自适应FPS指令处理
+
+    @objc private func onViewerHeartbeat(_ notification: Notification) {
+        lastViewerHeartbeatTime = Date()
+        if !viewerConnected {
+            viewerConnected = true
+            let fps = (notification.userInfo?["fps"] as? Int) ?? 0
+            print("📺 [VIEWER] PC 已连接，接收 \(fps)fps")
+        }
+    }
 
     @objc private func onAntiFlickerCommand(_ notification: Notification) {
         guard let userInfo = notification.userInfo else { return }
@@ -2633,6 +2645,22 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: NSNotification.Name("AntiFlickerCommand"),
                 object: nil
         )
+
+        // PC 拉流心跳监听
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onViewerHeartbeat(_:)),
+                name: NSNotification.Name("ViewerHeartbeat"),
+                object: nil
+        )
+        viewerHeartbeatChecker = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let elapsed = Date().timeIntervalSince(self.lastViewerHeartbeatTime)
+            if elapsed > 3.0 && self.viewerConnected {
+                self.viewerConnected = false
+                print("📺 [VIEWER] 心跳超时，PC 未连接")
+            }
+        }
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受

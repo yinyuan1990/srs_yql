@@ -488,6 +488,17 @@ extension WebSocketManager: SwiftStompDelegate {
                 handleSetFpsCommand(messageDict: msgDict)
             }
 
+            // PC 拉流心跳：收到就标记 PC 已连接
+            if msgType == "VIEWER_HEARTBEAT" {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("ViewerHeartbeat"),
+                        object: nil,
+                        userInfo: ["fps": msgDict?["fps"] as? Int ?? 0]
+                    )
+                }
+            }
+
             // 抗频闪指令：PC 端开关 + 帧率档位（从 config 对象里提取）
             if let config = msgDict?["config"] as? [String: Any],
                let cmd = config["cmd"] as? String, cmd == "anti_flicker" {

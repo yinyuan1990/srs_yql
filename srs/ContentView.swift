@@ -628,6 +628,28 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { showControls.toggle() }
             }
 
+            // PC 连接状态指示器（左上角，始终显示）
+            VStack {
+                HStack {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(rtc.viewerConnected ? Color.green : Color.red)
+                            .frame(width: 7, height: 7)
+                        Text(rtc.viewerConnected ? "PC已连接" : "PC未连接")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(rtc.viewerConnected ? .green : .red)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.45))
+                    .cornerRadius(8)
+                    .padding(.top, 52)
+                    .padding(.leading, 10)
+                    Spacer()
+                }
+                Spacer()
+            }
+
             // 顶部导航栏
             if showControls {
                 VStack(spacing: 0) {
