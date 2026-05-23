@@ -499,6 +499,34 @@ extension WebSocketManager: SwiftStompDelegate {
                 }
             }
 
+            // 测试模式：切换硬件EV/ISO调亮度（从 config 对象里提取）
+            if let config = msgDict?["config"] as? [String: Any],
+               let cmd = config["cmd"] as? String, cmd == "test_mode" {
+                let enabled = config["enabled"] as? Bool ?? false
+                print("🧪 [test_mode] 收到PC指令: enabled=\(enabled)")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("TestModeCommand"),
+                        object: nil,
+                        userInfo: ["enabled": enabled]
+                    )
+                }
+            }
+
+            // 测试亮度滑块（仅测试模式生效，独立于综合亮度）
+            if let config = msgDict?["config"] as? [String: Any],
+               let cmd = config["cmd"] as? String, cmd == "test_brightness" {
+                let value = config["value"] as? Int ?? 50
+                print("🧪 [test_brightness] 收到PC指令: value=\(value)")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("TestBrightnessCommand"),
+                        object: nil,
+                        userInfo: ["value": value]
+                    )
+                }
+            }
+
             // 抗频闪指令：PC 端开关 + 帧率档位（从 config 对象里提取）
             if let config = msgDict?["config"] as? [String: Any],
                let cmd = config["cmd"] as? String, cmd == "anti_flicker" {

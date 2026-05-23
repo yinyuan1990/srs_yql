@@ -1134,6 +1134,61 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
 
+    @objc private func onTestModeCommand(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        let enabled = userInfo["enabled"] as? Bool ?? false
+        testModeEnabled = enabled
+
+        // 测试模式开启 = 关闭后处理（画面完全硬件直出，对比玉麒麟方案）
+        videoFilter.enabled = !enabled
+        print("🧪 [测试模式] \(enabled ? "开启(硬件直出，后处理关)" : "关闭(后处理恢复)")")
+    }
+
+    /// PC 端"测试亮度"滑块（独立于综合亮度），仅测试模式生效
+    @objc private func onTestBrightnessCommand(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        let value = userInfo["value"] as? Int ?? 50
+        guard testModeEnabled else {
+            print("🧪 [测试亮度] 收到 \(value) 但测试模式未开启，忽略")
+            return
+        }
+        applyHardwareBrightness(value)
+    }
+
+    /// 应用亮度值到硬件（测试模式开启时使用）
+    /// value: 0..100（PC 端综合亮度 → 转为 -2.0..2.0 EV 或 ISO 倍率）
+    func applyHardwareBrightness(_ value: Int) {
+        guard let dev = getCurrentCaptureDevice() else { return }
+        let normalized = (Float(value) - 50.0) / 25.0  // 50中点→0EV, 0→-2EV, 100→+2EV
+
+        do {
+            try dev.lockForConfiguration()
+
+            if antiFlickerEnabled {
+                // custom 模式：快门锁死，调 ISO
+                let currentDuration = dev.exposureDuration
+                let baseISO = dev.iso
+                let multiplier = pow(2.0, normalized)  // 每1EV→ISO翻倍
+                var newISO = baseISO * multiplier
+                newISO = max(dev.activeFormat.minISO, min(newISO, dev.activeFormat.maxISO))
+                dev.setExposureModeCustom(duration: currentDuration, iso: newISO, completionHandler: nil)
+                print("🧪 [硬件亮度] custom模式 ISO=\(Int(newISO)) (EV偏移=\(String(format: "%.1f", normalized)))")
+            } else {
+                // 自动模式：EV 补偿
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    dev.exposureMode = .continuousAutoExposure
+                }
+                let clamped = max(dev.minExposureTargetBias, min(normalized, dev.maxExposureTargetBias))
+                dev.setExposureTargetBias(clamped, completionHandler: nil)
+                print("🧪 [硬件亮度] AE模式 EV=\(String(format: "%.2f", clamped))")
+            }
+
+            dev.unlockForConfiguration()
+        } catch {
+            print("🧪 [硬件亮度] 设置失败: \(error.localizedDescription)")
+        }
+    }
+
     /// 处理 PC 端发来的 set_fps 通知
     @objc private func onSetFpsRequested(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
@@ -2469,6 +2524,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 抗频闪模式（PC端控制，开启后锁定FPS，自适应不触发）
     var antiFlickerEnabled: Bool = false
     var antiFlickerFps: Int = 20  // 实际帧率（80/4=20, 100/4=25, 200/4=50）
+    var testModeEnabled: Bool = false  // 测试模式：true=硬件EV/ISO调亮度，false=后处理
     
     /// 当前自适应FPS值（独立于后端下发的targetOutputFPS）
     private var adaptiveFps: Int = 30
@@ -2661,6 +2717,22 @@ final class WebRTCManager: NSObject, ObservableObject {
                 print("📺 [VIEWER] 心跳超时，PC 未连接")
             }
         }
+
+        // 测试模式监听（PC端控制）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onTestModeCommand(_:)),
+                name: NSNotification.Name("TestModeCommand"),
+                object: nil
+        )
+
+        // 测试亮度滑块监听（仅测试模式开启时生效）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onTestBrightnessCommand(_:)),
+                name: NSNotification.Name("TestBrightnessCommand"),
+                object: nil
+        )
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
