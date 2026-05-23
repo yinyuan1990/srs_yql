@@ -1159,7 +1159,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// value: 0..100（PC 端综合亮度 → 转为 -2.0..2.0 EV 或 ISO 倍率）
     func applyHardwareBrightness(_ value: Int) {
         guard let dev = getCurrentCaptureDevice() else { return }
-        let normalized = (Float(value) - 50.0) / 25.0  // 50中点→0EV, 0→-2EV, 100→+2EV
+        let normalized = (Float(value) - 50.0) / 12.5  // 50中点→0EV, 0→-4EV, 100→+4EV（扩大范围）
 
         do {
             try dev.lockForConfiguration()
