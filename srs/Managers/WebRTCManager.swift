@@ -1156,16 +1156,19 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     /// 应用亮度值到硬件（测试模式开启时使用）
-    /// value: 0..100（PC 端综合亮度 → 转为 -2.0..2.0 EV 或 ISO 倍率）
+    /// value: 0..100（PC 端测试亮度滑块 → 转为 ±4EV 范围）
+    /// 判断标准：当前曝光模式（不依赖抗频闪开关）
+    ///   - .custom 模式（用户调了快门）→ 调 ISO 保持快门
+    ///   - 其他模式（AE 自动）→ 调 EV 补偿
     func applyHardwareBrightness(_ value: Int) {
         guard let dev = getCurrentCaptureDevice() else { return }
-        let normalized = (Float(value) - 50.0) / 12.5  // 50中点→0EV, 0→-4EV, 100→+4EV（扩大范围）
+        let normalized = (Float(value) - 50.0) / 12.5  // 50中点→0EV, 0→-4EV, 100→+4EV
 
         do {
             try dev.lockForConfiguration()
 
-            if antiFlickerEnabled {
-                // custom 模式：快门锁死，调 ISO
+            if dev.exposureMode == .custom {
+                // 用户已锁死快门 → 调 ISO（保持快门不变）
                 let currentDuration = dev.exposureDuration
                 let baseISO = dev.iso
                 let multiplier = pow(2.0, normalized)  // 每1EV→ISO翻倍
@@ -1174,10 +1177,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 dev.setExposureModeCustom(duration: currentDuration, iso: newISO, completionHandler: nil)
                 print("🧪 [硬件亮度] custom模式 ISO=\(Int(newISO)) (EV偏移=\(String(format: "%.1f", normalized)))")
             } else {
-                // 自动模式：EV 补偿
-                if dev.isExposureModeSupported(.continuousAutoExposure) {
-                    dev.exposureMode = .continuousAutoExposure
-                }
+                // 自动曝光 → EV 补偿
                 let clamped = max(dev.minExposureTargetBias, min(normalized, dev.maxExposureTargetBias))
                 dev.setExposureTargetBias(clamped, completionHandler: nil)
                 print("🧪 [硬件亮度] AE模式 EV=\(String(format: "%.2f", clamped))")
