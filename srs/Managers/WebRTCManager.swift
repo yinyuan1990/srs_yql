@@ -175,7 +175,7 @@ final class VideoFilterPipeline: ObservableObject {
         if let v = brightness { self.brightness = v }
         if let v = contrast   { self.contrast   = v }
         if let v = saturation { self.saturation = v }
-        if let v = sharpness  { self.sharpness  = v }
+        if let v = sharpness  { self.sharpness = v; self.sharpenAmount = v }
         if let v = redBoost   { self.redGlow    = v }
         if let v = redGlow    { self.redGlow    = v }
         if let v = blackPoint { self.blackPoint = v }
@@ -338,7 +338,7 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     var nv12Processor: NV12MetalProcessor?              // ⭐ GPU-native NV12 处理器（与玉麒麟链路一致）
     var nv12LutProcessor: NV12LUTProcessor?            // ⭐ LUT 阶段（玉麒麟 Lookup）
     var lutModeEnabled: Bool = true                     // ⭐ LUT 开关（默认开）
-    var filterModeEnabled: Bool = true                  // ⭐ Metal 滤镜栈开关（默认开）
+    var filterModeEnabled: Bool = false                 // ⭐ Metal 滤镜栈（默认关，对标玉麒麟）
 
     /// 相机 NV12 → [Metal 滤镜] → [LUT] → 编码（两阶段可独立开关）
     private func applyFilter(_ frame: RTCVideoFrame) -> RTCVideoFrame {
@@ -641,12 +641,13 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
         }
     }
     
-    // 🔥 发送到预览
+    // 🔥 发送到预览（与推流同走 滤镜→LUT，所见即所得）
     private func sendPreviewFrame(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
         previewSentCounter += 1
-        
+
+        let filtered = applyFilter(videoFrame)
         let fixedFrame = RTCVideoFrame(
-            buffer: videoFrame.buffer,
+            buffer: filtered.buffer,
             rotation: ._0,
             timeStampNs: videoFrame.timeStampNs
         )
@@ -662,7 +663,7 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
         let timestampNs = rtp90kTimestamp * 1_000_000_000 / rtpClockRate
         rtp90kTimestamp += rtp90kStep
 
-        // ⭐ 滤镜后处理 (推流路径走滤镜, 预览路径直通省热)
+        // ⭐ 滤镜→LUT 后处理
         let filtered = applyFilter(videoFrame)
         let fixedFrame = RTCVideoFrame(
             buffer: filtered.buffer,
@@ -746,16 +747,17 @@ struct LadderPreset {
     let width: Int         // 输出宽度（缩放后）
     let height: Int        // 输出高度（缩放后）
     let fps: Int           // 采集FPS
-    let maxKbps: Int
+    let minKbps: Int       // WebRTC 最低码率
+    let maxKbps: Int       // WebRTC 最高码率
     let maxPushFps: Int    // 🔥 最高推送FPS（根据分辨率限制）
     let scaleDown: Double  // 🔥 缩放比例（1.0=不缩放，2.0=缩小一半，3.0=缩小到1/3）
     
-    // 兼容旧代码的初始化方法
-    init(width: Int, height: Int, fps: Int, maxKbps: Int, maxPushFps: Int = 60, scaleDown: Double = 1.0) {
+    init(width: Int, height: Int, fps: Int, maxKbps: Int, minKbps: Int? = nil, maxPushFps: Int = 60, scaleDown: Double = 1.0) {
         self.width = width
         self.height = height
         self.fps = fps
         self.maxKbps = maxKbps
+        self.minKbps = minKbps ?? maxKbps
         self.maxPushFps = maxPushFps
         self.scaleDown = scaleDown
     }
@@ -841,7 +843,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
         let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 3500, maxPushFps: 60, scaleDown: 1.0)
         let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 2500, maxPushFps: 60, scaleDown: 1.0)
-        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2000, maxPushFps: 60, scaleDown: 1.0)
+        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 4000, minKbps: 4000, maxPushFps: 60, scaleDown: 1.0)  // 低清：min/max 均由 2000→4000
 
         let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
         
@@ -858,7 +860,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("   超高帧(ultra) = 1280x720  @240fps → 3500kbps (16:9单独采集)")
             print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
             print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 2000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 4000-4000kbps (采集1920x1440缩放)")
         } else {
             currentLadder = [
                 .p4k:      p4kPreset,
@@ -872,10 +874,17 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("   超高帧(ultra) = 1280x720  @120fps → 3500kbps (16:9单独采集)")
             print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
             print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 2000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 4000-4000kbps (采集1920x1440缩放)")
         }
     }
     
+    private func effectiveMinKbpsForCurrentProfile() -> Int {
+        guard let preset = currentLadder[currentProfile] else { return 1500 }
+        let qualityPercent = lastQualityPercent ?? 100
+        let result = Int(Double(preset.minKbps) * Double(qualityPercent) / 100.0)
+        return max(100, result)
+    }
+
     // ✅ 计算目标码率（仅由质量百分比决定，与 FPS 完全解耦）
     // 🔥 码率和 FPS 独立控制：手动设置码率不受 FPS 变动影响，无运动时码率也不降
     private func effectiveMaxKbpsForCurrentProfile() -> Int {
@@ -885,9 +894,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         let qualityPercent = lastQualityPercent ?? 100
         let result = Int(Double(preset.maxKbps) * Double(qualityPercent) / 100.0)
 
-        print("📊 码率计算: 档位上限=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → 目标=\(result)kbps")
+        print("📊 码率计算: 档位 min=\(preset.minKbps) max=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → \(effectiveMinKbpsForCurrentProfile())-\(max(100, result))kbps")
 
         return max(100, result)  // 保底 100kbps
+    }
+
+    private func applyEffectiveBitrateToWebRTC() {
+        let minK = effectiveMinKbpsForCurrentProfile()
+        let maxK = max(minK, effectiveMaxKbpsForCurrentProfile())
+        setBitrateRangeKbps(min: minK, max: maxK)
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -935,7 +950,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 🔥 FPS 与码率完全解耦：FPS 变动不触发码率重算
         // 码率只由 setQualityPercentage / setMaxBitrateKbps 显式控制
         let actualSendFps = frameThrottler?.targetSendFps ?? clamped
-        print("mm: 档位=\(currentProfile), 后端fps=\(fps), 推送目标=\(oldFps)→\(clamped)fps, 实际节流=\(actualSendFps)fps, 码率=\(targetBitrateKbps)kbps")
+        print("mm: 档位=\(currentProfile), 后端fps=\(fps), 推送目标=\(oldFps)→\(clamped)fps, 实际节流=\(actualSendFps)fps, 码率=\(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         
         // 🔥 同步更新自适应FPS基准值
         if adaptiveFpsEnabled {
@@ -1841,13 +1856,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fpsValue
         print("   ✅ FPS恢复: 推送目标=\(fpsValue)fps, 上限=\(maxPushFps)fps → WebRTC=\(webrtcFps)fps")
         
-        // 3) 码率 - 显式调用 setMaxBitrateKbps 确保配置被应用
-        let kbpsValue = effectiveMaxKbpsForCurrentProfile()
-        setMaxBitrateKbps(kbpsValue)
+        // 3) 码率 - min/max 均按档位 + 清晰度百分比
+        applyEffectiveBitrateToWebRTC()
         if let pct = lastQualityPercent {
-            print("   ✅ 码率恢复: \(pct)% → \(kbpsValue)kbps")
+            print("   ✅ 码率恢复: \(pct)% → \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         } else {
-            print("   ✅ 码率恢复: 默认 → \(kbpsValue)kbps")
+            print("   ✅ 码率恢复: 默认 → \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         }
         
         // 注意：角度(angle)由后端控制，不在前端恢复
@@ -1905,13 +1919,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fpsValue
         print("   ✅ FPS恢复: 推送目标=\(fpsValue)fps, 上限=\(maxPushFps)fps → WebRTC=\(webrtcFps)fps")
         
-        // 3) 码率 - 显式调用 setMaxBitrateKbps 确保 FPS 缩放公式被应用
-        let kbpsValue = effectiveMaxKbpsForCurrentProfile()
-        setMaxBitrateKbps(kbpsValue)
+        // 3) 码率 - min/max 均按档位 + 清晰度百分比
+        applyEffectiveBitrateToWebRTC()
         if let pct = lastQualityPercent {
-            print("   ✅ 码率恢复: \(pct)% → \(kbpsValue)kbps")
+            print("   ✅ 码率恢复: \(pct)% → \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         } else {
-            print("   ✅ 码率恢复: 默认 → \(kbpsValue)kbps")
+            print("   ✅ 码率恢复: 默认 → \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         }
         
         // 4) 对焦 - 唤醒后直接恢复保存的焦距（不执行自动对焦）
@@ -1936,9 +1949,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             lastQualityPercent = snapped
             
             if currentLadder[currentProfile] != nil {
-                let newKbps = effectiveMaxKbpsForCurrentProfile()
-                setMaxBitrateKbps(newKbps)
-                //print("🎨 质量百分比: \(oldPercent)% → \(snapped)% | 码率调整为: \(newKbps)kbps (±100kb)")
+                applyEffectiveBitrateToWebRTC()
+                //print("🎨 质量百分比: \(oldPercent)% → \(snapped)% | 码率调整为: \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
             } else {
                 //print("✨ 质量百分比=", snapped, "%")
             }
@@ -1973,11 +1985,16 @@ final class WebRTCManager: NSObject, ObservableObject {
         //print("🧹 清除手动 FPS 覆盖")
     }
     
-    // ✅ 统一根据质量百分比计算当前档位应设的码率上限
+    // ✅ 统一根据质量百分比计算当前档位应设的码率（min / max）
+    private func kbpsMinForProfile(_ preset: LadderPreset) -> Int {
+        guard let pct = lastQualityPercent else { return preset.minKbps }
+        return max(100, Int(Double(preset.minKbps) * Double(pct) / 100.0))
+    }
+
     private func kbpsForProfile(_ preset: LadderPreset) -> Int {
         guard let pct = lastQualityPercent else { return preset.maxKbps }
         // 按百分比映射到当前档位的上限码率，避免过低设置
-        let result = max(300, Int(Double(preset.maxKbps) * Double(pct) / 100.0))
+        let result = max(100, Int(Double(preset.maxKbps) * Double(pct) / 100.0))
         return result
     }
     
@@ -2302,8 +2319,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         }
                         
                         // ✅ 使用综合码率计算（考虑质量百分比和推送FPS）
-                        let kbps = self.effectiveMaxKbpsForCurrentProfile()
-                        self.setMaxBitrateKbps(kbps)
+                        self.applyEffectiveBitrateToWebRTC()
                         
                         // ✅ 使用实际采集分辨率（不是输出分辨率）
                         if let camera = initialCamera {
@@ -2606,8 +2622,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 抗频闪模式（PC端控制，开启后锁定FPS，自适应不触发）
     var antiFlickerEnabled: Bool = false
     var antiFlickerFps: Int = 20  // 实际帧率（80/4=20, 100/4=25, 200/4=50）
-    var lutModeEnabled: Bool = true       // LUT 开关（默认开）
-    var filterModeEnabled: Bool = true    // Metal 滤镜栈（默认开）
+    var lutModeEnabled: Bool = true       // LUT 开关（默认开，对标玉麒麟）
+    var filterModeEnabled: Bool = false   // Metal 滤镜栈（默认关，PC 可开）
     var hardwareBrightnessSliderValue: Int = 20  // 0~100 → EV -2..+8，20=0EV
     private var pendingLutName: String?
     
@@ -2945,11 +2961,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 3️⃣ 更新档位
             currentProfile = p
         
-        // 4️⃣ 设置码率
-        let targetKbps = effectiveMaxKbpsForCurrentProfile()
-        setMaxBitrateKbps(targetKbps)
+        // 4️⃣ 设置码率（min/max 均按档位 + 清晰度百分比）
+        applyEffectiveBitrateToWebRTC()
         enforceBitrateImmediately()
-        print("   码率: \(targetKbps)kbps")
+        print("   码率: \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
             
         // 5️⃣ 更新 FrameThrottler（采集和输出分辨率）
         let captureRes = getCaptureResolutionForProfile(p)
@@ -3278,8 +3293,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         setResolutionScale(scaleDown)  // 确保 WebRTC 也使用正确的缩放
         
         // 🔥 设置码率（此时 currentCaptureFPS 已根据前后置摄像头正确设置）
-        let targetKbps = effectiveMaxKbpsForCurrentProfile()
-        setMaxBitrateKbps(targetKbps)
+        applyEffectiveBitrateToWebRTC()
         //print("📊 推流初始化：档位=\(useProfile), 码率=\(targetKbps)kbps")
 
         // Offer（发送端不接收远端）
@@ -3391,12 +3405,12 @@ final class WebRTCManager: NSObject, ObservableObject {
                 dict["profile-level-id"] = "640028"   // High 4.0 (支持 1080p，取代 Baseline 3.1)
                 dict["level-asymmetry-allowed"] = "1"
                 
-                // 🔒 极限CBR：按FPS比例调整码率，min=max强制恒定
-                let targetKbps = effectiveMaxKbpsForCurrentProfile()  // 按推送FPS比例计算
-                let minKbps = targetKbps  // 100% - min=目标值
-                let maxKbps = targetKbps  // 100% - max=目标值
+                let targetMinKbps = effectiveMinKbpsForCurrentProfile()
+                let targetMaxKbps = effectiveMaxKbpsForCurrentProfile()
+                let minKbps = targetMinKbps
+                let maxKbps = targetMaxKbps
                 
-                dict["x-google-start-bitrate"] = "\(targetKbps)"
+                dict["x-google-start-bitrate"] = "\(maxKbps)"
                 dict["x-google-min-bitrate"] = "\(minKbps)"
                 dict["x-google-max-bitrate"] = "\(maxKbps)"
                 
@@ -4266,11 +4280,11 @@ final class WebRTCManager: NSObject, ObservableObject {
                
                // ✅ 关键：切换摄像头后重新计算档位配置
                if let preset = self.currentLadder[self.currentProfile] {
-                   print("📋 切换前档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.maxKbps)kbps")
+                   print("📋 切换前档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.minKbps)-\(preset.maxKbps)kbps")
                }
                self.calculateLadderForDevice(dev)
                if let preset = self.currentLadder[self.currentProfile] {
-                   print("📋 切换后档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.maxKbps)kbps")
+                   print("📋 切换后档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.minKbps)-\(preset.maxKbps)kbps")
                    
                    // 🔥 切换摄像头后更新采集FPS（用于FPS缩放计算）
                    // 后置: 240fps, 前置: 120fps
@@ -4280,8 +4294,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                
                // ✅ 重新设置码率（切换摄像头后档位配置变了，码率也要更新）
                // 此时 currentCaptureFPS 已更新为新摄像头的采集FPS
-               let newKbps = self.effectiveMaxKbpsForCurrentProfile()
-               self.setMaxBitrateKbps(newKbps)
+               self.applyEffectiveBitrateToWebRTC()
                //print("🔄 切换摄像头后重新设置码率: \(newKbps)kbps (±100kb)")
                
                // 🔥 立即强制码率，确保切换时码率立即生效
@@ -4593,6 +4606,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     // 保存当前目标码率，用于周期性强制重置
+    private var targetMinBitrateKbps: Int = 2000
     private var targetBitrateKbps: Int = 2000
     private var bitrateEnforceTimer: Timer?
     private var iceReconnectTimer: Timer?
@@ -4600,8 +4614,14 @@ final class WebRTCManager: NSObject, ObservableObject {
     private let maxIceRestartAttempts = 3
     
     func setMaxBitrateKbps(_ kbps: Int) {
-        // 记录目标码率
-        targetBitrateKbps = kbps
+        setBitrateRangeKbps(min: kbps, max: kbps)
+    }
+
+    func setBitrateRangeKbps(min minKbps: Int, max maxKbps: Int) {
+        let minK = max(100, min(minKbps, maxKbps))
+        let maxK = max(minK, maxKbps)
+        targetMinBitrateKbps = minK
+        targetBitrateKbps = maxK
         
         // 记录 sender
         if videoSender == nil {
@@ -4617,13 +4637,9 @@ final class WebRTCManager: NSObject, ObservableObject {
             params.encodings = [RTCRtpEncodingParameters()]
         }
         
-        // 🔥🔥 超低延迟优化：强制CBR（固定码率），防止码率波动导致花屏
-        // 方案要求：码率设为CBR（固定码率），禁止VBR（码率波动会导致网络拥塞）
-        let maxBps = kbps * 1000  // 最大码率 = maxKbps
-        
-        // 🔥🔥 CBR模式：min=max，强制恒定码率，防止马赛克
-        // 原VBR(85%波动)改为CBR(100%恒定)，牺牲带宽换取画质稳定
-        let minBps = maxBps  // CBR: min=max，强制恒定码率
+        // 🔥 WebRTC min/max 码率（按档位最低/最高 × 清晰度百分比）
+        let minBps = minK * 1000
+        let maxBps = maxK * 1000
         
         params.encodings[0].maxBitrateBps = NSNumber(value: maxBps)
         params.encodings[0].minBitrateBps = NSNumber(value: minBps)
@@ -4673,7 +4689,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let verifyScale = encoding.scaleResolutionDownBy?.doubleValue ?? 1.0
             let targetFps = frameThrottler?.targetSendFps ?? targetOutputFPS
             let maxPushFpsLimit = getMaxPushFpsForCurrentProfile()
-            print("🔒 CBR码率设置: 固定=\(kbps)kbps (min=max, 恒定码率防花屏)")
+            print("🔒 WebRTC码率: min=\(minK)kbps max=\(maxK)kbps")
             print("   FPS设置: 推送目标=\(targetFps)fps, 上限=\(maxPushFpsLimit)fps → WebRTC=\(verifyFps)fps")
             let expectedScale = currentLadder[currentProfile]?.scaleDown ?? 1.0
             print("   分辨率: \(currentCaptureWidth)x\(currentCaptureHeight) (scale=\(verifyScale), 应为\(expectedScale))")
@@ -4773,9 +4789,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         var params = sender.parameters
         if params.encodings.isEmpty { return }
         
-        // 🔥🔥 CBR模式：强制恒定码率，防止马赛克
-        let maxBps = targetBitrateKbps * 1000  // 最大码率
-        let minBps = maxBps  // CBR: min=max，强制恒定码率
+        // 🔥 WebRTC min/max 码率
+        let minBps = targetMinBitrateKbps * 1000
+        let maxBps = targetBitrateKbps * 1000
         
         // 立即强制设置码率
         params.encodings[0].minBitrateBps = NSNumber(value: minBps)
@@ -4808,9 +4824,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             var params2 = sender.parameters
             if params2.encodings.isEmpty { return }
             
-            // 🔥 VBR策略：码率可下浮，但不能超过最大值
-            let maxBps2 = self.targetBitrateKbps * 1000  // 最大码率（硬上限）
-            let minBps2 = Int(Double(maxBps2) * 0.7)  // 允许下浮30%
+            let minBps2 = self.targetMinBitrateKbps * 1000
+            let maxBps2 = self.targetBitrateKbps * 1000
             
             params2.encodings[0].minBitrateBps = NSNumber(value: minBps2)
             params2.encodings[0].maxBitrateBps = NSNumber(value: maxBps2)
@@ -4833,7 +4848,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             // 计算输出分辨率
             let outputW = Int(Double(self.currentCaptureWidth) / scaleDown3)
             let outputH = Int(Double(self.currentCaptureHeight) / scaleDown3)
-            print("✅ VBR码率已设置: \(minBps2/1000)-\(maxBps2/1000)kbps, WebRTC=\(webrtcFps2)fps, 采集=\(self.currentCaptureWidth)x\(self.currentCaptureHeight) → 输出=\(outputW)x\(outputH) (scale=\(scaleDown3))")
+            print("✅ WebRTC码率已设置: \(minBps2/1000)-\(maxBps2/1000)kbps, WebRTC=\(webrtcFps2)fps, 采集=\(self.currentCaptureWidth)x\(self.currentCaptureHeight) → 输出=\(outputW)x\(outputH) (scale=\(scaleDown3))")
         }
     }
     
@@ -4846,19 +4861,13 @@ final class WebRTCManager: NSObject, ObservableObject {
             var params = sender.parameters
             if params.encodings.isEmpty { return }
             
-            // 🔥🔥 CBR策略：强制恒定码率，防止马赛克
-            let maxBps = self.targetBitrateKbps * 1000  // 最大码率
-            let minBps = maxBps  // CBR: min=max，强制恒定码率
+            let minBps = self.targetMinBitrateKbps * 1000
+            let maxBps = self.targetBitrateKbps * 1000
             
             let currentMin = params.encodings[0].minBitrateBps?.intValue ?? 0
             let currentMax = params.encodings[0].maxBitrateBps?.intValue ?? 0
             
-            // 如果参数被改变，重新强制设置VBR范围（确保不超过maxKbps）
             if currentMin != minBps || currentMax != maxBps {
-                //print("🔄 检测到码率参数被修改，重新强制设置VBR：")
-                //print("   当前: min=\(currentMin/1000)kbps, max=\(currentMax/1000)kbps")
-                //print("   强制: min=\(minBps/1000)kbps, max=\(maxBps/1000)kbps")
-                
                 params.encodings[0].minBitrateBps = NSNumber(value: minBps)
                 params.encodings[0].maxBitrateBps = NSNumber(value: maxBps)
                 params.encodings[0].isActive = true
@@ -5393,9 +5402,10 @@ final class WebRTCManager: NSObject, ObservableObject {
                         
                         // 🔍 详细的码率监控日志（包括编码器参数验证）
                         if let preset = self.currentLadder[self.currentProfile] {
-                            let targetKbps = preset.maxKbps
+                            let targetMinKbps = self.kbpsMinForProfile(preset)
+                            let targetMaxKbps = self.kbpsForProfile(preset)
                             let actualKbps = self.currentKbps
-                            let percentage = Int((Double(actualKbps) / Double(targetKbps)) * 100)
+                            let percentage = targetMaxKbps > 0 ? Int((Double(actualKbps) / Double(targetMaxKbps)) * 100) : 0
                             let qlrStr = qlr ?? "none"
                             
                             // ✅ 验证编码器参数是否被修改
@@ -5407,7 +5417,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                                 encoderInfo = " | 编码器: min=\(encMin/1000)k max=\(encMax/1000)k"
                                 
                                 // ⚠️ 警告：如果编码器参数不是目标值，说明被WebRTC内部修改了
-                                if encMin != self.targetBitrateKbps * 1000 || encMax != self.targetBitrateKbps * 1000 {
+                                if encMin != self.targetMinBitrateKbps * 1000 || encMax != self.targetBitrateKbps * 1000 {
                                     encoderInfo += " ⚠️被修改"
                                 }
                             }

@@ -56,58 +56,9 @@ struct LUTParams {
     float redSat;       // 红色饱和度（对手更红主要靠这个）
 };
 
-// 检测 ♥♦ 类红色像素（含远处发暗的红）
-inline float cardRedWeight(float3 rgb) {
-    float maxGB = max(rgb.g, rgb.b);
-    float redness = max(0.0, rgb.r - maxGB);
-    return smoothstep(0.012, 0.07, redness);
-}
-
-// LUT 前：先把暗红抬出 LUT 查表的"黑色死区"
-inline float3 preLiftCardRed(float3 rgb, float lift, float redHue) {
-    float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
-    // 远处牌落在 0.05~0.45 luma，必须覆盖
-    float shadowMask = (1.0 - smoothstep(0.40, 0.82, luma)) * redHue;
-    float boost = lift * (1.2 + (0.35 - min(luma, 0.35)) * 2.0);
-    rgb.r += boost * shadowMask;
-    rgb.g -= boost * 0.12 * shadowMask;
-    rgb.b -= boost * 0.12 * shadowMask;
-    return clamp(rgb, 0.0, 1.0);
-}
-
+// 玉麒麟 GPUImage LookupFilter：mix(原色, 查表色, intensity)，无额外抬红
 inline float3 applyPokerLutGrade(float3 rgb, float3 mapped, constant LUTParams& p) {
-    float redHue = cardRedWeight(rgb);
-
-    // ① LUT 前先抬暗红，避免查表进死黑区
-    rgb = preLiftCardRed(rgb, p.redLift, redHue);
-
-    float3 outRgb = mix(rgb, mapped, p.intensity);
-    float luma = dot(outRgb, float3(0.2126, 0.7152, 0.0722));
-    float outRedHue = max(cardRedWeight(outRgb), redHue);
-
-    // ② LUT 后再抬红 + 加饱和（只作用于红色像素，白桌不动）
-    float shadowMask = (1.0 - smoothstep(0.38, 0.85, luma)) * outRedHue;
-    float hiCap = 1.0 - smoothstep(0.90, 0.98, luma);
-    float redBoost = p.redLift * (0.8 + (0.40 - min(luma, 0.40))) * shadowMask * hiCap;
-    outRgb.r += redBoost;
-    outRgb.g -= redBoost * 0.10;
-    outRgb.b -= redBoost * 0.10;
-
-    // ③ 红色饱和：对手更红，主要是 Cr/V 方向拉满
-    float gray = luma;
-    outRgb = mix(float3(gray), outRgb, 1.0 + p.redSat * outRedHue);
-
-    // 色温：主要作用在中低亮（背景桌布），高光少动保持白
-    float tempMask = (1.0 - smoothstep(0.50, 0.92, luma)) * (1.0 - outRedHue * 0.85);
-    outRgb.r += p.temperature * 0.55 * tempMask;
-    outRgb.g += p.temperature * 0.25 * tempMask;
-    outRgb.b -= p.temperature * tempMask;
-
-    // 亮度配合快门：只在中低亮抬曝光，高光区保护
-    float hiProtect = 1.0 - smoothstep(0.68, 0.97, luma);
-    outRgb = outRgb * (1.0 + p.exposure * hiProtect);
-
-    return clamp(outRgb, 0.0, 1.0);
+    return mix(rgb, mapped, clamp(p.intensity, 0.0, 1.0));
 }
 
 // Pass1: 全分辨率 Y（使用对应 UV 采样）

@@ -2,9 +2,8 @@ import Metal
 import MetalKit
 import CoreVideo
 
-/// GPUImage LookupFilter 等价路径（512×512 LUT，玉麒麟 GPUImage.framework 同款资源）
-/// 原生模式：相机 NV12 → LUT 查表 → 牌面调色 → NV12 → 编码
-/// 亮度滑块只调 LUT 侧（intensity/exposure/temperature/redLift），曝光由快门负责
+/// GPUImage LookupFilter 等价（512×512 LUT，玉麒麟同款 png）
+/// 相机 NV12 → 纯 LUT 查表 mix → NV12，无额外抬红/饱和
 final class NV12LUTProcessor {
 
     /// 玉麒麟包里 5 张 LUT（与 PC 滤镜弹框 / STOMP ptype=lutName 一致）
@@ -15,18 +14,14 @@ final class NV12LUTProcessor {
         "lookup_amatorka",
         "lookup_miss_etikate"
     ]
-    static let defaultLutName = "lookup_soft_elegance_1"
+    static let defaultLutName = "lookup"
 
-    /// LUT 混合强度 0~1
-    var intensity: Float = 0.72
-    /// 中低亮曝光偏移（高光有保护）
+    /// LUT 混合强度 0~1（玉麒麟 GPUImage 默认满强度查表）
+    var intensity: Float = 1.0
     var exposure: Float = 0.0
-    /// 负=偏冷去黄，正=偏暖
-    var temperature: Float = -0.010
-    /// 暗红抬升（远处牌防发黑）
-    var redLift: Float = 0.28
-    /// 红色饱和（对手更红）
-    var redSat: Float = 0.42
+    var temperature: Float = 0.0
+    var redLift: Float = 0.0
+    var redSat: Float = 0.0
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -93,23 +88,14 @@ final class NV12LUTProcessor {
         return defaultLutName
     }
 
-    /// PC「原生亮度」0~100（50=默认）→ LUT 四参数，不调 ISO/EV（快门管曝光）
+    /// 硬件亮度滑块联动（仅微调 LUT 强度，不调红/色温）
     func applyNativeBrightness(_ value: Int) {
         let v = Float(max(0, min(100, value)))
-        let centered = (v - 50.0) / 50.0  // -1..1
-
-        // LUT 强度
-        intensity = 0.45 + (v / 100.0) * 0.45  // 0→0.45, 50→0.67, 100→0.90
-
-        exposure = centered * 0.22
-
-        temperature = -0.025 + centered * 0.015
-
-        // 远处牌红色：默认强保护，滑块居中最大
-        redLift = 0.32 - abs(centered) * 0.08   // 0.24~0.32
-        redSat = 0.38 + (1.0 - abs(centered)) * 0.12  // 0.38~0.50
-
-        print("🧪 [LUT亮度] slider=\(value) → intensity=\(String(format: "%.2f", intensity)) exp=\(String(format: "%.2f", exposure)) redLift=\(String(format: "%.2f", redLift)) redSat=\(String(format: "%.2f", redSat))")
+        intensity = 0.85 + (v / 100.0) * 0.15   // 0→0.85, 50→0.925, 100→1.0
+        exposure = 0
+        temperature = 0
+        redLift = 0
+        redSat = 0
     }
 
     func process(_ input: CVPixelBuffer) -> CVPixelBuffer? {
