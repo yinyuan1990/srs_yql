@@ -28,6 +28,15 @@
 		2C4151A12F13AB7600272C01 /* user_agreement.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A02F13AB7600272C01 /* user_agreement.html */; };
 		2C4151A32F13AB8400272C01 /* privacy_policy.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A22F13AB8400272C01 /* privacy_policy.html */; };
 		2C4151A52F13ABF000272C01 /* LocalWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4151A42F13ABF000272C01 /* LocalWebView.swift */; };
+		2C4E72D62FC5500D00BC4D30 /* NV12Filter.metal in Sources */ = {isa = PBXBuildFile; fileRef = 2C4E72D52FC5500C00BC4D30 /* NV12Filter.metal */; };
+		2C4E72D82FC5501400BC4D30 /* NV12MetalProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4E72D72FC5501400BC4D30 /* NV12MetalProcessor.swift */; };
+		2C4E72D92FC5501500BC4D30 /* NV12LUTFilter.metal in Sources */ = {isa = PBXBuildFile; fileRef = 2C4E72DC2FC5501800BC4D30 /* NV12LUTFilter.metal */; };
+		2C4E72DA2FC5501600BC4D30 /* NV12LUTProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4E72DD2FC5501900BC4D30 /* NV12LUTProcessor.swift */; };
+		2C4E72DB2FC5501700BC4D30 /* lookup_amatorka.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72DE2FC5501A00BC4D30 /* lookup_amatorka.png */; };
+		2C4E72E02FC5501C00BC4D30 /* lookup.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E42FC5502000BC4D30 /* lookup.png */; };
+		2C4E72E12FC5501D00BC4D30 /* lookup_soft_elegance_1.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E52FC5502100BC4D30 /* lookup_soft_elegance_1.png */; };
+		2C4E72E22FC5501E00BC4D30 /* lookup_soft_elegance_2.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */; };
+		2C4E72E32FC5501F00BC4D30 /* lookup_miss_etikate.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */; };
 		2C596C582E58E22500C94789 /* srsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C572E58E22500C94789 /* srsApp.swift */; };
 		2C596C5A2E58E22500C94789 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C592E58E22500C94789 /* ContentView.swift */; };
 		2C596C5C2E58E22600C94789 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C596C5B2E58E22600C94789 /* Assets.xcassets */; };
@@ -67,6 +76,15 @@
 		2C4151A02F13AB7600272C01 /* user_agreement.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = user_agreement.html; sourceTree = "<group>"; };
 		2C4151A22F13AB8400272C01 /* privacy_policy.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = privacy_policy.html; sourceTree = "<group>"; };
 		2C4151A42F13ABF000272C01 /* LocalWebView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LocalWebView.swift; sourceTree = "<group>"; };
+		2C4E72D52FC5500C00BC4D30 /* NV12Filter.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = NV12Filter.metal; sourceTree = "<group>"; };
+		2C4E72D72FC5501400BC4D30 /* NV12MetalProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NV12MetalProcessor.swift; sourceTree = "<group>"; };
+		2C4E72DC2FC5501800BC4D30 /* NV12LUTFilter.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = NV12LUTFilter.metal; sourceTree = "<group>"; };
+		2C4E72DD2FC5501900BC4D30 /* NV12LUTProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NV12LUTProcessor.swift; sourceTree = "<group>"; };
+		2C4E72DE2FC5501A00BC4D30 /* lookup_amatorka.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_amatorka.png; sourceTree = "<group>"; };
+		2C4E72E42FC5502000BC4D30 /* lookup.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup.png; sourceTree = "<group>"; };
+		2C4E72E52FC5502100BC4D30 /* lookup_soft_elegance_1.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_soft_elegance_1.png; sourceTree = "<group>"; };
+		2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_soft_elegance_2.png; sourceTree = "<group>"; };
+		2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_miss_etikate.png; sourceTree = "<group>"; };
 		2C596C542E58E22500C94789 /* 金凤凰.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "金凤凰.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		2C596C572E58E22500C94789 /* srsApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = srsApp.swift; sourceTree = "<group>"; };
 		2C596C592E58E22500C94789 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -117,12 +135,28 @@
 		2C25E1222E5FBB4200EA9245 /* Managers */ = {
 			isa = PBXGroup;
 			children = (
+				2C4E72D72FC5501400BC4D30 /* NV12MetalProcessor.swift */,
+				2C4E72DD2FC5501900BC4D30 /* NV12LUTProcessor.swift */,
+				2C4E72D52FC5500C00BC4D30 /* NV12Filter.metal */,
+				2C4E72DC2FC5501800BC4D30 /* NV12LUTFilter.metal */,
 				2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */,
 				2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */,
 				2C5B00512E90DC5100755FBF /* WebRTCManager.swift */,
 				2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */,
 			);
 			path = Managers;
+			sourceTree = "<group>";
+		};
+		2C4E72DF2FC5501B00BC4D30 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				2C4E72E42FC5502000BC4D30 /* lookup.png */,
+				2C4E72DE2FC5501A00BC4D30 /* lookup_amatorka.png */,
+				2C4E72E52FC5502100BC4D30 /* lookup_soft_elegance_1.png */,
+				2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */,
+				2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */,
+			);
+			path = Resources;
 			sourceTree = "<group>";
 		};
 		2C596C4B2E58E22500C94789 = {
@@ -156,6 +190,7 @@
 				2C0BB2D42EED8CEA00332D6F /* SplashView.swift */,
 				2C0BB2D22EE6B85800332D6F /* AESUtils.swift */,
 				2C25E1222E5FBB4200EA9245 /* Managers */,
+				2C4E72DF2FC5501B00BC4D30 /* Resources */,
 				2C25E11F2E5FBADC00EA9245 /* Models */,
 				2C25E0ED2E5E70BF00EA9245 /* AccountStorageManager.swift */,
 				2C25E0EB2E5E4C1B00EA9245 /* APIConfig.swift */,
@@ -255,6 +290,11 @@
 				2C596C5C2E58E22600C94789 /* Assets.xcassets in Resources */,
 				2C4151A12F13AB7600272C01 /* user_agreement.html in Resources */,
 				2C4151A32F13AB8400272C01 /* privacy_policy.html in Resources */,
+				2C4E72DB2FC5501700BC4D30 /* lookup_amatorka.png in Resources */,
+				2C4E72E02FC5501C00BC4D30 /* lookup.png in Resources */,
+				2C4E72E12FC5501D00BC4D30 /* lookup_soft_elegance_1.png in Resources */,
+				2C4E72E22FC5501E00BC4D30 /* lookup_soft_elegance_2.png in Resources */,
+				2C4E72E32FC5501F00BC4D30 /* lookup_miss_etikate.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -278,12 +318,16 @@
 				2CC405972E67CBA500E31EF8 /* ThinRemoteConfig.swift in Sources */,
 				2C5B00542E90DD2600755FBF /* WebRTCPreview.swift in Sources */,
 				2C25E0EC2E5E4C1B00EA9245 /* APIConfig.swift in Sources */,
+				2C4E72D82FC5501400BC4D30 /* NV12MetalProcessor.swift in Sources */,
+				2C4E72DA2FC5501600BC4D30 /* NV12LUTProcessor.swift in Sources */,
 				2C0BB2D72EF12C6E00332D6F /* ActivationView.swift in Sources */,
 				2C25E0EE2E5E70BF00EA9245 /* AccountStorageManager.swift in Sources */,
 				2C0BB2DB2EF54BCE00332D6F /* UnbindView.swift in Sources */,
 				2C5B00522E90DC5100755FBF /* WebRTCManager.swift in Sources */,
 				2C596C582E58E22500C94789 /* srsApp.swift in Sources */,
 				2CF5F3452F263D6A00AA0575 /* MessageView.swift in Sources */,
+				2C4E72D62FC5500D00BC4D30 /* NV12Filter.metal in Sources */,
+				2C4E72D92FC5501500BC4D30 /* NV12LUTFilter.metal in Sources */,
 				2C404C5B2E6A27DD0015CF69 /* ProfileView.swift in Sources */,
 				2C25E0EA2E5E49EB00EA9245 /* RegisterView.swift in Sources */,
 				2C0BB2B22ED6E91100332D6F /* BindingListView.swift in Sources */,

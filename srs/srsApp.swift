@@ -322,6 +322,16 @@ struct srsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     init() {
+        // 强制覆盖滤镜默认值（修复白点噪点问题）
+        let filterVersion = "filter_defaults_v4"
+        if UserDefaults.standard.string(forKey: filterVersion) == nil {
+            UserDefaults.standard.set(Float(0.0),   forKey: "videoFilter.noiseLevel")
+            UserDefaults.standard.set(Float(0.6),   forKey: "videoFilter.sharpenAmount")
+            UserDefaults.standard.set(Float(0.15),  forKey: "videoFilter.exposure")
+            UserDefaults.standard.set(Float(0.0),   forKey: "videoFilter.highlightLift")
+            UserDefaults.standard.set(filterVersion, forKey: filterVersion)
+        }
+
         // App 启动时执行一次
         // 🧪 测试AES加密
         AESUtils.testEncryption()

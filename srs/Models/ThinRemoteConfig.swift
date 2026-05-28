@@ -35,6 +35,7 @@ struct ThinRemoteConfig: Codable {
     var gamma: Float?           // 伽马 0.5..2.0
     var exposure: Float?        // 曝光 -3..+3 stops
     var filterEnabled: Bool?    // 滤镜主开关
+    var lutName: String?        // 玉麒麟 LUT 图名 (5 张之一)
 
     let lastUpdated: String?
     let updatedBy: String?
@@ -63,6 +64,7 @@ struct ThinRemoteConfig: Codable {
         case gamma
         case exposure
         case filterEnabled
+        case lutName
         case lastUpdated = "last_updated"
         case updatedBy = "updated_by"
     }
@@ -117,6 +119,7 @@ struct ThinRemoteConfig: Codable {
         gamma = try container.decodeIfPresent(Float.self, forKey: .gamma)
         exposure = try container.decodeIfPresent(Float.self, forKey: .exposure)
         filterEnabled = try container.decodeIfPresent(Bool.self, forKey: .filterEnabled)
+        lutName = try container.decodeIfPresent(String.self, forKey: .lutName)
         lastUpdated = try container.decodeIfPresent(String.self, forKey: .lastUpdated)
         updatedBy = try container.decodeIfPresent(String.self, forKey: .updatedBy)
     }
@@ -148,6 +151,7 @@ struct ThinRemoteConfig: Codable {
         self.gamma = nil
         self.exposure = nil
         self.filterEnabled = nil
+        self.lutName = nil
         self.lastUpdated = nil
         self.updatedBy = nil
     }
