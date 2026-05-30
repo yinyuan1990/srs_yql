@@ -248,6 +248,28 @@ class WebSocketManager: ObservableObject {
     }
     
     
+    /// 运用白平衡结果回传：iOS 自动测得色温后通知 PC 同步滑块
+    func sendWhiteBalanceResult(sliderValue: Int) {
+        guard let deviceId = deviceId else { return }
+        let destination = "/topic/device/\(deviceId)/config"
+        let config: [String: Any] = [
+            "ptype": "applyWhiteBalance",
+            "wb_value": sliderValue,
+            "device_id": deviceId
+        ]
+        let payloadDict: [String: Any] = [
+            "type": "CONFIG_UPDATE",
+            "deviceId": deviceId,
+            "config": config,
+            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payloadDict, options: []),
+           let payload = String(data: data, encoding: .utf8) {
+            swiftStomp?.send(body: payload, to: destination)
+            print("📤 [运用白平衡] 回传 slider=\(sliderValue)")
+        }
+    }
+
     // MARK: - 连接
     func connect(deviceId: String) {
         self.deviceId = deviceId
@@ -521,6 +543,20 @@ extension WebSocketManager: SwiftStompDelegate {
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(
                         name: NSNotification.Name("TestBrightnessCommand"),
+                        object: nil,
+                        userInfo: ["value": value]
+                    )
+                }
+            }
+
+            // 白平衡滑块（PC 端下发 0-100，映射色温 2000K-8000K）
+            if let config = msgDict?["config"] as? [String: Any],
+               let cmd = config["cmd"] as? String, cmd == "white_balance" {
+                let value = config["value"] as? Int ?? 50
+                print("⚪️ [white_balance] 收到PC指令: value=\(value)")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("WhiteBalanceCommand"),
                         object: nil,
                         userInfo: ["value": value]
                     )

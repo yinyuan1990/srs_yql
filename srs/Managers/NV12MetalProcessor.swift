@@ -15,6 +15,7 @@ final class NV12MetalProcessor {
     var saturation:  Float = 1.30
     var sharpen:     Float = 0.6
     var redGlow:     Float = 0.25
+    var pixelLevel:  Float = 0.0
     var enabled:     Bool  = true
 
     // MARK: - Metal 资源
@@ -99,7 +100,7 @@ final class NV12MetalProcessor {
         var params = NV12Params(
             exposure: exposure, blackPoint: blackPoint, brightness: brightness,
             gamma: gamma, contrast: contrast, saturation: saturation,
-            sharpen: sharpen, redGlow: redGlow
+            sharpen: sharpen, redGlow: redGlow, pixelLevel: pixelLevel
         )
 
         // Pass 1：Y 平面（全分辨率）
@@ -128,12 +129,13 @@ final class NV12MetalProcessor {
         saturation = fp.saturation
         sharpen    = fp.sharpenAmount
         redGlow    = fp.redGlow
+        pixelLevel = fp.pixelLevel
         enabled    = fp.enabled
     }
 
     // MARK: - 私有工具
     private struct NV12Params {
-        var exposure, blackPoint, brightness, gamma, contrast, saturation, sharpen, redGlow: Float
+        var exposure, blackPoint, brightness, gamma, contrast, saturation, sharpen, redGlow, pixelLevel: Float
     }
 
     private func makeTexture(_ cache: CVMetalTextureCache,

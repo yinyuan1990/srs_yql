@@ -114,6 +114,11 @@ final class VideoFilterPipeline: ObservableObject {
     @Published var redGlow: Float = VideoFilterPipeline.loadDefault(.redGlow, fallback: 0.25) {
         didSet { saveDefault(.redGlow, redGlow); if oldValue != redGlow { logChange("redGlow", redGlow) } }
     }
+    /// 玉麒麟 pixel_level: -2...8，采集后像素亮度等级（不是相机 ISO/EV）
+    @Published var pixelLevel: Float = VideoFilterPipeline.loadDefault(.pixelLevel, fallback: 0.0) {
+        didSet { saveDefault(.pixelLevel, pixelLevel); if oldValue != pixelLevel { logChange("pixelLevel", pixelLevel) } }
+    }
+
     /// 高光提亮: > 0.7 的像素非线性推向 1.0
     @Published var highlightLift: Float = VideoFilterPipeline.loadDefault(.highlightLift, fallback: 0.0) {
         didSet { saveDefault(.highlightLift, highlightLift); if oldValue != highlightLift { logChange("highlightLift", highlightLift) } }
@@ -149,6 +154,7 @@ final class VideoFilterPipeline: ObservableObject {
         case highlightLift = "videoFilter.highlightLift"
         case gamma         = "videoFilter.gamma"
         case exposure      = "videoFilter.exposure"
+        case pixelLevel    = "videoFilter.pixelLevel"
         case noiseLevel    = "videoFilter.noiseLevel"
         case sharpenAmount = "videoFilter.sharpenAmount"
     }
@@ -170,7 +176,7 @@ final class VideoFilterPipeline: ObservableObject {
     func applyAll(brightness: Float?, contrast: Float?, saturation: Float?,
                   sharpness: Float?, redBoost: Float? = nil,
                   blackPoint: Float? = nil, redGlow: Float? = nil, highlightLift: Float? = nil,
-                  gamma: Float? = nil, exposure: Float? = nil,
+                  gamma: Float? = nil, exposure: Float? = nil, pixelLevel: Float? = nil,
                   enabled: Bool? = nil, source: String = "remote") {
         if let v = brightness { self.brightness = v }
         if let v = contrast   { self.contrast   = v }
@@ -182,14 +188,16 @@ final class VideoFilterPipeline: ObservableObject {
         if let v = highlightLift { self.highlightLift = v }
         if let v = gamma      { self.gamma      = v }
         if let v = exposure   { self.exposure   = v }
+        if let v = pixelLevel { self.pixelLevel = max(-2.0, min(8.0, v)) }
         if let v = enabled    { self.enabled    = v }
-        print("📷 [Filter] 批量应用 (\(source)): exp=\(self.exposure) bp=\(self.blackPoint) bright=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) sat=\(self.saturation) redGlow=\(self.redGlow) hi=\(self.highlightLift) enabled=\(self.enabled)")
+        print("📷 [Filter] 批量应用 (\(source)): exp=\(self.exposure) pixel=\(self.pixelLevel) bp=\(self.blackPoint) bright=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) sat=\(self.saturation) redGlow=\(self.redGlow) hi=\(self.highlightLift) enabled=\(self.enabled)")
     }
 
     // ===== Metal CIColorKernel: 一次 dispatch 完成所有色彩运算 =====
     private static let kernelSource: String = """
     kernel vec4 cardEnhance(__sample s,
                             float exposure,
+                            float pixelLevel,
                             float blackPoint,
                             float brightness,
                             float gamma,
@@ -202,7 +210,20 @@ final class VideoFilterPipeline: ObservableObject {
         // 0. 曝光: rgb × 2^EV
         rgb = rgb * exp2(exposure);
 
-        // 1. 黑场压死
+        // 1. 玉麒麟 pixel_level: -2...8，主要动中高亮/白场，黑位基本不动
+        float px = clamp(pixelLevel, -2.0, 8.0);
+        vec3 hiMask = smoothstep(vec3(0.32), vec3(0.92), rgb);
+        if (px >= 0.0) {
+            float lift = px / 8.0;
+            rgb = rgb + lift * 0.70 * hiMask * (1.0 - rgb);
+            rgb = mix(rgb, min(rgb * (1.0 + lift * 0.12), vec3(1.0)), hiMask * vec3(0.25));
+        } else {
+            float down = (-px) / 2.0;
+            rgb = rgb - down * 0.55 * hiMask * rgb;
+        }
+        rgb = clamp(rgb, 0.0, 1.0);
+
+        // 2. 黑场压死
         float bpDenom = max(1.0 - blackPoint, 0.001);
         rgb = max(rgb - vec3(blackPoint), vec3(0.0)) / vec3(bpDenom);
 
@@ -264,7 +285,7 @@ final class VideoFilterPipeline: ObservableObject {
     var isPassThrough: Bool {
         if !enabled { return true }
         if cardEnhanceKernel == nil { return true }
-        return exposure == 0 && blackPoint == 0 && brightness == 0 && gamma == 1.0
+        return exposure == 0 && pixelLevel == 0 && blackPoint == 0 && brightness == 0 && gamma == 1.0
             && contrast == 1.0 && saturation == 1.0 && redGlow == 0 && highlightLift == 0
             && noiseLevel == 0 && sharpenAmount == 0
     }
@@ -311,7 +332,7 @@ final class VideoFilterPipeline: ObservableObject {
         // Step 2: 色彩增强 (CIColorKernel 单 pass)
         guard let colorResult = kernel.apply(
             extent: ciImage.extent,
-            arguments: [ciImage, exposure, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift]
+            arguments: [ciImage, exposure, pixelLevel, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift]
         ) else { return nil }
 
         // Step 3: 锐化（2米远牌面天然偏软，必须锐化）
@@ -340,7 +361,7 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     var lutModeEnabled: Bool = true                     // ⭐ LUT 开关（默认开）
     var filterModeEnabled: Bool = false                 // ⭐ Metal 滤镜栈（默认关，对标玉麒麟）
 
-    /// 相机 NV12 → [Metal 滤镜] → [LUT] → 编码（两阶段可独立开关）
+    /// 相机 NV12 → [Metal 滤镜(开关)] → [LUT(开关，高光在此)] → 编码
     private func applyFilter(_ frame: RTCVideoFrame) -> RTCVideoFrame {
         guard let cvBuffer = (frame.buffer as? RTCCVPixelBuffer)?.pixelBuffer else { return frame }
 
@@ -742,6 +763,18 @@ enum MountOrientation: Int, CaseIterable {
         }
 }
 
+enum CaptureRangeMode: String, CaseIterable {
+    case any = "Any"
+    case fullRange420f = "420f"
+    case videoRange420v = "420v"
+}
+
+enum CaptureBinningMode: String, CaseIterable {
+    case any = "Any"
+    case binned = "Binned"
+    case nonBinned = "NonBinned"
+}
+
 
 struct LadderPreset {
     let width: Int         // 输出宽度（缩放后）
@@ -777,6 +810,18 @@ final class WebRTCManager: NSObject, ObservableObject {
     var currentKbps: Int = 0       // 🔥 去掉@Published，纯统计不触发UI刷新
     var currentFps: Int = 0         // 🔥 去掉@Published，纯统计不触发UI刷新
     @Published var currentProfile: LadderProfile = .standard
+    @Published var captureRangeMode: CaptureRangeMode = .any
+    @Published var captureBinningMode: CaptureBinningMode = .any
+    @Published var wbTemperature: Float = 0
+    @Published var wbTint: Float = 0
+    @Published var wbRed: Float = 0
+    @Published var wbGreen: Float = 0
+    @Published var wbBlue: Float = 0
+    @Published var wbBlack: Float = 0
+    @Published var wbWhite: Float = 0
+    @Published var wbAmber: Float = 0
+    /// PC 下发采集颜色时递增，驱动 iOS 面板滑块同步（iOS 本地调节不回传 PC）
+    @Published private(set) var captureColorRemoteTick: UInt = 0
     // 额外暴露采集/推送FPS，便于UI区分显示
    var currentCaptureFps: Int = 0   // 🔥 去掉@Published，纯统计不触发UI刷新
    var currentSendFps: Int = 0      // 🔥 去掉@Published，纯统计不触发UI刷新
@@ -958,11 +1003,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         
         // 同步相机采集帧率（服务器下发fps时）
-        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+        if let input = capturer?.currentVideoInput {
             let dev = input.device
             let captureFps = max(clamped, minCaptureFps)
             if currentCaptureFPS != captureFps {
-                lockFrameRate(dev: dev, fps: captureFps)
+                capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
                 print("🎯 [FPS同步] 推流:\(clamped)fps → 采集:\(captureFps)fps ✅已调整 (后端下发\(fps)/4=\(actualTargetFps))")
             } else {
@@ -1111,11 +1156,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fps
         
         // 2. 同步相机采集帧率（避免 ISP 全速空跑）
-        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+        if let input = capturer?.currentVideoInput {
             let dev = input.device
             let captureFps = max(fps, minCaptureFps)
             if currentCaptureFPS != captureFps {
-                lockFrameRate(dev: dev, fps: captureFps)
+                capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
                 print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
             } else {
@@ -1223,50 +1268,76 @@ final class WebRTCManager: NSObject, ObservableObject {
         applyLutMode(lutModeEnabled)
     }
 
-    /// PC「亮度」滑块：硬件 ISO/EV，玉麒麟同款 -2~+8 EV，默认 0，不受滤镜/LUT 开关影响
+    /// PC「亮度」滑块：后台直接下发 -2...8，只走硬件 ISO/EV，不进滤镜链路
     @objc private func onTestBrightnessCommand(_ notification: Notification) {
         guard let userInfo = notification.userInfo else { return }
-        let value = userInfo["value"] as? Int ?? Self.defaultHardwareBrightnessSlider
-        hardwareBrightnessSliderValue = value
+        let value = userInfo["value"] as? Int ?? 0
         applyHardwareBrightness(value)
     }
 
-    /// 0~100 滑块 → EV -2..+8（20=0EV）
+    /// 后台亮度值：-2...8，0 为默认
     static let hardwareBrightnessMinEV: Float = -2.0
     static let hardwareBrightnessMaxEV: Float = 8.0
-    static let defaultHardwareBrightnessSlider: Int = 20
+    static let defaultHardwareBrightnessSlider: Int = 0
 
     static func hardwareEV(fromSlider value: Int) -> Float {
-        let v = Float(max(0, min(100, value)))
-        return hardwareBrightnessMinEV + (v / 100.0) * (hardwareBrightnessMaxEV - hardwareBrightnessMinEV)
+        let slider = max(0, min(100, value))
+        return hardwareBrightnessMinEV + Float(slider) * 0.1
     }
 
-    /// 硬件亮度：custom 快门 → 调 ISO；AE 自动 → EV 补偿（玉麒麟方案）
+    /// 硬件亮度：走硬件 ISO/EV，不走 shader 高光增强
     func applyHardwareBrightness(_ sliderValue: Int) {
         let ev = Self.hardwareEV(fromSlider: sliderValue)
-        guard let dev = getCurrentCaptureDevice() else { return }
+        hardwareBrightnessSliderValue = max(0, min(100, sliderValue))
+        print("📷 [硬件亮度] value=\(sliderValue) EV=\(String(format: "%.2f", ev))")
+        applyHardwareBrightnessEVIfReady()
+    }
 
-        do {
-            try dev.lockForConfiguration()
+    private func applyHardwareBrightnessEVIfReady() {
+        guard let capturer else { return }
+        capturer.applyHardwareBrightnessEV(Self.hardwareEV(fromSlider: hardwareBrightnessSliderValue))
+    }
 
-            if dev.exposureMode == .custom {
-                let currentDuration = dev.exposureDuration
-                let baseISO = dev.iso
-                let multiplier = pow(2.0, ev)
-                var newISO = baseISO * multiplier
-                newISO = max(dev.activeFormat.minISO, min(newISO, dev.activeFormat.maxISO))
-                dev.setExposureModeCustom(duration: currentDuration, iso: newISO, completionHandler: nil)
-                print("📷 [硬件亮度] custom ISO=\(Int(newISO)) EV=\(String(format: "%.2f", ev))")
-            } else {
-                let clamped = max(dev.minExposureTargetBias, min(ev, dev.maxExposureTargetBias))
-                dev.setExposureTargetBias(clamped, completionHandler: nil)
-                print("📷 [硬件亮度] AE EV=\(String(format: "%.2f", clamped))")
-            }
+    // MARK: - 白平衡（PC 滤镜弹框下发，0-100 → 2000K-8000K）
 
-            dev.unlockForConfiguration()
-        } catch {
-            print("📷 [硬件亮度] 设置失败: \(error.localizedDescription)")
+    @objc private func onWhiteBalanceCommand(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        let value = userInfo["value"] as? Int ?? 50
+        applyHardwareWhiteBalance(value)
+    }
+
+    static let wbMinKelvin: Float = 2000
+    static let wbMaxKelvin: Float = 8000
+    static let defaultWBSlider: Int = 50
+
+    static func colorTemperature(fromSlider value: Int) -> Float {
+        let slider = max(0, min(100, value))
+        return wbMinKelvin + Float(slider) / 100.0 * (wbMaxKelvin - wbMinKelvin)
+    }
+
+    func applyHardwareWhiteBalance(_ sliderValue: Int) {
+        let kelvin = Self.colorTemperature(fromSlider: sliderValue)
+        hardwareWBSliderValue = max(0, min(100, sliderValue))
+        print("⚪️ [白平衡] value=\(sliderValue) kelvin=\(Int(kelvin))K")
+        guard let capturer else { return }
+        capturer.applyColorTemperature(kelvin)
+    }
+
+    /// 运用白平衡：开自动WB → 等收敛 → 读色温 → 锁定 → 回传滑块值给 PC
+    func applyWhiteBalanceOnce() {
+        guard let capturer else { return }
+        capturer.applyWhiteBalanceOnceAndLock { [weak self] kelvin in
+            guard let self else { return }
+            let slider = Self.sliderFromTemperature(kelvin)
+            self.hardwareWBSliderValue = slider
+            print("⚪️ [运用白平衡] 自动测得 \(Int(kelvin))K → slider=\(slider)")
+            WebSocketManager.shared.sendWhiteBalanceResult(sliderValue: slider)
         }
+    }
+
+    static func sliderFromTemperature(_ kelvin: Float) -> Int {
+        let slider = (kelvin - wbMinKelvin) / (wbMaxKelvin - wbMinKelvin) * 100
+        return max(0, min(100, Int(round(slider))))
     }
 
     /// 处理 PC 端发来的 set_fps 通知
@@ -1355,11 +1426,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fps
         
         // 2. 同步相机采集帧率（避免相机 ISP 全速采集浪费功耗）
-        if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+        if let input = capturer?.currentVideoInput {
             let dev = input.device
             let captureFps = max(fps, minCaptureFps)
             if currentCaptureFPS != captureFps {
-                lockFrameRate(dev: dev, fps: captureFps)
+                capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
                 print("🎯 [FPS同步] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
             } else {
@@ -1415,9 +1486,9 @@ final class WebRTCManager: NSObject, ObservableObject {
                 applyPipelineModes()
                 print("🔄 [enableAverageThrottling] 创建新节流器，采集=\(currentCaptureFPS)fps，推送=\(targetOutputFPS)fps，预览=60fps")
             }
-            capturer.delegate = frameThrottler!
+            capturer.setDelegate(frameThrottler!)
         } else if let source = self.videoSource {
-            capturer.delegate = source
+            capturer.setDelegate(source)
         }
     }
     
@@ -1451,61 +1522,9 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     /// 应用快门速度变化 — 快门优先模式（精确锁定快门 + 自动 ISO 闭环）
     private func applyShutterSpeedChange() {
-        guard let device = getCurrentCaptureDevice() else {
-            print("⚠️ [applyShutterSpeedChange] device 不存在")
-            return
-        }
-
         let snappedShutter = snapToAntiFlicker(cjfpsValue)
-
-        do {
-            try device.lockForConfiguration()
-
-            if device.isExposureModeSupported(.custom) {
-                let duration = CMTime(value: 1, timescale: CMTimeScale(snappedShutter))
-                let minDuration = device.activeFormat.minExposureDuration
-                let maxDuration = device.activeFormat.maxExposureDuration
-
-                let safeDuration: CMTime
-                let actualShutter: Int
-                if duration < minDuration {
-                    safeDuration = minDuration
-                    actualShutter = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                } else if duration > maxDuration {
-                    safeDuration = maxDuration
-                    actualShutter = Int(1.0 / CMTimeGetSeconds(safeDuration))
-                } else {
-                    safeDuration = duration
-                    actualShutter = snappedShutter
-                }
-
-                // ISO: 闭环开启时保留当前值，否则用中位
-                let minISO = device.activeFormat.minISO
-                let maxISO = device.activeFormat.maxISO
-                let fixedISO: Float
-                if autoIsoEnabled {
-                    // 格式切换后 device.iso 可能超出新 format 范围，必须 clamp
-                    fixedISO = max(minISO, min(maxISO, device.iso))
-                } else {
-                    fixedISO = minISO + (maxISO - minISO) / 2
-                }
-
-                device.setExposureModeCustom(duration: safeDuration, iso: fixedISO, completionHandler: nil)
-
-                // 锁帧率，防止手动曝光后帧率被降低
-                let targetFps = max(currentCaptureFPS, 15)
-                let frameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFps))
-                device.activeVideoMinFrameDuration = frameDuration
-                device.activeVideoMaxFrameDuration = frameDuration
-
-                print("📸 [快门优先] 快门=1/\(actualShutter)s(snap:\(cjfpsValue)→\(snappedShutter)), ISO=\(Int(fixedISO))[\(autoIsoEnabled ? "闭环" : "中位")], 帧率=\(targetFps)fps")
-            }
-
-            device.unlockForConfiguration()
-        } catch {
-            print("❌ [快门调整] 失败: \(error.localizedDescription)")
-        }
-
+        capturer?.applyShutter(snappedShutter,
+                               preserveCurrentISO: autoIsoEnabled)
         if autoIsoEnabled { startAutoIsoLoop() }
     }
 
@@ -1530,45 +1549,12 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     private func adjustIsoTowardsTarget() {
         guard autoIsoEnabled else { return }
-        guard let device = getCurrentCaptureDevice() else { return }
-
-        let offset = device.exposureTargetOffset
-        if abs(offset) < 0.3 { return }
-
-        let currentISO = device.iso
-        let factor = pow(2.0, Double(offset) * 0.5)
-        let newISO = Float(Double(currentISO) * factor)
-
-        let minISO = device.activeFormat.minISO
-        let maxISO = device.activeFormat.maxISO
-        let clampedISO = max(minISO, min(maxISO, newISO))
-
-        if abs(clampedISO - currentISO) < (maxISO - minISO) * 0.05 { return }
-
-        do {
-            try device.lockForConfiguration()
-            device.setExposureModeCustom(
-                duration: device.exposureDuration,
-                iso: clampedISO,
-                completionHandler: nil
-            )
-            device.unlockForConfiguration()
-            print("🔄 [AutoISO] EV=\(String(format: "%+.2f", offset)), ISO: \(Int(currentISO)) → \(Int(clampedISO))")
-        } catch {
-            print("❌ [AutoISO] 调整失败: \(error.localizedDescription)")
-        }
+        capturer?.adjustIsoTowardsTarget()
     }
 
     /// 获取当前采集设备
     private func getCurrentCaptureDevice() -> AVCaptureDevice? {
-        guard let session = capturer?.captureSession else { return nil }
-        for input in session.inputs {
-            if let deviceInput = input as? AVCaptureDeviceInput,
-               deviceInput.device.hasMediaType(.video) {
-                return deviceInput.device
-            }
-        }
-        return nil
+        return capturer?.currentDevice
     }
     
 
@@ -1645,7 +1631,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         case "direction":
             // 方向："-1"后置；"1"前置（若不一致则切换一次）
             //print("🔍 收到 direction 切换请求: cfg.direction=\(cfg.direction)")
-            if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+            if let input = capturer?.currentVideoInput {
                 let currentPos = input.device.position
                 let wantFront = (cfg.direction == "1")  // ✅ 1=前置，-1=后置
                 let curFront = (currentPos == .front)
@@ -1682,10 +1668,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
             
         case "cjfps":
-            // 🔥 快门速度（后端直接下发 60-600）
-            if let cj = cfg.cjfps {
+            let cj = cfg.cjfps ?? Int(cfg.brightness ?? 0)
+            if cj > 0 {
                 print("📸 [快门] cjfps=\(cj) → 1/\(cj)s")
-                setCaptureFrameRate(shutterSpeed: cj)
+                setCaptureFrameRate(shutterSpeed: cj, forceApply: true)
             } else {
                 print("⚠️ ptype=cjfps 缺少值，忽略")
             }
@@ -1719,6 +1705,51 @@ final class WebRTCManager: NSObject, ObservableObject {
             if let enabled = cfg.filterEnabled {
                 applyFilterMode(enabled)
             }
+
+        case "videoHDR":
+            if let enabled = cfg.videoHDR {
+                capturer?.applyVideoHDR(enabled)
+            }
+
+        case "autoHDR":
+            if let enabled = cfg.autoHDR {
+                capturer?.applyAutoHDR(enabled)
+            }
+
+        case "applyWhiteBalance":
+            if let wbResult = cfg.testWhiteBalance {
+                hardwareWBSliderValue = wbResult
+            } else {
+                applyWhiteBalanceOnce()
+            }
+
+        case "test_brightness":
+            let value = cfg.testBrightness ?? Int(cfg.exposure ?? cfg.brightness ?? Float(Self.defaultHardwareBrightnessSlider))
+            applyHardwareBrightness(value)
+
+        case "white_balance":
+            let value = cfg.testWhiteBalance ?? Self.defaultWBSlider
+            applyHardwareWhiteBalance(value)
+
+        case "captureColor":
+            applyRemoteCaptureColor(cfg)
+
+        case "captureColorReset":
+            resetCaptureColorAdjustment()
+            captureColorRemoteTick &+= 1
+            print("🎨 [CaptureColor] PC 重置采集颜色")
+
+        case "pixelLevel", "pixel_level", "last_pixel_level":
+            let level = cfg.exposure ?? cfg.brightness
+            videoFilter.applyAll(
+                brightness: nil,
+                contrast: nil,
+                saturation: nil,
+                sharpness: nil,
+                pixelLevel: level,
+                enabled: cfg.filterEnabled,
+                source: "stomp:\(cfg.ptype)"
+            )
 
         // ⭐ v3 滤镜直推 — STOMP 一跳到位, PC sendConfigUpdate("brightness", {"brightness": v}) 直接到这里
         case "brightness", "contrast", "saturation", "sharpness", "redBoost",
@@ -1779,7 +1810,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
             // 2) 方向："-1"后置；"1"前置（若不一致则切换一次）
             //print("🔍 初始化 direction 检查: cfg.direction=\(cfg.direction)")
-            if let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
+            if let input = capturer?.currentVideoInput {
                 let currentPos = input.device.position
                 let wantFront = (cfg.direction == "1")  // ✅ 1=前置，-1=后置
                 let curFront = (currentPos == .front)
@@ -1844,10 +1875,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             zoomValue = currentZoomFactor
             print("   📋 使用本地保存的 zoom: \(zoomValue)")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.setZoom(zoomValue)
-            print("   ✅ 变焦恢复: \(zoomValue)")
-        }
+        setZoom(zoomValue)
+        print("   ✅ 变焦恢复: \(zoomValue)")
         
         // 2) FPS（目标推送FPS）- 使用本地保存的值（已经是 /4 后的值）
         let fpsValue = targetOutputFPS
@@ -1907,10 +1936,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             zoomValue = currentZoomFactor
             print("   📋 使用本地保存的 zoom: \(zoomValue)")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.setZoom(zoomValue)
-            print("   ✅ 变焦恢复: \(zoomValue)")
-        }
+        setZoom(zoomValue)
+        print("   ✅ 变焦恢复: \(zoomValue)")
         
         // 2) FPS（目标推送FPS）- 使用本地保存的值
         let fpsValue = targetOutputFPS
@@ -1930,9 +1957,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 4) 对焦 - 唤醒后直接恢复保存的焦距（不执行自动对焦）
         if let savedFocus = savedUserFocusDistance {
             print("   ✅ 对焦恢复: \(savedFocus)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.setFocus(savedFocus)
-            }
+            setFocus(savedFocus)
         } else {
             print("   ✅ 对焦：保持当前焦距（由后端配置控制）")
         }
@@ -2047,7 +2072,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
                         self.frameThrottler = throttler
                         self.applyPipelineModes()
-                        self.capturer = RTCCameraVideoCapturer(delegate: throttler)
+                        self.capturer = CustomAVCaptureVideoCapturer(delegate: throttler)
                         // print("🔄 [初始化] 创建帧节流器")
 
                         // 🔥 预览轨道绑定到 previewVideoSource（固定60fps）
@@ -2062,7 +2087,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         self.currentProfile = useProfile
                         
                         // ✅ 打印前置和后置摄像头支持的所有格式（初始化诊断）
-                        let devices = RTCCameraVideoCapturer.captureDevices()
+                        let devices = CustomAVCaptureVideoCapturer.captureDevices()
                         
                         // 🔥 诊断：打印所有摄像头设备和最大 FOV 格式
                         // print("📐 ========== 摄像头设备诊断 ==========")
@@ -2076,7 +2101,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         // print("\n📐 ========== 所有格式诊断 ==========")
                         
                         if let frontCamera = devices.first(where: { $0.position == .front }) {
-                            let frontFormats = RTCCameraVideoCapturer.supportedFormats(for: frontCamera)
+                            let frontFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: frontCamera)
                             
                             // print("📱 前置摄像头格式: \(frontFormats.count)个")
                             var landscapeCount = 0
@@ -2100,7 +2125,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         }
                         
                         if let backCamera = devices.first(where: { $0.position == .back }) {
-                            let backFormats = RTCCameraVideoCapturer.supportedFormats(for: backCamera)
+                            let backFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: backCamera)
                             
                             // print("📱 后置摄像头格式: \(backFormats.count)个")
                             var landscapeCount = 0
@@ -2127,7 +2152,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         // print("\n📐 ========== 4:3 画幅格式 ==========")
                         
                         func print43Formats(camera: AVCaptureDevice, name: String) {
-                            let formats = RTCCameraVideoCapturer.supportedFormats(for: camera)
+                            let formats = CustomAVCaptureVideoCapturer.supportedFormats(for: camera)
                             // 筛选 4:3 横屏格式（允许一定误差）
                             let formats43 = formats.filter { fmt in
                                 let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
@@ -2176,7 +2201,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         // 🔥🔥🔥 专门筛选 4:3 + 高帧率(120fps+) 的格式
                         print("\n📐 ========== 4:3 高帧率格式 (120fps+) ==========")
                         func print43HighFpsFormats(camera: AVCaptureDevice, name: String) {
-                            let formats = RTCCameraVideoCapturer.supportedFormats(for: camera)
+                            let formats = CustomAVCaptureVideoCapturer.supportedFormats(for: camera)
                             let highFps43 = formats.filter { fmt in
                                 let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
                                 let ratio = Float(dims.width) / Float(dims.height)
@@ -2217,7 +2242,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         // 🔥 打印 120fps 格式的详细信息（看重复格式的区别）
                         print("\n📐 ========== 120fps 格式详细信息 ==========")
                         if let frontCamera = devices.first(where: { $0.position == .front }) {
-                            let formats = RTCCameraVideoCapturer.supportedFormats(for: frontCamera)
+                            let formats = CustomAVCaptureVideoCapturer.supportedFormats(for: frontCamera)
                             print("📱 前置 1920x1080 @120fps 详细:")
                             for (index, fmt) in formats.enumerated() {
                                 let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
@@ -2239,7 +2264,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         
                         // 🔥 检查是否有超广角摄像头
                         if let ultraWide = devices.first(where: { $0.deviceType == .builtInUltraWideCamera }) {
-                            let formats = RTCCameraVideoCapturer.supportedFormats(for: ultraWide)
+                            let formats = CustomAVCaptureVideoCapturer.supportedFormats(for: ultraWide)
                             if let maxFovFormat = formats.max(by: { $0.videoFieldOfView < $1.videoFieldOfView }) {
                                 let dims = CMVideoFormatDescriptionGetDimensions(maxFovFormat.formatDescription)
                                 let maxFps = Int(maxFovFormat.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
@@ -2250,7 +2275,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                         }
                         
                         // 🔥 检查各摄像头的 zoom 范围
-                        print("🔍 Zoom 范围诊断 (RTCCameraVideoCapturer):")
+                        print("🔍 Zoom 范围诊断 (CustomAVCaptureVideoCapturer):")
                         for dev in devices {
                             let pos = dev.position == .front ? "前置" : (dev.position == .back ? "后置" : "未知")
                             let minZoom = dev.minAvailableVideoZoomFactor
@@ -2373,6 +2398,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         let maxFps = Int(best.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
         let dims = CMVideoFormatDescriptionGetDimensions(best.formatDescription)
+        applyOutputPixelFormatForCurrentRange()
 
         // 🔍 打印详细格式信息（用于诊断）
         let pixelFormat = CMFormatDescriptionGetMediaSubType(best.formatDescription)
@@ -2400,78 +2426,42 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("⚠️ 推送FPS(\(currentSendFps)) 超过采集FPS(\(useFps))，已限制为\(useFps)fps")
         }
 
-        // 🔥 先启动采集
-        capturer.startCapture(with: device, format: best, fps: useFps)
-        //print("🚀 开始采集 (由SDK设置帧率为\(useFps)fps) - 立即应用横屏方向转换...")
-        
-        // ✅ 延迟配置相机模式，确保 activeFormat 已更新
-        // startCapture 是异步的，格式切换需要时间
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self else { return }
+        capturer.startCapture(with: device, format: best, fps: useFps) { [weak self] in
+            guard let self else { return }
             self.configureCameraAutoModes(device)
-        }
-        
-        // ✅ 立即应用方向，避免画面旋转（App已强制横屏）
-        // 使用极短延迟（0.05秒）确保 session 已启动，但用户感知不到
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.applyMountTransform()
-            
-            // 🪞 更新预览镜像（前置摄像头需要镜像）
-            self?.updatePreviewMirror(isFrontCamera: device.position == .front)
-            
-            // ✅ 发送预览成功通知（用于事件驱动自动推流）
-            //print("\n📸📸📸 [WebRTCManager] 摄像头预览就绪，准备发送通知...")
-            NotificationCenter.default.post(name: .cameraPreviewReady, object: nil)
-            //print("📸 [WebRTCManager] cameraPreviewReady 通知已发送✅\n")
-        }
-        
-        // 🔥 首次初始化摄像头后，应用后端配置的焦距
-        // 延迟应用，确保摄像头已稳定
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self else { return }
-            
-            // 如果有待处理的对焦设置，优先应用
-                if let focus = self.pendingFocus {
-                    self.pendingFocus = nil
-                    self.setFocus(focus)
+            self.applyMountTransform()
+            self.updatePreviewMirror(isFrontCamera: device.position == .front)
+            if let focus = self.pendingFocus {
+                self.pendingFocus = nil
+                self.setFocus(focus)
                 print("🔍 [startCaptureWithDevice] 应用待处理的焦距: \(focus)")
             } else {
-                // 🔥 否则从后端配置恢复焦距（解决首次启动时焦距未应用导致模糊的问题）
                 self.reapplyFocusFromConfig()
-                }
             }
+            NotificationCenter.default.post(name: .cameraPreviewReady, object: nil)
+        }
     }
     
     func applyMountTransform() {
         guard let session = capturer?.captureSession else {
-            //print("⚠️ applyMountTransform: capturer.captureSession 为空")
             return
         }
-        
-        // ✅ App已强制横屏，这里只是确保 AVCaptureConnection 也设置为横屏
+
         let want: AVCaptureVideoOrientation = .landscapeRight
-        
         var applied = 0
         for conn in session.connections {
-            // 只改视频连接
-            for port in conn.inputPorts where port.mediaType == .video {
-                if conn.isVideoOrientationSupported {
-                    conn.videoOrientation = want
-                    applied += 1
-                }
-                if conn.isVideoMirroringSupported {
-                    conn.isVideoMirrored = streamMirrored
-                }
+            if conn.isVideoOrientationSupported {
+                conn.videoOrientation = want
+                applied += 1
+            }
+            if conn.isVideoMirroringSupported {
+                conn.isVideoMirrored = streamMirrored
             }
         }
-        
-        // 📊 显示当前采集格式的详细信息
-        if let device = (session.inputs.first as? AVCaptureDeviceInput)?.device {
+
+        if let device = capturer?.currentDevice {
             let format = device.activeFormat
-            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            //print("📊 当前采集格式: \(dims.width)x\(dims.height) (设备层面)")
-            //print("🧭 App强制横屏 + 连接方向=LandscapeRight, 已应用连接数=\(applied)")
-            //print("✅ 推送到后端的视频: 宽(\(dims.width)) x 高(\(dims.height)) - \(dims.width > dims.height ? "✅横向" : "⚠️竖向")")
+            _ = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         }
     }
 
@@ -2551,7 +2541,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var videoSource: RTCVideoSource!           // 🔥 推送用（受后端fps控制）
     private var previewVideoSource: RTCVideoSource!    // 🔥 预览用（固定60fps）
     private var previewVideoTrack: RTCVideoTrack?      // 🔥 预览轨道
-    var capturer: RTCCameraVideoCapturer!
+    var capturer: CustomAVCaptureVideoCapturer!
     private var videoSender: RTCRtpSender?
     
     // 记录当前采集FPS
@@ -2624,7 +2614,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     var antiFlickerFps: Int = 20  // 实际帧率（80/4=20, 100/4=25, 200/4=50）
     var lutModeEnabled: Bool = true       // LUT 开关（默认开，对标玉麒麟）
     var filterModeEnabled: Bool = false   // Metal 滤镜栈（默认关，PC 可开）
-    var hardwareBrightnessSliderValue: Int = 20  // 0~100 → EV -2..+8，20=0EV
+    var hardwareBrightnessSliderValue: Int = 20  // 后台 test_brightness value 0...100，20=0EV
+    var hardwareWBSliderValue: Int = 50          // 后台 white_balance value 0...100，50=5000K
     private var pendingLutName: String?
     
     /// 当前自适应FPS值（独立于后端下发的targetOutputFPS）
@@ -2834,6 +2825,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: NSNotification.Name("TestBrightnessCommand"),
                 object: nil
         )
+
+        // 白平衡滑块（色温 2000K-8000K）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onWhiteBalanceCommand(_:)),
+                name: NSNotification.Name("WhiteBalanceCommand"),
+                object: nil
+        )
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
@@ -2861,10 +2860,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         var minShutter16x9 = Int.max
         var minShutter4x3 = Int.max
         
-        let devices = RTCCameraVideoCapturer.captureDevices()
+        let devices = CustomAVCaptureVideoCapturer.captureDevices()
         
         for device in devices {
-            let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
+            let formats = CustomAVCaptureVideoCapturer.supportedFormats(for: device)
             
             for format in formats {
                 let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
@@ -3214,7 +3213,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
             self.frameThrottler = throttler
             self.applyPipelineModes()
-            capturer = RTCCameraVideoCapturer(delegate: throttler)
+            capturer = CustomAVCaptureVideoCapturer(delegate: throttler)
             print("🔄 [startPublish] 创建帧节流器，采集=\(currentCaptureFPS)fps，推送=\(self.targetOutputFPS)fps，预览=60fps")
 
             // 🔥 预览轨道绑定到 previewVideoSource
@@ -3228,7 +3227,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             videoSender = pc.add(videoTrack, streamIds: ["s0"]) // 保存 sender
             
             // ✅ 根据配置选择初始摄像头
-            let devices = RTCCameraVideoCapturer.captureDevices()
+            let devices = CustomAVCaptureVideoCapturer.captureDevices()
             let cfg = ConfigManager.shared.getCurrentConfig()
             let wantFront = (cfg?.direction == "1")  // 1=前置，-1=后置
             let initialCamera: AVCaptureDevice?
@@ -3706,126 +3705,42 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - 相机控制
     private func configureCameraAutoModes(_ device: AVCaptureDevice) {
-        do {
-            try device.lockForConfiguration()
-            
-            // 🔥 获取后端配置的焦距
-            let backendFocus = ConfigManager.shared.getCurrentConfig()?.focus
-            print("📸 [configureCameraAutoModes] 后端焦距配置: \(backendFocus != nil ? String(format: "%.2f", backendFocus!) : "nil")")
-            
-            // 🔥 取消自动对焦，始终使用手动锁定模式
-            // 优先级：用户手动调整 > 后端配置 > 默认值
-                if device.isFocusModeSupported(.locked) {
-                    let focusValue: Float
-                    if userHasManuallyAdjustedFocus, let saved = savedUserFocusDistance {
-                    // 用户手动调整过，优先使用用户设置的值
-                        focusValue = saved
-                        print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (用户手动调整)")
-                    } else if let bf = backendFocus {
-                        // 用户没调整过，使用后端配置
-                        focusValue = bf
-                        print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (后端配置)")
-                    } else {
-                    focusValue = 0.0  // 超焦距：景深最大，远近都清楚
-                    print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (默认超焦距)")
-                    }
-                    
-                    device.focusMode = .locked
-                    if device.isLockingFocusWithCustomLensPositionSupported {
-                        device.setFocusModeLocked(lensPosition: focusValue, completionHandler: nil)
-                        focusDistance = focusValue
-                    }
-            }
-            
-            // 快门优先：精确锁定快门 + 防频闪对齐 + 自动 ISO
-            let snappedShutter2 = snapToAntiFlicker(cjfpsValue)
-            let formatMaxFps2 = Int(device.activeFormat.videoSupportedFrameRateRanges.first?.maxFrameRate ?? 60)
-            let targetFps2 = min(max(currentCaptureFPS, 15), formatMaxFps2)
-            let frameDuration2 = CMTime(value: 1, timescale: CMTimeScale(targetFps2))
-            device.activeVideoMinFrameDuration = frameDuration2
-            device.activeVideoMaxFrameDuration = frameDuration2
-
-            if device.isExposureModeSupported(.custom) {
-                let duration2 = CMTime(value: 1, timescale: CMTimeScale(snappedShutter2))
-                let minDur2 = device.activeFormat.minExposureDuration
-                let maxDur2 = device.activeFormat.maxExposureDuration
-                let safeDur2: CMTime
-                if duration2 < minDur2 { safeDur2 = minDur2 }
-                else if duration2 > maxDur2 { safeDur2 = maxDur2 }
-                else { safeDur2 = duration2 }
-
-                let minISO2 = device.activeFormat.minISO
-                let maxISO2 = device.activeFormat.maxISO
-                let iso2: Float = autoIsoEnabled
-                    ? max(minISO2, min(maxISO2, device.iso))
-                    : (minISO2 + (maxISO2 - minISO2) / 2)
-                device.setExposureModeCustom(duration: safeDur2, iso: iso2, completionHandler: nil)
-                print("📸 [快门优先-recapture] 快门=1/\(snappedShutter2)s, ISO=\(Int(iso2)), 帧率=\(targetFps2)fps")
-            }
-            
-            // ✅ 白平衡自动
-            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
-            }
-            
-            // 关闭 HDR，减少发热/延迟
-            // 必须先关闭自动调节，再设置 isVideoHDREnabled
-            // 否则 iOS 15.x 会抛出 NSException（Swift do-catch 无法捕获）
-            if device.automaticallyAdjustsVideoHDREnabled {
-                device.automaticallyAdjustsVideoHDREnabled = false
-            }
-            if device.isVideoHDREnabled {
-                device.isVideoHDREnabled = false
-            }
-            device.unlockForConfiguration()
-        } catch {
-            print("⚠️ 相机配置失败：\(error.localizedDescription)")
+        let backendFocus = ConfigManager.shared.getCurrentConfig()?.focus
+        let focusValue: Float
+        if userHasManuallyAdjustedFocus, let saved = savedUserFocusDistance {
+            focusValue = saved
+            print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (用户手动调整)")
+        } else if let backendFocus {
+            focusValue = backendFocus
+            print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (后端配置)")
+        } else {
+            focusValue = 0.0
+            print("📸 对焦模式: 手动锁定, 焦距=\(focusValue) (默认超焦距)")
         }
+        focusDistance = focusValue
+        capturer?.applyBaseCameraTuning(focus: focusValue,
+                                        shutterSpeed: cjfpsValue,
+                                        captureFps: max(currentCaptureFPS, 15),
+                                        preserveCurrentISO: autoIsoEnabled)
+        applyHardwareBrightnessEVIfReady()
     }
     
     
     // ✅ 手动对焦距离（0.0=近处，1.0=无穷远）
     func setFocus(_ distance: Float) {
-        guard let devInput = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput else {
+        guard capturer?.currentDevice != nil else {
             pendingFocus = distance
             print("📸 [setFocus] capturer未就绪，保存到pendingFocus: \(distance)")
             return
         }
-        let dev = devInput.device
-        do {
-            try dev.lockForConfiguration()
-            
-            // ✅ 标记用户已手动调整过对焦（第一次时）
-            if !userHasManuallyAdjustedFocus {
-                userHasManuallyAdjustedFocus = true
-                //print("🎯 首次手动对焦，从自动对焦切换到手动对焦模式")
-            }
-            
-            // 🔥 保存用户设置的对焦距离
-            let clamped = max(0.0, min(1.0, distance))
-            savedUserFocusDistance = clamped
-            
-            // 切换到手动对焦模式
-            if dev.isFocusModeSupported(.locked) {
-                dev.focusMode = .locked
-                // ✅ iOS 13+需要检查是否支持自定义镜头位置
-                if dev.isLockingFocusWithCustomLensPositionSupported {
-                    dev.setFocusModeLocked(lensPosition: clamped, completionHandler: nil)
-                    focusDistance = clamped
-                    //print("🔍 对焦距离 = \(clamped) (0.0=近处 1.0=无穷远)")
-                    
-                } else {
-                    //print("⚠️ 当前设备不支持自定义对焦距离")
-                }
-            }else{
-                //print("⚠️ 对焦距离无用")
-            }
-            dev.unlockForConfiguration()
-            
-            
-        } catch {
-            //print("❌ 设置对焦失败：\(error.localizedDescription)")
+
+        if !userHasManuallyAdjustedFocus {
+            userHasManuallyAdjustedFocus = true
         }
+        let clamped = max(0.0, min(1.0, distance))
+        savedUserFocusDistance = clamped
+        focusDistance = clamped
+        capturer?.applyFocus(clamped)
     }
 
     // 🔥 生成对焦缓存键（摄像头位置 + 分辨率）
@@ -4102,11 +4017,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             self.currentZoom = factor
         }
         
-        guard let devInput = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput else {
+        guard let dev = capturer?.currentDevice else {
             print("⚠️ [setZoom] capturer 未准备好，zoom=\(factor) 已保存，等待后续应用")
             return
         }
-        let dev = devInput.device
         let deviceType = dev.deviceType.rawValue
         let position = dev.position == .front ? "前置" : "后置"
         
@@ -4132,7 +4046,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     func toggleCamera() {
         // ... existing code ...
-        guard let curInput = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput else {
+        guard let curInput = capturer?.currentVideoInput else {
             //print("❌ toggleCamera: 无法获取当前输入设备")
             return
         }
@@ -4142,12 +4056,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         //print("🔄 toggleCamera: 从 \(currentPos == .back ? "后置" : "前置") 切换到 \(newPos == .back ? "后置" : "前置")")
         
-        guard let dev = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == newPos }) else {
+        guard let dev = CustomAVCaptureVideoCapturer.captureDevices().first(where: { $0.position == newPos }) else {
             //print("❌ toggleCamera: 找不到目标摄像头设备")
             return
         }
 
-        let allFormats = RTCCameraVideoCapturer.supportedFormats(for: dev)
+        let allFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: dev)
         
         // ✅ 不过滤横竖向：高FPS格式可能是竖向的，通过FrameThrottler旋转处理即可
         let deviceMaxOverallFPS = Int(
@@ -4277,47 +4191,55 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         capturer.stopCapture { [weak self] in
                guard let self = self else { return }
-               
-               // ✅ 关键：切换摄像头后重新计算档位配置
+
                if let preset = self.currentLadder[self.currentProfile] {
                    print("📋 切换前档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.minKbps)-\(preset.maxKbps)kbps")
                }
                self.calculateLadderForDevice(dev)
                if let preset = self.currentLadder[self.currentProfile] {
                    print("📋 切换后档位配置: \(preset.width)x\(preset.height)@\(preset.fps)fps → \(preset.minKbps)-\(preset.maxKbps)kbps")
-                   
-                   // 🔥 切换摄像头后更新采集FPS（用于FPS缩放计算）
-                   // 后置: 240fps, 前置: 120fps
-                   self.currentCaptureFPS = preset.fps
-                   print("🎬 [切换摄像头] 更新采集FPS: \(preset.fps)fps (\(dev.position == .back ? "后置" : "前置"))")
                }
-               
-               // ✅ 重新设置码率（切换摄像头后档位配置变了，码率也要更新）
-               // 此时 currentCaptureFPS 已更新为新摄像头的采集FPS
-               self.applyEffectiveBitrateToWebRTC()
-               //print("🔄 切换摄像头后重新设置码率: \(newKbps)kbps (±100kb)")
-               
-               // 🔥 立即强制码率，确保切换时码率立即生效
-               self.enforceBitrateImmediately()
-               
-               // 🔥 关键：让 WebRTC SDK 自己设置帧率
-               let actualMaxFps = Int(best.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
-               let finalFps = min(useFps, actualMaxFps)
-               
-               if finalFps < useFps {
-                   //print("⚠️ 目标FPS \(useFps) 超过格式最大支持FPS \(actualMaxFps)，降低到 \(finalFps)fps")
-                   self.currentCaptureFPS = finalFps
+
+               let newCaptureRes = self.getCaptureResolutionForProfile(self.currentProfile)
+               self.currentCaptureWidth = newCaptureRes.width
+               self.currentCaptureHeight = newCaptureRes.height
+               guard let newBest = self.findBestFormat(for: dev,
+                                                        targetWidth: newCaptureRes.width,
+                                                        targetHeight: newCaptureRes.height,
+                                                        targetFps: newCaptureRes.fps) else {
+                   print("❌ [toggleCamera] 新摄像头未找到合适格式: \(newCaptureRes.width)x\(newCaptureRes.height)@\(newCaptureRes.fps)")
+                   return
                }
-               
-               // 🔥 先启动采集
-               self.capturer.startCapture(with: dev, format: best, fps: finalFps)
-               //print("🚀 切换摄像头开始采集 (由SDK设置帧率为\(finalFps)fps)")
-               
-               // ✅ 延迟配置相机模式，确保 activeFormat 已更新
-               DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                   guard let self = self else { return }
+               let newMaxFps = Int(newBest.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
+               let finalFps = min(newCaptureRes.fps, newMaxFps)
+               self.currentCaptureFPS = finalFps
+               let newDims = CMVideoFormatDescriptionGetDimensions(newBest.formatDescription)
+               print("🎬 [切换摄像头] 新格式 \(newDims.width)x\(newDims.height) max=\(newMaxFps)fps final=\(finalFps)fps")
+
+               if let currentSendFps = self.frameThrottler?.targetSendFps, currentSendFps > finalFps {
+                   self.frameThrottler?.targetSendFps = finalFps
+                   self.targetOutputFPS = finalFps
+                   print("⚠️ 推送FPS(\(currentSendFps)) 超过采集FPS(\(finalFps))，已限制为\(finalFps)fps")
+               }
+
+               self.capturer.setDelegate(self.frameThrottler!)
+               self.capturer.switchCapture(to: dev, format: newBest, fps: finalFps) { [weak self] in
+                   guard let self else { return }
+                   self.applyEffectiveBitrateToWebRTC()
+                   self.enforceBitrateImmediately()
                    self.configureCameraAutoModes(dev)
+                   self.applyMountTransform()
+                   self.updatePreviewMirror(isFrontCamera: newPos == .front)
+                   self.reapplyConfigExceptFocus()
+                   self.reapplyFocusFromConfig()
+                   self.videoSource?.adaptOutputFormat(
+                       toWidth: Int32(newCaptureRes.width),
+                       height: Int32(newCaptureRes.height),
+                       fps: Int32(finalFps)
+                   )
+                   self.forceKeyframe()
                }
+               //print("🚀 切换摄像头开始采集 (由SDK设置帧率为\(finalFps)fps)")
                
                // ✅ 更新 ConfigManager 中的 direction，记录当前使用的摄像头（保留其他所有字段）
                let newDirection = (newPos == .front) ? "1" : "-1"
@@ -4329,41 +4251,19 @@ final class WebRTCManager: NSObject, ObservableObject {
                    print("📝 已更新配置: direction=\(newDirection) (保留: type=\(currentConfig.type), zoom=\(currentConfig.zoom), ptype=\(currentConfig.ptype), fps=\(currentConfig.fps ?? 0), bitrate=\(currentConfig.bitrate ?? 0))")
                }
                
-               // ✅ 立即应用方向，避免画面旋转（App已强制横屏）
-               // 使用极短延迟确保 session 已启动
-               DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                   self?.applyMountTransform()
-                   
-                   // 🪞 更新预览镜像（前置摄像头需要镜像）
-                   self?.updatePreviewMirror(isFrontCamera: newPos == .front)
-                   
-                   // 🔥 切换摄像头后立即强制码率，确保码率立即提升到最大值附近
-                   self?.enforceBitrateImmediately()
-                   
-                   // 🔥 切换摄像头后恢复配置（除对焦外）：变焦、FPS、码率等
-                   self?.reapplyConfigExceptFocus()
-                   
-                   // 🔥 切换摄像头后恢复对焦（延迟应用，确保摄像头已稳定）
-                   DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                       self?.reapplyFocusFromConfig()
-                   }
-               }
-               
                // ✅ 获取实际使用的分辨率（用于对焦缓存）
-               let actualDims = CMVideoFormatDescriptionGetDimensions(best.formatDescription)
+               let actualDims = CMVideoFormatDescriptionGetDimensions(newBest.formatDescription)
                let actualWidth = Int(actualDims.width)
                let actualHeight = Int(actualDims.height)
                
                // 🔥 禁用自动对焦 - 切换摄像头后保持当前焦距或使用后端配置
                print("🔍 [toggleCamera] 不执行自动对焦，保持当前焦距设置")
-               
-               // 如果有待处理的对焦设置，延迟应用
-                       if let focus = self.pendingFocus {
-                   DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                       self?.pendingFocus = nil
-                       self?.setFocus(focus)
-                       print("🔍 [toggleCamera] 应用待处理的焦距: \(focus)")
-                   }
+
+               // 如果有待处理的对焦设置，立即应用
+               if let focus = self.pendingFocus {
+                   self.pendingFocus = nil
+                   self.setFocus(focus)
+                   print("🔍 [toggleCamera] 应用待处理的焦距: \(focus)")
                }
                
                // ✅ 重新连接节流器
@@ -4378,9 +4278,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                    self.applyPipelineModes()
                    print("🔄 [toggleCamera] 重新创建帧节流器，推送目标FPS: \(self.targetOutputFPS)fps，预览固定60fps")
                }
-               
-               self.capturer.delegate = self.frameThrottler!
-               
+
                print("🎯 推送FPS = \(self.frameThrottler?.targetSendFps ?? 60)fps，预览FPS = 60fps (切换摄像头后保持)")
            }
     }
@@ -4413,7 +4311,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         // 2️⃣ 获取当前摄像头设备
         let isFront = isFrontCameraActive()
-        let devices = RTCCameraVideoCapturer.captureDevices()
+        let devices = CustomAVCaptureVideoCapturer.captureDevices()
         guard let device = devices.first(where: { $0.position == (isFront ? .front : .back) }) else {
             print("   ❌ 无可用摄像头设备")
             return
@@ -4430,11 +4328,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         let dims = CMVideoFormatDescriptionGetDimensions(bestFormat.formatDescription)
         let maxFps = Int(bestFormat.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
         let useFps = min(fps, maxFps)
+        applyOutputPixelFormatForCurrentRange()
         
         print("   选中格式: \(dims.width)x\(dims.height), maxFps=\(maxFps), 使用=\(useFps)fps")
         
         // 4️⃣ 热切换格式（不 stopCapture，保持相机会话连续，避免绿幕）
-        // RTCCameraVideoCapturer.startCapture 内部走 beginConfiguration/commitConfiguration
+        // CustomAVCaptureVideoCapturer.startCapture 内部走 beginConfiguration/commitConfiguration
         // 与玉麒麟 GPUImage 热切换原理一致：帧不断流，编码器不重启
         print("   🔄 热切换格式（不停流）: \(dims.width)x\(dims.height)@\(useFps)fps")
         capturer.startCapture(with: device, format: bestFormat, fps: useFps)
@@ -4480,85 +4379,158 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
     
+    func applyCaptureExperimentFormat() {
+        applyOutputPixelFormatForCurrentRange()
+        recaptureWithResolution(width: currentCaptureWidth, height: currentCaptureHeight, fps: max(30, currentCaptureFPS))
+    }
+
+    func applyCaptureColorAdjustment() {
+        capturer?.applyWhiteBalanceAdjustment(
+            temperature: wbTemperature,
+            tint: wbTint,
+            red: wbRed,
+            green: wbGreen,
+            blue: wbBlue,
+            black: wbBlack,
+            white: wbWhite,
+            amber: wbAmber
+        )
+    }
+
+    /// PC STOMP 下发 → 更新面板 + 应用硬件 WB（iOS 本地滑块不回传 PC）
+    private func applyRemoteCaptureColor(_ cfg: ThinRemoteConfig) {
+        let apply = { [self] in
+            if let v = cfg.wbTemperature { self.wbTemperature = max(-1, min(1, v)) }
+            if let v = cfg.wbTint { self.wbTint = max(-1, min(1, v)) }
+            if let v = cfg.wbRed { self.wbRed = max(-1, min(1, v)) }
+            if let v = cfg.wbGreen { self.wbGreen = max(-1, min(1, v)) }
+            if let v = cfg.wbBlue { self.wbBlue = max(-1, min(1, v)) }
+            if let v = cfg.wbBlack { self.wbBlack = max(-1, min(1, v)) }
+            if let v = cfg.wbWhite { self.wbWhite = max(-1, min(1, v)) }
+            if let v = cfg.wbAmber { self.wbAmber = max(-1, min(1, v)) }
+            self.applyCaptureColorAdjustment()
+            self.captureColorRemoteTick &+= 1
+            print("🎨 [CaptureColor] PC→iOS temp=\(String(format: "%.2f", self.wbTemperature)) tint=\(String(format: "%.2f", self.wbTint)) amber=\(String(format: "%.2f", self.wbAmber)) rgb=(\(String(format: "%.2f", self.wbRed)),\(String(format: "%.2f", self.wbGreen)),\(String(format: "%.2f", self.wbBlue))) bw=(\(String(format: "%.2f", self.wbBlack)),\(String(format: "%.2f", self.wbWhite))) tick=\(self.captureColorRemoteTick)")
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    func resetCaptureColorAdjustment() {
+        wbTemperature = 0
+        wbTint = 0
+        wbRed = 0
+        wbGreen = 0
+        wbBlue = 0
+        wbBlack = 0
+        wbWhite = 0
+        wbAmber = 0
+        capturer?.resetWhiteBalanceAdjustment()
+    }
+
+    private func applyOutputPixelFormatForCurrentRange() {
+        let pixelFormat: OSType = captureRangeMode == .videoRange420v
+            ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            : kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        capturer?.setOutputPixelFormat(pixelFormat)
+    }
+
     /// 🔥 查找最佳匹配格式
     private func findBestFormat(for device: AVCaptureDevice, targetWidth: Int, targetHeight: Int, targetFps: Int) -> AVCaptureDevice.Format? {
-        let allFormats = RTCCameraVideoCapturer.supportedFormats(for: device)
+        let allFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: device)
+        let requiredFps = max(30, targetFps)
 
-        // 精确匹配目标分辨率
-        let exactMatches = allFormats.filter { fmt in
+        func pixelFormatString(_ fmt: AVCaptureDevice.Format) -> String {
+            let pixelFmt = CMFormatDescriptionGetMediaSubType(fmt.formatDescription)
+            return String(format: "%c%c%c%c",
+                          (pixelFmt >> 24) & 0xFF,
+                          (pixelFmt >> 16) & 0xFF,
+                          (pixelFmt >> 8) & 0xFF,
+                          pixelFmt & 0xFF)
+        }
+
+        func matchesResolution(_ fmt: AVCaptureDevice.Format) -> Bool {
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
             let w = Int(dims.width)
             let h = Int(dims.height)
             return (w == targetWidth && h == targetHeight) || (w == targetHeight && h == targetWidth)
         }
 
-        // 🔥 打印所有匹配格式的详情（用于诊断FPS问题）
-        print("   格式搜索: 找到 \(exactMatches.count) 个精确匹配 \(targetWidth)x\(targetHeight), 目标FPS=\(targetFps)")
-        for (idx, fmt) in exactMatches.enumerated() {
+        func maxFps(_ fmt: AVCaptureDevice.Format) -> Int {
+            Int(fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+        }
+
+        func matchesRange(_ fmt: AVCaptureDevice.Format) -> Bool {
+            switch captureRangeMode {
+            case .any: return true
+            case .fullRange420f: return pixelFormatString(fmt) == "420f"
+            case .videoRange420v: return pixelFormatString(fmt) == "420v"
+            }
+        }
+
+        func matchesBinning(_ fmt: AVCaptureDevice.Format) -> Bool {
+            switch captureBinningMode {
+            case .any: return true
+            case .binned: return fmt.isVideoBinned
+            case .nonBinned: return !fmt.isVideoBinned
+            }
+        }
+
+        func choose(_ formats: [AVCaptureDevice.Format]) -> AVCaptureDevice.Format? {
+            formats.sorted { lhs, rhs in
+                let lFps = maxFps(lhs)
+                let rFps = maxFps(rhs)
+                if lFps != rFps { return lFps < rFps }
+                let lDims = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+                let rDims = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+                return Int(lDims.width * lDims.height) < Int(rDims.width * rDims.height)
+            }.first
+        }
+
+        let sameResolution = allFormats.filter(matchesResolution)
+        let base = sameResolution.isEmpty ? allFormats : sameResolution
+        print("   格式切换: 分辨率=\(targetWidth)x\(targetHeight), range=\(captureRangeMode.rawValue), binned=\(captureBinningMode.rawValue), 最低FPS=\(requiredFps)")
+        for (idx, fmt) in base.enumerated() {
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
-            let maxFps = Int(fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-            let pixelFmt = CMFormatDescriptionGetMediaSubType(fmt.formatDescription)
-            let fmtStr = String(format: "%c%c%c%c",
-                (pixelFmt >> 24) & 0xFF, (pixelFmt >> 16) & 0xFF,
-                (pixelFmt >> 8) & 0xFF, pixelFmt & 0xFF)
             let binned = fmt.isVideoBinned ? "Binned" : "NonBinned"
-            print("      [\(idx)] \(dims.width)x\(dims.height) @\(maxFps)fps \(fmtStr) \(binned)")
+            print("      [\(idx)] \(dims.width)x\(dims.height) @\(maxFps(fmt))fps \(pixelFormatString(fmt)) \(binned)")
         }
 
-        if exactMatches.isEmpty {
-            print("   ⚠️ 无精确匹配，可用格式:")
-            for fmt in allFormats.prefix(10) {
-                let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
-                let maxFps = Int(fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                print("      \(dims.width)x\(dims.height) maxFps=\(maxFps)")
-            }
+        let strict = base.filter { matchesRange($0) && matchesBinning($0) && maxFps($0) >= requiredFps }
+        let rangeBinning = base.filter { matchesRange($0) && matchesBinning($0) }
+        let rangeOnly = base.filter { matchesRange($0) && maxFps($0) >= requiredFps }
+        let binnedOnly = base.filter { matchesBinning($0) && maxFps($0) >= requiredFps }
+        let fpsOnly = base.filter { maxFps($0) >= requiredFps }
 
-            // 返回最接近的格式（优先高FPS）
-            return allFormats.min(by: { f0, f1 in
-                let d0 = CMVideoFormatDescriptionGetDimensions(f0.formatDescription)
-                let d1 = CMVideoFormatDescriptionGetDimensions(f1.formatDescription)
-                let diff0 = abs(Int(d0.width) - targetWidth) + abs(Int(d0.height) - targetHeight)
-                let diff1 = abs(Int(d1.width) - targetWidth) + abs(Int(d1.height) - targetHeight)
-                if diff0 != diff1 { return diff0 < diff1 }
-                // 分辨率相同时优先选最高FPS
-                let fps0 = Int(f0.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                let fps1 = Int(f1.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                return fps0 > fps1
-            })
+        let selected: AVCaptureDevice.Format?
+        let reason: String
+        if let fmt = choose(strict) {
+            selected = fmt
+            reason = "strict"
+        } else if let fmt = choose(rangeBinning) {
+            selected = fmt
+            reason = "range+binned fps fallback"
+        } else if let fmt = choose(rangeOnly) {
+            selected = fmt
+            reason = "range only"
+        } else if let fmt = choose(binnedOnly) {
+            selected = fmt
+            reason = "binned only"
+        } else if let fmt = choose(fpsOnly) {
+            selected = fmt
+            reason = "fps only"
+        } else {
+            selected = choose(base)
+            reason = "best available below 30fps"
         }
 
-        // 🔥🔥 核心修复：优先选择支持目标帧率的格式，且选最高FPS的格式
-        // 旧逻辑选"最接近目标FPS"，可能选到一个60fps格式但实际硬件只跑30fps
-        // 新逻辑选"最高FPS"，确保选到最有能力的格式，然后用 min(targetFps, maxFps) 限制采集
-        let fpsMatches = exactMatches.filter { fmt in
-            let maxFps = Int(fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-            return maxFps >= targetFps
-        }
-
-        if !fpsMatches.isEmpty {
-            // 🔥 选最高FPS的格式（而非最接近目标的）
-            // 实际采集FPS由 min(targetFps, maxFps) 控制，不会浪费功耗
-            let selected = fpsMatches.max(by: { f0, f1 in
-                let max0 = Int(f0.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                let max1 = Int(f1.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                return max0 < max1
-            })
-            if let s = selected {
-                let sFps = Int(s.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-                print("   ✅ 选中最高FPS格式: maxFps=\(sFps) (共\(fpsMatches.count)个候选)")
-            }
-            return selected
-        }
-
-        // 🔥 无满足目标FPS的格式，选最高FPS的格式（尽可能接近目标）
-        let selected = exactMatches.max(by: { f0, f1 in
-            let max0 = Int(f0.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-            let max1 = Int(f1.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-            return max0 < max1
-        })
-        if let s = selected {
-            let sFps = Int(s.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-            print("   ⚠️ 无\(targetFps)fps格式，选最高FPS: maxFps=\(sFps)")
+        if let selected {
+            let dims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
+            let binned = selected.isVideoBinned ? "Binned" : "NonBinned"
+            print("   ✅ 格式选中(\(reason)): \(dims.width)x\(dims.height) @\(maxFps(selected))fps \(pixelFormatString(selected)) \(binned)")
         }
         return selected
     }
@@ -4572,37 +4544,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     */
     
     
-    /// 🔥 显式锁定设备帧率（iOS 有时不遵守 startCapture 的 fps 参数）
-    private func lockFrameRate(dev: AVCaptureDevice, fps: Int) {
-        // 🔍 诊断：检查当前 activeFormat 是否支持目标帧率
-        let formatMaxFps = Int(dev.activeFormat.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-        let dims = CMVideoFormatDescriptionGetDimensions(dev.activeFormat.formatDescription)
-        print("🔍 [lockFrameRate] 当前格式: \(dims.width)x\(dims.height), 最大FPS=\(formatMaxFps), 目标FPS=\(fps)")
-        
-        do {
-            try dev.lockForConfiguration()
-            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
-            dev.activeVideoMinFrameDuration = frameDuration
-            dev.activeVideoMaxFrameDuration = frameDuration
-            dev.activeMaxExposureDuration = frameDuration  // 同步曝光上限，防止慢快门降帧率
-            dev.unlockForConfiguration()
-            print("📹 帧率锁定: \(fps)fps (recapture后)")
-            
-            // 验证锁定结果
-            let actualMin = Int(1.0 / CMTimeGetSeconds(dev.activeVideoMinFrameDuration))
-            let actualMax = Int(1.0 / CMTimeGetSeconds(dev.activeVideoMaxFrameDuration))
-            print("   验证: minFPS=\(actualMin), maxFPS=\(actualMax)")
-        } catch {
-            print("⚠️ 帧率锁定失败: \(error.localizedDescription)")
-        }
-    }
-    
     /// 检查当前是否是前置摄像头
     private func isFrontCameraActive() -> Bool {
-        guard let input = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput else {
-            return false
-        }
-        return input.device.position == .front
+        return capturer?.currentDevice?.position == .front
     }
 
     // 保存当前目标码率，用于周期性强制重置
@@ -4955,10 +4899,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 选择摄像头（沿用当前，若无则取后置）
         
         let devOpt: AVCaptureDevice? = {
-                if let inDev = capturer?.captureSession.inputs.first as? AVCaptureDeviceInput {
-                    return inDev.device
+                if let inDev = capturer?.currentDevice {
+                    return inDev
                 }
-                let devices = RTCCameraVideoCapturer.captureDevices()
+                let devices = CustomAVCaptureVideoCapturer.captureDevices()
                 return devices.first(where: { $0.position == .back }) ?? devices.first
             }()
           guard let dev = devOpt else {
@@ -4982,7 +4926,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 🔥 打印当前档位和摄像头信息
         print("🎯档位🎯 [recapture] 采集=\(targetWidth)x\(targetHeight)@\(targetFps)fps, 档位=\(currentProfile), 摄像头=\(dev.position == .back ? "后置" : "前置")")
 
-        let allFormats = RTCCameraVideoCapturer.supportedFormats(for: dev)
+        let allFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: dev)
         
         // 🔥 查找匹配目标分辨率的格式
         let matchingFormats = allFormats.filter { fmt in

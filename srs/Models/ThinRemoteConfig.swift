@@ -36,6 +36,20 @@ struct ThinRemoteConfig: Codable {
     var exposure: Float?        // 曝光 -3..+3 stops
     var filterEnabled: Bool?    // 滤镜主开关
     var lutName: String?        // 玉麒麟 LUT 图名 (5 张之一)
+    var videoHDR: Bool?         // Video HDR 开关
+    var autoHDR: Bool?          // 自动 HDR 开关
+    var autoWhiteBalance: Bool? // 自动白平衡开关
+    var testBrightness: Int?    // debug 亮度 -2...8，直接映射硬件 ISO/EV
+    var testWhiteBalance: Int?  // 白平衡 0-100，映射 2000K-8000K，默认50=5000K
+    // ⭐ 采集端白平衡微调（PC L 键弹框 STOMP 直推）
+    var wbTemperature: Float?   // 冷暖 -1~1
+    var wbTint: Float?          // 绿紫 -1~1
+    var wbRed: Float?           // 红 -1~1
+    var wbGreen: Float?         // 绿 -1~1
+    var wbBlue: Float?          // 蓝 -1~1
+    var wbBlack: Float?         // 黑 -1~1
+    var wbWhite: Float?         // 白 -1~1
+    var wbAmber: Float?         // 黄/琥珀 -1~1
 
     let lastUpdated: String?
     let updatedBy: String?
@@ -65,6 +79,19 @@ struct ThinRemoteConfig: Codable {
         case exposure
         case filterEnabled
         case lutName
+        case videoHDR
+        case autoHDR
+        case autoWhiteBalance
+        case testBrightness = "value"
+        case testWhiteBalance = "wb_value"
+        case wbTemperature = "temperature"
+        case wbTint = "tint"
+        case wbRed = "red"
+        case wbGreen = "green"
+        case wbBlue = "blue"
+        case wbBlack = "black"
+        case wbWhite = "white"
+        case wbAmber = "amber"
         case lastUpdated = "last_updated"
         case updatedBy = "updated_by"
     }
@@ -120,6 +147,19 @@ struct ThinRemoteConfig: Codable {
         exposure = try container.decodeIfPresent(Float.self, forKey: .exposure)
         filterEnabled = try container.decodeIfPresent(Bool.self, forKey: .filterEnabled)
         lutName = try container.decodeIfPresent(String.self, forKey: .lutName)
+        videoHDR = try container.decodeIfPresent(Bool.self, forKey: .videoHDR)
+        autoHDR = try container.decodeIfPresent(Bool.self, forKey: .autoHDR)
+        autoWhiteBalance = try container.decodeIfPresent(Bool.self, forKey: .autoWhiteBalance)
+        testBrightness = try container.decodeIfPresent(Int.self, forKey: .testBrightness)
+        testWhiteBalance = try container.decodeIfPresent(Int.self, forKey: .testWhiteBalance)
+        wbTemperature = try container.decodeIfPresent(Float.self, forKey: .wbTemperature)
+        wbTint = try container.decodeIfPresent(Float.self, forKey: .wbTint)
+        wbRed = try container.decodeIfPresent(Float.self, forKey: .wbRed)
+        wbGreen = try container.decodeIfPresent(Float.self, forKey: .wbGreen)
+        wbBlue = try container.decodeIfPresent(Float.self, forKey: .wbBlue)
+        wbBlack = try container.decodeIfPresent(Float.self, forKey: .wbBlack)
+        wbWhite = try container.decodeIfPresent(Float.self, forKey: .wbWhite)
+        wbAmber = try container.decodeIfPresent(Float.self, forKey: .wbAmber)
         lastUpdated = try container.decodeIfPresent(String.self, forKey: .lastUpdated)
         updatedBy = try container.decodeIfPresent(String.self, forKey: .updatedBy)
     }
@@ -152,6 +192,19 @@ struct ThinRemoteConfig: Codable {
         self.exposure = nil
         self.filterEnabled = nil
         self.lutName = nil
+        self.videoHDR = nil
+        self.autoHDR = nil
+        self.autoWhiteBalance = nil
+        self.testBrightness = nil
+        self.testWhiteBalance = nil
+        self.wbTemperature = nil
+        self.wbTint = nil
+        self.wbRed = nil
+        self.wbGreen = nil
+        self.wbBlue = nil
+        self.wbBlack = nil
+        self.wbWhite = nil
+        self.wbAmber = nil
         self.lastUpdated = nil
         self.updatedBy = nil
     }

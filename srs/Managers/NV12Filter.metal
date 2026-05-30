@@ -10,6 +10,7 @@ struct NV12Params {
     float saturation;
     float sharpen;
     float redGlow;
+    float pixelLevel;
 };
 
 // Y 平面：亮度 + 锐化（全分辨率）
@@ -39,15 +40,21 @@ kernel void processY(
         y = clamp(y, 0.0, 1.0);
     }
 
-    // 曝光
     y = y * pow(2.0, p.exposure);
-    // 黑场
+    float px = clamp(p.pixelLevel, -2.0, 8.0);
+    float hiMask = smoothstep(0.32, 0.92, y);
+    if (px >= 0.0) {
+        float lift = px / 8.0;
+        y = y + lift * 0.70 * hiMask * (1.0 - y);
+        y = mix(y, min(y * (1.0 + lift * 0.12), 1.0), hiMask * 0.25);
+    } else {
+        float down = (-px) / 2.0;
+        y = y - down * 0.55 * hiMask * y;
+    }
+    y = clamp(y, 0.0, 1.0);
     y = max(y - p.blackPoint, 0.0) / max(1.0 - p.blackPoint, 0.001);
-    // 亮度（中调弯曲，保端点）
     y = y + p.brightness * y * (1.0 - y);
-    // 伽马
     y = pow(max(y, 0.001), 1.0 / max(p.gamma, 0.01));
-    // 对比度
     y = (y - 0.5) * p.contrast + 0.5;
     y = clamp(y, 0.0, 1.0);
 
@@ -66,7 +73,6 @@ kernel void processUV(
     if (gid.x >= w || gid.y >= h) return;
 
     float2 uv = uvIn.read(gid).rg;
-    // 饱和度：UV 偏移量缩放（0.5 是中性色）
     uv = 0.5 + (uv - 0.5) * p.saturation;
     uv = clamp(uv, 0.0, 1.0);
 

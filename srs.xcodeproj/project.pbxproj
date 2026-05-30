@@ -43,6 +43,7 @@
 		2C596C5F2E58E22600C94789 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C596C5E2E58E22600C94789 /* Preview Assets.xcassets */; };
 		2C5B00502E90D20800755FBF /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5B004F2E90D20800755FBF /* WebRTC */; };
 		2C5B00522E90DC5100755FBF /* WebRTCManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00512E90DC5100755FBF /* WebRTCManager.swift */; };
+		2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */; };
 		2C5B00542E90DD2600755FBF /* WebRTCPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */; };
 		2CB8FA4E2E73C59A00F90666 /* ImagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */; };
 		2CB8FA502E73D38100F90666 /* WebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4F2E73D38100F90666 /* WebView.swift */; };
@@ -91,6 +92,7 @@
 		2C596C5B2E58E22600C94789 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2C596C5E2E58E22600C94789 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		2C5B00512E90DC5100755FBF /* WebRTCManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCManager.swift; sourceTree = "<group>"; };
+		2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomAVCaptureVideoCapturer.swift; sourceTree = "<group>"; };
 		2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCPreview.swift; sourceTree = "<group>"; };
 		2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePicker.swift; sourceTree = "<group>"; };
 		2CB8FA4F2E73D38100F90666 /* WebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebView.swift; sourceTree = "<group>"; };
@@ -141,6 +143,7 @@
 				2C4E72DC2FC5501800BC4D30 /* NV12LUTFilter.metal */,
 				2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */,
 				2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */,
+				2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */,
 				2C5B00512E90DC5100755FBF /* WebRTCManager.swift */,
 				2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */,
 			);
@@ -324,6 +327,7 @@
 				2C25E0EE2E5E70BF00EA9245 /* AccountStorageManager.swift in Sources */,
 				2C0BB2DB2EF54BCE00332D6F /* UnbindView.swift in Sources */,
 				2C5B00522E90DC5100755FBF /* WebRTCManager.swift in Sources */,
+				2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */,
 				2C596C582E58E22500C94789 /* srsApp.swift in Sources */,
 				2CF5F3452F263D6A00AA0575 /* MessageView.swift in Sources */,
 				2C4E72D62FC5500D00BC4D30 /* NV12Filter.metal in Sources */,

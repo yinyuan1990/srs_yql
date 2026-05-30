@@ -20,8 +20,12 @@ final class NV12LUTProcessor {
     var intensity: Float = 1.0
     var exposure: Float = 0.0
     var temperature: Float = 0.0
-    var redLift: Float = 0.0
-    var redSat: Float = 0.0
+    var redLift: Float = 0.18
+    var redSat: Float = 0.18
+    /// LUT 前降对比（绕中点 0.5）：<1 降对比，1=不变。发牌场景柔化采集端硬过渡
+    var preContrast: Float = 0.90
+    /// LUT 前抬中间调（gamma，两端不动）：>1 提亮暗部/中间调，1=不变。发牌场景提亮主力
+    var preGamma: Float = 1.20
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -94,8 +98,8 @@ final class NV12LUTProcessor {
         intensity = 0.85 + (v / 100.0) * 0.15   // 0→0.85, 50→0.925, 100→1.0
         exposure = 0
         temperature = 0
-        redLift = 0
-        redSat = 0
+        redLift = 0.12
+        redSat = 0.16
     }
 
     func process(_ input: CVPixelBuffer) -> CVPixelBuffer? {
@@ -137,7 +141,9 @@ final class NV12LUTProcessor {
             exposure: exposure,
             temperature: temperature,
             redLift: redLift,
-            redSat: redSat
+            redSat: redSat,
+            preContrast: preContrast,
+            preGamma: preGamma
         )
 
         encode(cmdBuf, pipeline: pipelineY,
@@ -161,6 +167,8 @@ final class NV12LUTProcessor {
         var temperature: Float
         var redLift: Float
         var redSat: Float
+        var preContrast: Float
+        var preGamma: Float
     }
 
     private static func loadLookupTexture(device: MTLDevice, name: String) -> MTLTexture? {

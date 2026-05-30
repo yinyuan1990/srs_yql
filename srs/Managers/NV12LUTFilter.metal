@@ -54,11 +54,33 @@ struct LUTParams {
     float temperature;  // 负=偏冷去黄，正=偏暖
     float redLift;      // 暗红抬升（远处牌）
     float redSat;       // 红色饱和度（对手更红主要靠这个）
+    float preContrast;  // LUT 前降对比（绕中点 0.5，<1 降对比，1=不变）
+    float preGamma;     // LUT 前抬中间调（>1 提亮暗部/中间调，1=不变）
 };
+
+// LUT 之前的"采集级"tone 调整：降对比 + 抬中间调
+// 仅预处理喂给 LUT 的画面，红白黑查表逻辑不受影响
+inline float3 applyPreGrade(float3 rgb, constant LUTParams& p) {
+    rgb = (rgb - 0.5) * max(p.preContrast, 0.0) + 0.5;          // 降对比
+    rgb = pow(max(rgb, 0.0), 1.0 / max(p.preGamma, 0.01));       // 抬中间调（提亮）
+    return clamp(rgb, 0.0, 1.0);
+}
 
 // 玉麒麟 GPUImage LookupFilter：mix(原色, 查表色, intensity)，无额外抬红
 inline float3 applyPokerLutGrade(float3 rgb, float3 mapped, constant LUTParams& p) {
-    return mix(rgb, mapped, clamp(p.intensity, 0.0, 1.0));
+    float3 outRgb = mix(rgb, mapped, clamp(p.intensity, 0.0, 1.0));
+    float redDominance = outRgb.r - max(outRgb.g, outRgb.b);
+    float redMask = smoothstep(0.06, 0.22, redDominance) * smoothstep(0.10, 0.35, outRgb.r);
+    float darkRedMask = redMask * (1.0 - smoothstep(0.22, 0.55, rgbToY(outRgb)));
+    float lift = darkRedMask * max(p.redLift, 0.0);
+    outRgb.r = outRgb.r + lift * (1.0 - outRgb.r);
+    outRgb.g = outRgb.g * (1.0 - darkRedMask * 0.10);
+    outRgb.b = outRgb.b * (1.0 - darkRedMask * 0.10);
+
+    float sat = 1.0 + redMask * max(p.redSat, 0.0);
+    float y = rgbToY(outRgb);
+    outRgb = mix(float3(y), outRgb, sat);
+    return clamp(outRgb, 0.0, 1.0);
 }
 
 // Pass1: 全分辨率 Y（使用对应 UV 采样）
@@ -78,7 +100,7 @@ kernel void lutProcessY(
     uint2 uvGid = uint2(gid.x >> 1, gid.y >> 1);
     float2 uv = uvIn.read(uvGid).rg;
 
-    float3 rgb = yuvToRgb(y, uv);
+    float3 rgb = applyPreGrade(yuvToRgb(y, uv), p);
     float3 mapped = gpuImageLookup(rgb, lookup, sampler(filter::linear, address::clamp_to_edge));
     float3 outRgb = applyPokerLutGrade(rgb, mapped, p);
 
@@ -100,9 +122,15 @@ kernel void lutProcessUV(
 
     float2 uv = uvIn.read(gid).rg;
     uint2 yGid = gid * 2;
-    float y = yIn.read(yGid).r;
+    uint yW = yIn.get_width();
+    uint yH = yIn.get_height();
+    uint2 y00 = uint2(min(yGid.x, yW - 1), min(yGid.y, yH - 1));
+    uint2 y10 = uint2(min(yGid.x + 1, yW - 1), y00.y);
+    uint2 y01 = uint2(y00.x, min(yGid.y + 1, yH - 1));
+    uint2 y11 = uint2(y10.x, y01.y);
+    float y = (yIn.read(y00).r + yIn.read(y10).r + yIn.read(y01).r + yIn.read(y11).r) * 0.25;
 
-    float3 rgb = yuvToRgb(y, uv);
+    float3 rgb = applyPreGrade(yuvToRgb(y, uv), p);
     float3 mapped = gpuImageLookup(rgb, lookup, sampler(filter::linear, address::clamp_to_edge));
     float3 outRgb = applyPokerLutGrade(rgb, mapped, p);
 

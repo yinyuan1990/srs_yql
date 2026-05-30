@@ -609,7 +609,107 @@ struct ContentView: View {
         case .low: return "超低网"
         }
     }
-    
+
+    private func captureExperimentPanel() -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Picker("Range", selection: $rtc.captureRangeMode) {
+                    ForEach(CaptureRangeMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Binning", selection: $rtc.captureBinningMode) {
+                    ForEach(CaptureBinningMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Button("应用采集格式") {
+                rtc.applyCaptureExperimentFormat()
+            }
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(.black)
+            .frame(maxWidth: .infinity, minHeight: 28)
+            .background(Color.yellow)
+            .cornerRadius(6)
+
+            CaptureColorSliderView(
+                title: "冷暖",
+                value: $rtc.wbTemperature,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "黄/琥珀",
+                value: $rtc.wbAmber,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "绿紫",
+                value: $rtc.wbTint,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "红",
+                value: $rtc.wbRed,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "绿",
+                value: $rtc.wbGreen,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "蓝",
+                value: $rtc.wbBlue,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "黑",
+                value: $rtc.wbBlack,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+            CaptureColorSliderView(
+                title: "白",
+                value: $rtc.wbWhite,
+                remoteSyncToken: rtc.captureColorRemoteTick,
+                onLocalCommit: { rtc.applyCaptureColorAdjustment() }
+            )
+
+            HStack(spacing: 8) {
+                Button("应用颜色") {
+                    rtc.applyCaptureColorAdjustment()
+                }
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .background(Color.white.opacity(0.85))
+                .foregroundColor(.black)
+                .cornerRadius(6)
+
+                Button("重置颜色") {
+                    rtc.resetCaptureColorAdjustment()
+                }
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .background(Color.white.opacity(0.35))
+                .foregroundColor(.white)
+                .cornerRadius(6)
+            }
+            .font(.system(size: 11, weight: .medium))
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.55))
+        .cornerRadius(8)
+    }
+
     var body: some View {
         ZStack {
             // 🔥 底层黑色背景，确保没有白边
@@ -723,7 +823,10 @@ struct ContentView: View {
                         // 🔍 屏幕亮度调节
                         BrightnessSliderView()
                             .padding(.horizontal, 16)
-                        
+
+                        captureExperimentPanel()
+                            .padding(.horizontal, 16)
+
                         // 档位（可点击切换UI高亮，不发后端）+ 摄像头切换
                         HStack(spacing: 6) {
                             // 档位按钮（仅UI切换，不发送后端）
@@ -778,7 +881,17 @@ struct ContentView: View {
         .modifier(HideHomeIndicatorModifier())             // 🔥 隐藏 Home Indicator（iOS 16+）
         .onAppear {
             print("🚀 ContentView.onAppear")
-            
+            rtc.localView.backgroundColor = .black
+            rtc.localView.isOpaque = true
+            rtc.localView.contentMode = .scaleAspectFill
+            if isBlackout {
+                isBlackout = false
+            }
+            if let b = savedBrightness {
+                UIScreen.main.brightness = b
+                savedBrightness = nil
+            }
+
             // 🔊 审核隐藏 - 后台保活
             // BackgroundAudioManager.shared.startBackgroundKeepAlive()
             
@@ -1253,14 +1366,15 @@ struct ContentView: View {
     
     private func handleAppEnterBackground() {
         if rtc.isCameraSleeping { return }
-        // 🔊 后台保活模式：进入后台不停止推流
-        // 静音音频保活 + WebRTC继续推流 + WebSocket保持连接
         print("🔊 [保活] App进入后台，保持推流 (isPublishing=\(rtc.isPublishing))")
     }
     
     private func handleAppBecomeActive() {
         if rtc.isCameraSleeping { return }
-        
+        rtc.localView.backgroundColor = .black
+        rtc.localView.isOpaque = true
+        rtc.localView.contentMode = .scaleAspectFill
+
         hasAutoPublished = false
         autoPublishRetryCount = 0
         
@@ -1279,12 +1393,60 @@ struct ContentView: View {
         
         if rtc.capturer != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if let preset = rtc.currentLadder[rtc.currentProfile] {
-                    rtc.recapture(width: preset.width, height: preset.height, fps: preset.fps)
-                }
+                rtc.reapplyConfigForWake()
             }
         } else {
             isCameraReady = false
+        }
+    }
+}
+
+// MARK: - 采集颜色滑块（PC 下发同步显示；本地拖动不回传 PC）
+struct CaptureColorSliderView: View {
+    let title: String
+    @Binding var value: Float
+    let remoteSyncToken: UInt
+    let onLocalCommit: () -> Void
+
+    @State private var localValue: Float = 0
+    @State private var isDragging = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white)
+                .frame(width: 40, alignment: .leading)
+            Slider(
+                value: $localValue,
+                in: -1...1,
+                step: 0.05,
+                onEditingChanged: { editing in
+                    isDragging = editing
+                    if !editing {
+                        value = localValue
+                        onLocalCommit()
+                    }
+                }
+            )
+            .accentColor(.white)
+            Text(String(format: "%.2f", localValue))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(.white)
+                .frame(width: 38)
+        }
+        .onAppear {
+            localValue = value
+        }
+        .onChange(of: value) { newValue in
+            if !isDragging {
+                localValue = newValue
+            }
+        }
+        .onChange(of: remoteSyncToken) { _ in
+            if !isDragging {
+                localValue = value
+            }
         }
     }
 }
