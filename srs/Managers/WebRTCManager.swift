@@ -139,9 +139,9 @@ final class VideoFilterPipeline: ObservableObject {
         didSet { saveDefault(.sharpness, sharpness) }
     }
 
-    // ⭐ 主开关
-    @Published var enabled: Bool = UserDefaults.standard.object(forKey: "videoFilter.enabled") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(enabled, forKey: "videoFilter.enabled"); print("📷 [Filter] enabled=\(enabled)") }
+    // ⭐ 主开关（仅内存，不持久化）
+    @Published var enabled: Bool = true {
+        didSet { print("📷 [Filter] enabled=\(enabled)") }
     }
 
     private enum Key: String {
@@ -159,14 +159,12 @@ final class VideoFilterPipeline: ObservableObject {
         case sharpenAmount = "videoFilter.sharpenAmount"
     }
 
+    // 滤镜/硬件/LUT 参数不持久化到本地：仅用内存默认值，运行期靠登录下发 + STOMP 覆盖
     private static func loadDefault(_ key: Key, fallback: Float) -> Float {
-        if UserDefaults.standard.object(forKey: key.rawValue) != nil {
-            return UserDefaults.standard.float(forKey: key.rawValue)
-        }
         return fallback
     }
     private func saveDefault(_ key: Key, _ value: Float) {
-        UserDefaults.standard.set(value, forKey: key.rawValue)
+        // no-op: 不写 UserDefaults（参数只存内存）
     }
     private func logChange(_ name: String, _ v: Float) {
         print("📷 [Filter] \(name) = \(String(format: "%.3f", v))")
@@ -1268,34 +1266,65 @@ final class WebRTCManager: NSObject, ObservableObject {
         applyLutMode(lutModeEnabled)
     }
 
-    /// PC「亮度」滑块：后台直接下发 -2...8，只走硬件 ISO/EV，不进滤镜链路
+    // MARK: - 登录/档位切换后运用三链路默认值
+    /// 读取 IOSPipelineConfig.shared，按三个开关把登录下发的默认值运用到 滤镜/硬件/LUT 链路。
+    /// 仅在「第一次（相机就绪）」和「切换档位（ptype="type"）」时调用。
+    /// 运行期 PC 的 STOMP 推送（其它 ptype）会在此之后覆盖这些值 —— 两者不冲突。
+    func applyPipelineDefaults() {
+        let cfg = IOSPipelineConfig.shared
+
+        // ① 滤镜链路：开关打开才运用，否则直通
+        if cfg.switchFilter {
+            applyFilterMode(true)
+            // 后端 exposure.default 是线性倍率(如1.10)，shader 走 2^EV，故换算 EV=log2(linear)（与 PC 端 Math.log2 一致）
+            let evStops = log2(max(cfg.exposureLinear, 1e-6))
+            videoFilter.applyAll(
+                brightness: cfg.brightness, contrast: cfg.contrast, saturation: cfg.saturation,
+                sharpness: cfg.sharpness, redBoost: cfg.redBoost,
+                blackPoint: cfg.blackPoint, highlightLift: cfg.highlightLift,
+                gamma: cfg.gamma, exposure: evStops,
+                enabled: true, source: "pipelineDefaults")
+        } else {
+            applyFilterMode(false)
+        }
+
+        // ② 硬件链路：开关打开才运用。增益(0-100)映射到设备实际 ISO min..max；白平衡始终自动（不下发具体值）
+        if cfg.switchHardware {
+            applyHardwareBrightness(cfg.gainDefault)   // 0-100 → ISO，并记录 slider 值供相机就绪后重应用
+            capturer?.applyContinuousWhiteBalance()
+            print("✅ [applyPipelineDefaults] 硬件: gain(0-100)=\(cfg.gainDefault)→ISO, 白平衡=自动")
+        }
+
+        // ③ LUT 链路：开关打开才套用默认 LUT，否则关闭
+        if cfg.switchLut {
+            applyLutMode(true)
+            applyLutName(cfg.lutName)
+        } else {
+            applyLutMode(false)
+        }
+        print("✅ [applyPipelineDefaults] filter=\(cfg.switchFilter) hardware=\(cfg.switchHardware) lut=\(cfg.switchLut)")
+    }
+
+    /// PC「增益」滑块（后台 test_brightness）：值是 0-100，只走硬件 ISO，不进滤镜链路。
+    /// 注意：0-100 是 UI 抽象，真正运用要映射到设备实际 ISO 的 min..max。
     @objc private func onTestBrightnessCommand(_ notification: Notification) {
         guard let userInfo = notification.userInfo else { return }
         let value = userInfo["value"] as? Int ?? 0
         applyHardwareBrightness(value)
     }
 
-    /// 后台亮度值：-2...8，0 为默认
-    static let hardwareBrightnessMinEV: Float = -2.0
-    static let hardwareBrightnessMaxEV: Float = 8.0
-    static let defaultHardwareBrightnessSlider: Int = 0
+    static let defaultHardwareBrightnessSlider: Int = 20
 
-    static func hardwareEV(fromSlider value: Int) -> Float {
-        let slider = max(0, min(100, value))
-        return hardwareBrightnessMinEV + Float(slider) * 0.1
-    }
-
-    /// 硬件亮度：走硬件 ISO/EV，不走 shader 高光增强
+    /// 硬件增益：滑块 0-100 → 设备实际 ISO[min,max]（由 capturer 计算），不走 shader 高光增强
     func applyHardwareBrightness(_ sliderValue: Int) {
-        let ev = Self.hardwareEV(fromSlider: sliderValue)
         hardwareBrightnessSliderValue = max(0, min(100, sliderValue))
-        print("📷 [硬件亮度] value=\(sliderValue) EV=\(String(format: "%.2f", ev))")
+        print("📷 [硬件增益] value=\(hardwareBrightnessSliderValue)/100 → ISO")
         applyHardwareBrightnessEVIfReady()
     }
 
     private func applyHardwareBrightnessEVIfReady() {
         guard let capturer else { return }
-        capturer.applyHardwareBrightnessEV(Self.hardwareEV(fromSlider: hardwareBrightnessSliderValue))
+        capturer.applyGainSlider(hardwareBrightnessSliderValue)
     }
 
     // MARK: - 白平衡（PC 滤镜弹框下发，0-100 → 2000K-8000K）
@@ -1627,6 +1656,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                 setAverageOutputFPS(f)
                 enableAverageThrottling(true)
             }
+            // 🎨 切换档位会重建采集/管线，需按开关重新运用三链路默认值（之后 STOMP 推送仍可覆盖）
+            applyPipelineDefaults()
 
         case "direction":
             // 方向："-1"后置；"1"前置（若不一致则切换一次）
@@ -2438,10 +2469,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             } else {
                 self.reapplyFocusFromConfig()
             }
+            // 🎨 首次相机就绪后，按开关运用登录下发的三链路默认值（推流+预览同一处理点）
+            self.applyPipelineDefaults()
             NotificationCenter.default.post(name: .cameraPreviewReady, object: nil)
         }
     }
-    
+
     func applyMountTransform() {
         guard let session = capturer?.captureSession else {
             return

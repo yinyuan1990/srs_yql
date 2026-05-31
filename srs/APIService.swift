@@ -180,6 +180,66 @@ struct VerifyDeviceResponse: Codable {
     let message: String
 }
 
+/// iOS 三链路（LUT/滤镜/硬件）配置 —— 登录接口 iosPipeline 块的内存静态持有者。
+/// 不持久化到 UserDefaults，仅在当前进程生命周期内有效。
+final class IOSPipelineConfig {
+    static let shared = IOSPipelineConfig()
+    private init() {}
+
+    // 三链路总开关（打开才在第一次/切档时运用对应默认值）
+    var switchLut: Bool      = false
+    var switchFilter: Bool   = true
+    var switchHardware: Bool = true
+
+    // 滤镜默认值
+    var brightness:     Float = 1.10
+    var gamma:          Float = 1.10
+    var contrast:       Float = 1.10
+    var saturation:     Float = 1.10
+    /// 服务端线性曝光倍率（如 1.10）；运用前需 log2() 换算成 EV
+    var exposureLinear: Float = 1.10
+    var sharpness:      Float = 0.20
+    var highlightLift:  Float = 0.0
+    var blackPoint:     Float = 0.10   // 锁死值
+    var redBoost:       Float = 0.02   // 锁死值 → iOS redGlow
+
+    // 硬件默认值
+    /// 增益滑块 0-100（运用时映射到设备实际 ISO min..max）；白平衡始终自动，不在此存值
+    var gainDefault: Int = 20
+
+    // LUT
+    var lutName: String = "lookup_soft_elegance_1"
+
+    /// 传入登录原始 JSON 里 "iosPipeline" 对应的 [String: Any]
+    func update(fromLoginJSON dict: [String: Any]) {
+        if let s = dict["switches"] as? [String: Any] {
+            if let v = s["lut"]      as? Bool { switchLut      = v }
+            if let v = s["filter"]   as? Bool { switchFilter   = v }
+            if let v = s["hardware"] as? Bool { switchHardware = v }
+        }
+        if let f = dict["filter"] as? [String: Any] {
+            func def(_ k: String) -> Float? { ((f[k] as? [String: Any])?["default"] as? NSNumber)?.floatValue }
+            func locked(_ k: String) -> Float? { ((f[k] as? [String: Any])?["locked"] as? NSNumber)?.floatValue }
+            if let v = def("brightness")    { brightness     = v }
+            if let v = def("gamma")         { gamma          = v }
+            if let v = def("contrast")      { contrast       = v }
+            if let v = def("saturation")    { saturation     = v }
+            if let v = def("exposure")      { exposureLinear = v }
+            if let v = def("sharpness")     { sharpness      = v }
+            if let v = def("highlightLift") { highlightLift  = v }
+            if let v = locked("blackPoint") { blackPoint     = v }
+            if let v = locked("redBoost")   { redBoost       = v }
+        }
+        if let hw = dict["hardware"] as? [String: Any] {
+            if let v = ((hw["gain"] as? [String: Any])?["default"] as? NSNumber)?.intValue { gainDefault = v }
+        }
+        if let lut = dict["lut"] as? [String: Any], let name = lut["lutName"] as? String, !name.isEmpty {
+            lutName = name
+        }
+        print("✅ [IOSPipelineConfig] filter=\(switchFilter) hw=\(switchHardware) lut=\(switchLut) gain=\(gainDefault) lutName=\(lutName)")
+    }
+}
+
 // API服务类
 class APIService {
     static let shared = APIService()
@@ -265,6 +325,13 @@ class APIService {
             // 🔥 关键修改：直接解析LoginResponse，不是APIResponse包装
             let loginResponse = try JSONDecoder().decode(LoginResponse.self, from: data)
             print("✅ [登录] 成功, userId=\(loginResponse.userId ?? -1)")
+            // 🎨 解析 iosPipeline（三链路开关 + 滤镜/硬件/LUT 默认值）→ 内存静态变量（宽松解析，缺失保留兜底）
+            if let rawJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let pipeline = rawJson["iosPipeline"] as? [String: Any] {
+                IOSPipelineConfig.shared.update(fromLoginJSON: pipeline)
+            } else {
+                print("ℹ️ [登录] 未返回 iosPipeline，使用内置默认值")
+            }
             return loginResponse
             
         } catch {

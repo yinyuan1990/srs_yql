@@ -236,6 +236,41 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         }
     }
 
+    /// 增益（硬件 ISO）：滑块 0-100 线性映射到设备实际 ISO [minISO, maxISO] 并直接设置。
+    /// 增益本质就是传感器 ISO；0-100 是 UI 抽象，真正运用要落到设备的 ISO 上下限。
+    /// 与 PC 亮度 EV 路径解耦：登录/切档下发的增益默认值走这里。
+    func applyGainSlider(_ slider: Int) {
+        sessionQueue.async { [weak self] in
+            self?.applyGainSliderLocked(slider)
+        }
+    }
+
+    private func applyGainSliderLocked(_ slider: Int) {
+        guard let device = currentDevice else { return }
+        let s = max(0, min(100, slider))
+        do {
+            try device.lockForConfiguration()
+            guard device.isExposureModeSupported(.custom) else {
+                device.unlockForConfiguration()
+                print("⚠️ [CustomCapture] 增益: 设备不支持 custom 曝光，跳过")
+                return
+            }
+            let minISO = device.activeFormat.minISO
+            let maxISO = device.activeFormat.maxISO
+            let iso = minISO + (Float(s) / 100.0) * (maxISO - minISO)
+            let safeISO = max(minISO, min(maxISO, iso))
+            let duration = lockedDuration ?? device.exposureDuration
+            lockedDuration = duration
+            lockedISO = safeISO
+            device.exposureMode = .custom
+            device.setExposureModeCustom(duration: duration, iso: safeISO, completionHandler: nil)
+            print("📷 [CustomCapture] 增益 slider=\(s)/100 → ISO=\(safeIntText(safeISO)) (min=\(safeIntText(minISO)) max=\(safeIntText(maxISO)))")
+            device.unlockForConfiguration()
+        } catch {
+            print("❌ [CustomCapture] 增益设置失败: \(error.localizedDescription)")
+        }
+    }
+
     private func safeIntText(_ value: Float?) -> String {
         guard let value, value.isFinite, value >= Float(Int.min), value <= Float(Int.max) else { return "invalid" }
         return "\(Int(value))"
@@ -527,9 +562,17 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 autoWhiteBalanceEnabled = true
                 lockedWhiteBalanceGains = nil
                 wbAdjustmentBaseGains = nil
-                print("⚪️ [CustomCapture] configureSession → 自动白平衡已开启")
+                print("⚪️ [CustomCapture] configureSession → 自动白平衡已开启, exposureMode=\(device.exposureMode.rawValue)")
             }
             device.unlockForConfiguration()
+
+            // 延迟检查白平衡模式是否被系统覆盖
+            let checkDevice = device
+            sessionQueue.asyncAfter(deadline: .now() + 2.0) {
+                let wbMode = checkDevice.whiteBalanceMode
+                let expMode = checkDevice.exposureMode
+                print("⚪️ [CustomCapture] 2秒后检查: whiteBalanceMode=\(wbMode.rawValue) (0=locked,1=auto,2=continuous), exposureMode=\(expMode.rawValue)")
+            }
 
             if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
                 connection.videoOrientation = .portrait
