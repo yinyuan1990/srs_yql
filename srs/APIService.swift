@@ -208,14 +208,33 @@ final class IOSPipelineConfig {
     var gainDefault: Int = 20
 
     // LUT
-    var lutName: String = "lookup_soft_elegance_1"
+    var lutName: String = "lookup"
+
+    /// 宽松解析布尔：支持 Bool / 0|1 / "true"|"false"
+    private static func parseBool(_ any: Any?) -> Bool? {
+        switch any {
+        case let b as Bool: return b
+        case let n as NSNumber: return n.boolValue
+        case let s as String:
+            switch s.lowercased() {
+            case "true", "1", "yes", "on": return true
+            case "false", "0", "no", "off": return false
+            default: return nil
+            }
+        default: return nil
+        }
+    }
 
     /// 传入登录原始 JSON 里 "iosPipeline" 对应的 [String: Any]
     func update(fromLoginJSON dict: [String: Any]) {
+        let before = "filter=\(switchFilter) hw=\(switchHardware) lut=\(switchLut)"
         if let s = dict["switches"] as? [String: Any] {
-            if let v = s["lut"]      as? Bool { switchLut      = v }
-            if let v = s["filter"]   as? Bool { switchFilter   = v }
-            if let v = s["hardware"] as? Bool { switchHardware = v }
+            print("[IOSPipelineConfig] 原始 switches=\(s)")
+            if let v = Self.parseBool(s["lut"])      { switchLut      = v }
+            if let v = Self.parseBool(s["filter"])   { switchFilter   = v }
+            if let v = Self.parseBool(s["hardware"]) { switchHardware = v }
+        } else {
+            print("[IOSPipelineConfig] ⚠️ iosPipeline 无 switches 字段，保留内置兜底")
         }
         if let f = dict["filter"] as? [String: Any] {
             func def(_ k: String) -> Float? { ((f[k] as? [String: Any])?["default"] as? NSNumber)?.floatValue }
@@ -233,9 +252,8 @@ final class IOSPipelineConfig {
         if let hw = dict["hardware"] as? [String: Any] {
             if let v = ((hw["gain"] as? [String: Any])?["default"] as? NSNumber)?.intValue { gainDefault = v }
         }
-        if let lut = dict["lut"] as? [String: Any], let name = lut["lutName"] as? String, !name.isEmpty {
-            lutName = name
-        }
+        lutName = "lookup"
+        print("[IOSPipelineConfig] 解析完成 \(before) → filter=\(switchFilter) hw=\(switchHardware) lut=\(switchLut) gain=\(gainDefault) lutName=\(lutName)")
         print("✅ [IOSPipelineConfig] filter=\(switchFilter) hw=\(switchHardware) lut=\(switchLut) gain=\(gainDefault) lutName=\(lutName)")
     }
 }
@@ -328,8 +346,11 @@ class APIService {
             // 🎨 解析 iosPipeline（三链路开关 + 滤镜/硬件/LUT 默认值）→ 内存静态变量（宽松解析，缺失保留兜底）
             if let rawJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let pipeline = rawJson["iosPipeline"] as? [String: Any] {
+                print("[登录] 收到 iosPipeline keys=\(pipeline.keys.sorted())")
                 IOSPipelineConfig.shared.update(fromLoginJSON: pipeline)
             } else {
+                let cfg = IOSPipelineConfig.shared
+                print("[登录] ⚠️ 未返回 iosPipeline，使用内置兜底 filter=\(cfg.switchFilter) hw=\(cfg.switchHardware) lut=\(cfg.switchLut)")
                 print("ℹ️ [登录] 未返回 iosPipeline，使用内置默认值")
             }
             return loginResponse

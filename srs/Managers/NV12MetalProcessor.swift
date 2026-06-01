@@ -7,14 +7,14 @@ import CoreVideo
 final class NV12MetalProcessor {
 
     // MARK: - 滤镜参数（与 VideoFilterPipeline 对齐）
-    var exposure:    Float = 0.15
-    var blackPoint:  Float = 0.10
-    var brightness:  Float = 0.05
+    var exposure:    Float = 0.0
+    var blackPoint:  Float = 0.0
+    var brightness:  Float = 0.0
     var gamma:       Float = 1.0
-    var contrast:    Float = 1.20
-    var saturation:  Float = 1.30
-    var sharpen:     Float = 0.6
-    var redGlow:     Float = 0.25
+    var contrast:    Float = 1.0
+    var saturation:  Float = 1.0
+    var sharpen:     Float = 0.0
+    var redGlow:     Float = 0.0
     var pixelLevel:  Float = 0.0
     var enabled:     Bool  = true
 
@@ -113,8 +113,18 @@ final class NV12MetalProcessor {
                texIn: uvInTex, texOut: uvOutTex,
                params: &params, w: w/2, h: h/2)
 
+        // ⭐ B：有界等待 + 错误检查 —— 避免 GPU 卡顿/出错时裸 waitUntilCompleted() 永久阻塞采集队列
+        let sem = DispatchSemaphore(value: 0)
+        cmdBuf.addCompletedHandler { _ in sem.signal() }
         cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
+        if sem.wait(timeout: .now() + 0.1) == .timedOut {
+            print("⚠️ [NV12Metal] GPU 超时(>100ms)，丢弃该帧（避免卡死采集队列）")
+            return nil
+        }
+        if cmdBuf.status == .error {
+            print("⚠️ [NV12Metal] GPU 命令出错，丢弃该帧: \(String(describing: cmdBuf.error))")
+            return nil
+        }
 
         return output
     }
@@ -131,6 +141,7 @@ final class NV12MetalProcessor {
         redGlow    = fp.redGlow
         pixelLevel = fp.pixelLevel
         enabled    = fp.enabled
+        print("[NV12Metal] sync enabled=\(enabled) exposure=\(exposure) pixelLevel=\(pixelLevel) blackPoint=\(blackPoint) brightness=\(brightness) gamma=\(gamma) contrast=\(contrast) saturation=\(saturation) redGlow=\(redGlow) sharpen=\(sharpen)")
     }
 
     // MARK: - 私有工具

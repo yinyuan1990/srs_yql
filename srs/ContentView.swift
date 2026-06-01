@@ -590,6 +590,9 @@ struct ContentView: View {
     @State private var showTrialEndAlert: Bool = false
     @State private var trialEndMessage: String = ""
     @State private var isTrialEnded: Bool = false
+
+    /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
+    private let showCaptureExperimentPanel = false
     
     // 🔥 激活页面
     @State private var showingActivation: Bool = false
@@ -728,19 +731,29 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { showControls.toggle() }
             }
 
-            // PC 连接状态指示器（左上角，始终显示）
+            // PC 连接 + 白平衡状态（左上角，始终显示）
             VStack {
                 HStack {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(rtc.viewerConnected ? Color.green : Color.red)
-                            .frame(width: 7, height: 7)
-                        Text(rtc.viewerConnected ? "PC已连接" : "PC未连接")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(rtc.viewerConnected ? .green : .red)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(rtc.viewerConnected ? Color.green : Color.red)
+                                .frame(width: 7, height: 7)
+                            Text(rtc.viewerConnected ? "PC已连接" : "PC未连接")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(rtc.viewerConnected ? .green : .red)
+                        }
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(rtc.whiteBalanceIsAuto ? Color.cyan : Color.orange)
+                                .frame(width: 7, height: 7)
+                            Text("白平衡:\(rtc.whiteBalanceStatusText)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(rtc.whiteBalanceIsAuto ? .cyan : .orange)
+                        }
                     }
                     .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 5)
                     .background(Color.black.opacity(0.45))
                     .cornerRadius(8)
                     .padding(.top, 52)
@@ -824,8 +837,10 @@ struct ContentView: View {
                         BrightnessSliderView()
                             .padding(.horizontal, 16)
 
-                        captureExperimentPanel()
-                            .padding(.horizontal, 16)
+                        if showCaptureExperimentPanel {
+                            captureExperimentPanel()
+                                .padding(.horizontal, 16)
+                        }
 
                         // 档位（可点击切换UI高亮，不发后端）+ 摄像头切换
                         HStack(spacing: 6) {
@@ -1000,9 +1015,12 @@ struct ContentView: View {
                     }
                 }
             }
+
+            rtc.startWhiteBalanceStatusPolling()
         }
         .onDisappear {
             print("🚪 ContentView.onDisappear: 清理资源")
+            rtc.stopWhiteBalanceStatusPolling()
             
             // 兜底资源清理
             if rtc.isPublishing { print("⚠️ [原因] onDisappear兜底清理"); rtc.stopPublish() }

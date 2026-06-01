@@ -19,6 +19,9 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     private var videoHDREnabled = false
     private var autoHDREnabled = false
     private var autoWhiteBalanceEnabled = false
+    private var lastAutoWhiteBalanceRefreshAt: TimeInterval = 0
+    private var autoWhiteBalanceRefreshInFlight = false
+    private let autoWhiteBalanceRefreshInterval: TimeInterval = 2.0
     private var outputPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
     private var wbTemperature: Float = 0
     private var wbTint: Float = 0
@@ -29,6 +32,12 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     private var wbWhite: Float = 0
     private var wbAmber: Float = 0
     private var wbAdjustmentBaseGains: AVCaptureDevice.WhiteBalanceGains?
+
+    struct WhiteBalanceStatus {
+        let isAuto: Bool
+        let displayText: String
+        let kelvin: Float
+    }
 
     var currentVideoInput: AVCaptureDeviceInput? {
         captureSession.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first { $0.device.hasMediaType(.video) }
@@ -74,6 +83,26 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         ]
     }
 
+    func queryWhiteBalanceStatus(completion: @escaping (WhiteBalanceStatus) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentDevice else {
+                DispatchQueue.main.async {
+                    completion(WhiteBalanceStatus(isAuto: false, displayText: "--", kelvin: 0))
+                }
+                return
+            }
+            let mode = device.whiteBalanceMode
+            let gains = self.normalizedGains(device.deviceWhiteBalanceGains, for: device)
+            let kelvin = device.temperatureAndTintValues(for: gains).temperature
+            let isAuto = mode == .continuousAutoWhiteBalance || mode == .autoWhiteBalance
+            let modeText = isAuto ? "自动" : "手动"
+            let text = "\(modeText) \(Int(kelvin))K"
+            DispatchQueue.main.async {
+                completion(WhiteBalanceStatus(isAuto: isAuto, displayText: text, kelvin: kelvin))
+            }
+        }
+    }
+
     func applyWhiteBalanceAdjustment(temperature: Float, tint: Float, red: Float, green: Float, blue: Float, black: Float, white: Float, amber: Float) {
         wbTemperature = max(-1, min(1, temperature))
         wbTint = max(-1, min(1, tint))
@@ -107,10 +136,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         do {
             try device.lockForConfiguration()
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
-                autoWhiteBalanceEnabled = true
-                lockedWhiteBalanceGains = nil
-                wbAdjustmentBaseGains = nil
+                enableContinuousWhiteBalanceLocked(device)
                 print("🎨 [CustomCapture] WB reset → auto")
             }
             device.unlockForConfiguration()
@@ -120,48 +146,13 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     }
 
     private func applyWhiteBalanceAdjustmentLocked() {
-        guard let device = currentDevice else { return }
-        // 所有微调值都是 0 时不覆盖自动白平衡
+        guard currentDevice != nil else { return }
         if wbTemperature == 0 && wbTint == 0 && wbRed == 0 && wbGreen == 0
             && wbBlue == 0 && wbBlack == 0 && wbWhite == 0 && wbAmber == 0 {
             return
         }
-        do {
-            try device.lockForConfiguration()
-            guard device.isWhiteBalanceModeSupported(.locked) else {
-                device.unlockForConfiguration()
-                return
-            }
-            let base = wbAdjustmentBaseGains ?? lockedWhiteBalanceGains ?? normalizedGains(device.deviceWhiteBalanceGains, for: device)
-            if wbAdjustmentBaseGains == nil {
-                wbAdjustmentBaseGains = base
-            }
-            let maxGain = device.maxWhiteBalanceGain
-            let temp = wbTemperature
-            let tint = wbTint
-            let amber = wbAmber
-            // 白：三通道同步提亮；黑：三通道同步压暗；黄/琥珀：R+G 抬、B 降（去冷光、白底更暖）
-            let lumScale = (1 + wbWhite * 0.25) * (1 - wbBlack * 0.25)
-            let rFactor = (1 + temp * 0.25 + tint * 0.08 + wbRed * 0.20) * (1 + amber * 0.18)
-            let gFactor = (1 - tint * 0.15 + wbGreen * 0.20) * (1 + amber * 0.14)
-            let bFactor = (1 - temp * 0.25 + tint * 0.08 + wbBlue * 0.20) * (1 - amber * 0.22)
-            var gains = AVCaptureDevice.WhiteBalanceGains(
-                redGain: base.redGain * rFactor * lumScale,
-                greenGain: base.greenGain * gFactor * lumScale,
-                blueGain: base.blueGain * bFactor * lumScale
-            )
-            gains = AVCaptureDevice.WhiteBalanceGains(
-                redGain: max(1.0, min(gains.redGain, maxGain)),
-                greenGain: max(1.0, min(gains.greenGain, maxGain)),
-                blueGain: max(1.0, min(gains.blueGain, maxGain))
-            )
-            device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-            lockedWhiteBalanceGains = gains
-            device.unlockForConfiguration()
-            print("🎨 [CustomCapture] WB temp=\(String(format: "%.2f", temp)) tint=\(String(format: "%.2f", tint)) amber=\(String(format: "%.2f", amber)) rgb=(\(String(format: "%.2f", wbRed)),\(String(format: "%.2f", wbGreen)),\(String(format: "%.2f", wbBlue))) bw=(\(String(format: "%.2f", wbBlack)),\(String(format: "%.2f", wbWhite))) lum=\(String(format: "%.2f", lumScale)) gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain)))")
-        } catch {
-            print("❌ [CustomCapture] 白平衡微调失败: \(error.localizedDescription)")
-        }
+        applyContinuousWhiteBalance()
+        print("🎨 [CustomCapture] WB adjustment ignored, keep continuous auto WB")
     }
 
     func applyShutter(_ shutterSpeed: Int, preserveCurrentISO: Bool) {
@@ -224,6 +215,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 device.setExposureModeCustom(duration: duration, iso: iso) { [weak self] _ in
                     self?.finishBrightnessApply(generation: generation, ev: ev)
                 }
+                refreshAutoWhiteBalanceAfterLightingChange(reason: "brightness ISO")
                 print("📷 [CustomCapture] brightness request ISO=\(safeIntText(iso)) EV=\(String(format: "%.2f", ev)) mode=custom minISO=\(safeIntText(device.activeFormat.minISO)) maxISO=\(safeIntText(device.activeFormat.maxISO))")
             } else {
                 let clamped = max(device.minExposureTargetBias, min(ev, device.maxExposureTargetBias))
@@ -264,6 +256,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             lockedISO = safeISO
             device.exposureMode = .custom
             device.setExposureModeCustom(duration: duration, iso: safeISO, completionHandler: nil)
+            refreshAutoWhiteBalanceAfterLightingChange(reason: "gain ISO")
             print("📷 [CustomCapture] 增益 slider=\(s)/100 → ISO=\(safeIntText(safeISO)) (min=\(safeIntText(minISO)) max=\(safeIntText(maxISO)))")
             device.unlockForConfiguration()
         } catch {
@@ -321,6 +314,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             ensureBaseISO(device)
             baseISO = clampedISO / Float(pow(2.0, Double(hardwareEV)))
             device.setExposureModeCustom(duration: device.exposureDuration, iso: clampedISO, completionHandler: nil)
+            refreshAutoWhiteBalanceAfterLightingChange(reason: "auto ISO")
             device.unlockForConfiguration()
             print("🔄 [CustomCapture] AutoISO EV=\(String(format: "%+.2f", offset)), ISO \(Int(currentISO))→\(Int(clampedISO)), baseISO=\(Int(baseISO ?? clampedISO))")
         } catch {
@@ -329,20 +323,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     }
 
     func applyWhiteBalanceLock() {
-        guard let device = currentDevice else { return }
-        do {
-            try device.lockForConfiguration()
-            if device.isWhiteBalanceModeSupported(.locked) {
-                let gains = normalizedGains(device.deviceWhiteBalanceGains, for: device)
-                device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-                lockedWhiteBalanceGains = gains
-                wbAdjustmentBaseGains = gains
-                print("⚪️ [CustomCapture] WB locked r=\(String(format: "%.2f", gains.redGain)) g=\(String(format: "%.2f", gains.greenGain)) b=\(String(format: "%.2f", gains.blueGain))")
-            }
-            device.unlockForConfiguration()
-        } catch {
-            print("❌ [CustomCapture] 白平衡锁定失败: \(error.localizedDescription)")
-        }
+        applyContinuousWhiteBalance()
     }
 
     func applyContinuousWhiteBalance() {
@@ -350,9 +331,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         do {
             try device.lockForConfiguration()
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
-                lockedWhiteBalanceGains = nil
-                wbAdjustmentBaseGains = nil
+                enableContinuousWhiteBalanceLocked(device)
             }
             device.unlockForConfiguration()
         } catch {
@@ -394,7 +373,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         print("⚪️ [CustomCapture] autoWhiteBalance=\(enabled)")
     }
 
-    /// 运用白平衡：开自动WB → 等收敛 → 读gains转色温 → 锁定 → 回调色温值
+    /// 运用白平衡：开自动WB → 等收敛 → 读gains转色温 → 回调色温值；不锁定，保持连续自动
     func applyWhiteBalanceOnceAndLock(completion: @escaping (Float) -> Void) {
         sessionQueue.async { [weak self] in
             guard let self, let device = self.currentDevice else { return }
@@ -404,74 +383,37 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                     device.unlockForConfiguration()
                     return
                 }
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
+                self.enableContinuousWhiteBalanceLocked(device)
                 device.unlockForConfiguration()
             } catch {
                 print("❌ [CustomCapture] 运用白平衡失败: \(error.localizedDescription)")
                 return
             }
-            // 等自动WB收敛（0.5秒足够）
             self.sessionQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, let device = self.currentDevice else { return }
                 do {
                     try device.lockForConfiguration()
+                    self.enableContinuousWhiteBalanceLocked(device)
                     let gains = self.normalizedGains(device.deviceWhiteBalanceGains, for: device)
-                    if device.isWhiteBalanceModeSupported(.locked) {
-                        device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-                    }
-                    self.lockedWhiteBalanceGains = gains
-                    self.wbAdjustmentBaseGains = gains
-                    self.autoWhiteBalanceEnabled = false
                     device.unlockForConfiguration()
                     let tempTint = device.temperatureAndTintValues(for: gains)
                     let kelvin = tempTint.temperature
-                    print("⚪️ [CustomCapture] 运用白平衡完成: \(Int(kelvin))K gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain)))")
+                    print("⚪️ [CustomCapture] 运用白平衡完成: \(Int(kelvin))K gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain))) mode=continuous")
                     DispatchQueue.main.async { completion(kelvin) }
                 } catch {
-                    print("❌ [CustomCapture] 运用白平衡锁定失败: \(error.localizedDescription)")
+                    print("❌ [CustomCapture] 运用白平衡读取失败: \(error.localizedDescription)")
                 }
             }
         }
     }
 
     func applyColorTemperature(_ kelvin: Float) {
-        sessionQueue.async { [weak self] in
-            self?.applyColorTemperatureLocked(kelvin)
-        }
+        applyContinuousWhiteBalance()
+        print("⚪️ [CustomCapture] colorTemp request ignored, keep continuous auto WB")
     }
 
     private func applyColorTemperatureLocked(_ kelvin: Float) {
-        guard let device = currentDevice else { return }
-        do {
-            try device.lockForConfiguration()
-            guard device.isWhiteBalanceModeSupported(.locked) else {
-                device.unlockForConfiguration()
-                return
-            }
-            autoWhiteBalanceEnabled = false
-            let maxGain = device.maxWhiteBalanceGain
-            let tempAndTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
-                temperature: kelvin, tint: 0
-            )
-            var gains = device.deviceWhiteBalanceGains(for: tempAndTint)
-            let rawR = gains.redGain, rawG = gains.greenGain, rawB = gains.blueGain
-            gains = normalizedGains(gains, for: device)
-            let peak = max(gains.redGain, gains.greenGain, gains.blueGain)
-            if peak > maxGain {
-                let scale = maxGain / peak
-                gains.redGain   = max(1.0, gains.redGain   * scale)
-                gains.greenGain = max(1.0, gains.greenGain * scale)
-                gains.blueGain  = max(1.0, gains.blueGain  * scale)
-            }
-            device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-            lockedWhiteBalanceGains = gains
-            wbAdjustmentBaseGains = gains
-            device.unlockForConfiguration()
-            let clamped = (rawR != gains.redGain || rawG != gains.greenGain || rawB != gains.blueGain) ? " (clamped)" : ""
-            print("⚪️ [CustomCapture] colorTemp=\(Int(kelvin))K gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain))) maxGain=\(String(format: "%.1f", maxGain))\(clamped)")
-        } catch {
-            print("❌ [CustomCapture] 色温设置失败: \(error.localizedDescription)")
-        }
+        applyContinuousWhiteBalance()
     }
 
     func lockFrameRate(_ fps: Int) {
@@ -558,10 +500,8 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             }
             applyHDRStateLocked(device)
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
-                autoWhiteBalanceEnabled = true
-                lockedWhiteBalanceGains = nil
-                wbAdjustmentBaseGains = nil
+                enableContinuousWhiteBalanceLocked(device)
+                device.isSubjectAreaChangeMonitoringEnabled = true
                 print("⚪️ [CustomCapture] configureSession → 自动白平衡已开启, exposureMode=\(device.exposureMode.rawValue)")
             }
             device.unlockForConfiguration()
@@ -579,6 +519,13 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             }
 
             currentDevice = device
+            NotificationCenter.default.removeObserver(self, name: .AVCaptureDeviceSubjectAreaDidChange, object: nil)
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(subjectAreaDidChange(_:)),
+                name: .AVCaptureDeviceSubjectAreaDidChange,
+                object: device
+            )
             logFormat(device: device, format: format, fps: fps)
         } catch {
             print("❌ [CustomCapture] 配置失败: \(error.localizedDescription)")
@@ -632,6 +579,26 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         device.activeMaxExposureDuration = frameDuration
     }
 
+    private func refreshAutoWhiteBalanceAfterLightingChange(reason: String) {
+        guard autoWhiteBalanceEnabled, !autoWhiteBalanceRefreshInFlight else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastAutoWhiteBalanceRefreshAt >= autoWhiteBalanceRefreshInterval else { return }
+        lastAutoWhiteBalanceRefreshAt = now
+        autoWhiteBalanceRefreshInFlight = true
+        print("⚪️ [CustomCapture] \(reason)变化 → 重新触发自动白平衡")
+        applyWhiteBalanceOnceAndLock { _ in
+            self.sessionQueue.async { [weak self] in
+                self?.autoWhiteBalanceRefreshInFlight = false
+            }
+        }
+    }
+
+    @objc private func subjectAreaDidChange(_ notification: Notification) {
+        sessionQueue.async { [weak self] in
+            self?.refreshAutoWhiteBalanceAfterLightingChange(reason: "画面亮度/主体")
+        }
+    }
+
     private func applyHDRStateLocked(_ device: AVCaptureDevice) {
         let supported = device.activeFormat.isVideoHDRSupported
         let autoEnabled = supported && autoHDREnabled
@@ -643,6 +610,14 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             device.isVideoHDREnabled = manualEnabled
         }
         print("📷 [CustomCapture] videoHDR=\(device.isVideoHDREnabled) autoHDR=\(device.automaticallyAdjustsVideoHDREnabled) supported=\(supported)")
+    }
+
+    private func enableContinuousWhiteBalanceLocked(_ device: AVCaptureDevice) {
+        guard device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) else { return }
+        device.whiteBalanceMode = .continuousAutoWhiteBalance
+        autoWhiteBalanceEnabled = true
+        lockedWhiteBalanceGains = nil
+        wbAdjustmentBaseGains = nil
     }
 
     private func normalizedGains(_ gains: AVCaptureDevice.WhiteBalanceGains, for device: AVCaptureDevice) -> AVCaptureDevice.WhiteBalanceGains {

@@ -68,7 +68,7 @@ final class NV12LUTProcessor {
         pipelineY = py
         pipelineUV = puv
 
-        print("✅ [NV12LUT] 玉麒麟 LUT=\(name).png intensity=\(intensity) redLift=\(redLift) redSat=\(redSat)")
+        print("✅ [NV12LUT] 玉麒麟 LUT=\(name).png intensity=\(intensity) exposure=\(exposure) temperature=\(temperature) redLift=\(redLift) redSat=\(redSat) preContrast=\(preContrast) preGamma=\(preGamma)")
     }
 
     /// PC STOMP / 本地切换 LUT 图（无需重建 Processor）
@@ -100,6 +100,7 @@ final class NV12LUTProcessor {
         temperature = 0
         redLift = 0.12
         redSat = 0.16
+        print("[NV12LUT] applyNativeBrightness value=\(value) → intensity=\(intensity) exposure=\(exposure) temperature=\(temperature) redLift=\(redLift) redSat=\(redSat) preContrast=\(preContrast) preGamma=\(preGamma)")
     }
 
     func process(_ input: CVPixelBuffer) -> CVPixelBuffer? {
@@ -154,8 +155,18 @@ final class NV12LUTProcessor {
                  yIn: yInTex, uvIn: uvInTex, uvOut: uvOutTex,
                  params: &params, w: w / 2, h: h / 2)
 
+        // ⭐ B：有界等待 + 错误检查 —— 避免 GPU 卡顿/出错时裸 waitUntilCompleted() 永久阻塞采集队列
+        let sem = DispatchSemaphore(value: 0)
+        cmdBuf.addCompletedHandler { _ in sem.signal() }
         cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
+        if sem.wait(timeout: .now() + 0.1) == .timedOut {
+            print("⚠️ [NV12LUT] GPU 超时(>100ms)，丢弃该帧（避免卡死采集队列）")
+            return nil
+        }
+        if cmdBuf.status == .error {
+            print("⚠️ [NV12LUT] GPU 命令出错，丢弃该帧: \(String(describing: cmdBuf.error))")
+            return nil
+        }
         return output
     }
 

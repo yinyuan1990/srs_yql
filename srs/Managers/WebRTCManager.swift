@@ -85,17 +85,17 @@ final class VideoFilterPipeline: ObservableObject {
     /// 0 = 不动, 0.10 = 暗部下沉 10% (压死 H.264 limited-range 的 16/255≈6% 伪黑)
     /// 默认 0.10 是为了对抗 limited-range YUV 编码的"黑色 = 0.063 灰" 现象,
     /// 让 ♠♣ 黑牌真正黑下去, 不再灰蒙蒙. 对中调影响极小 (<0.5% 失真).
-    @Published var blackPoint: Float = VideoFilterPipeline.loadDefault(.blackPoint, fallback: 0.10) {
+    @Published var blackPoint: Float = VideoFilterPipeline.loadDefault(.blackPoint, fallback: 0.0) {
         didSet { saveDefault(.blackPoint, blackPoint); if oldValue != blackPoint { logChange("blackPoint", blackPoint) } }
     }
     /// 中调亮度: 保端点曲线 rgb + b·rgb·(1-rgb), -1..+1
     /// 0 = 不变, 0.05 = 中调微提, 0.30 = 中调显著提亮
     /// 黑场 (rgb=0) 和高光 (rgb=1) 都不受影响, 拖动不会把黑变灰
-    @Published var brightness: Float = VideoFilterPipeline.loadDefault(.brightness, fallback: 0.05) {
+    @Published var brightness: Float = VideoFilterPipeline.loadDefault(.brightness, fallback: 0.0) {
         didSet { saveDefault(.brightness, brightness); if oldValue != brightness { logChange("brightness", brightness) } }
     }
     /// 曝光: rgb × 2^EV, -3..+3 stops, 乘法增益. 默认 0.15 提亮中间调（对标看家宝双层亮度）
-    @Published var exposure: Float = VideoFilterPipeline.loadDefault(.exposure, fallback: 0.15) {
+    @Published var exposure: Float = VideoFilterPipeline.loadDefault(.exposure, fallback: 0.0) {
         didSet { saveDefault(.exposure, exposure); if oldValue != exposure { logChange("exposure", exposure) } }
     }
     /// 伽马: pow 曲线 rgb' = rgb^(1/gamma), 0.5..2.0, 保端点
@@ -103,15 +103,15 @@ final class VideoFilterPipeline: ObservableObject {
         didSet { saveDefault(.gamma, gamma); if oldValue != gamma { logChange("gamma", gamma) } }
     }
     /// 对比度: 绕 0.5 中点拉
-    @Published var contrast: Float = VideoFilterPipeline.loadDefault(.contrast, fallback: 1.20) {
+    @Published var contrast: Float = VideoFilterPipeline.loadDefault(.contrast, fallback: 1.0) {
         didSet { saveDefault(.contrast, contrast); if oldValue != contrast { logChange("contrast", contrast) } }
     }
     /// 饱和度: Rec.601 luma 混合
-    @Published var saturation: Float = VideoFilterPipeline.loadDefault(.saturation, fallback: 1.30) {
+    @Published var saturation: Float = VideoFilterPipeline.loadDefault(.saturation, fallback: 1.0) {
         didSet { saveDefault(.saturation, saturation); if oldValue != saturation { logChange("saturation", saturation) } }
     }
     /// ⭐ 红色发光强度: 仅作用于"R 高且 G/B 低"的纯红像素 (♥♦)
-    @Published var redGlow: Float = VideoFilterPipeline.loadDefault(.redGlow, fallback: 0.25) {
+    @Published var redGlow: Float = VideoFilterPipeline.loadDefault(.redGlow, fallback: 0.0) {
         didSet { saveDefault(.redGlow, redGlow); if oldValue != redGlow { logChange("redGlow", redGlow) } }
     }
     /// 玉麒麟 pixel_level: -2...8，采集后像素亮度等级（不是相机 ISO/EV）
@@ -126,11 +126,11 @@ final class VideoFilterPipeline: ObservableObject {
 
     // ===== 编码前降噪 + 锐化（对标看家宝 TAA+hqdn3d+sharpen 链路）=====
     /// 降噪强度: 0=关闭, 0.02=轻度(推荐), 0.05=强力. 消除传感器噪点，节省码率
-    @Published var noiseLevel: Float = VideoFilterPipeline.loadDefault(.noiseLevel, fallback: 0.05) {
+    @Published var noiseLevel: Float = VideoFilterPipeline.loadDefault(.noiseLevel, fallback: 0.0) {
         didSet { saveDefault(.noiseLevel, noiseLevel); if oldValue != noiseLevel { logChange("noiseLevel", noiseLevel) } }
     }
     /// 锐化强度: 0=关闭, 0.4=轻度(推荐), 1.0=强力. 2米远牌面必须锐化
-    @Published var sharpenAmount: Float = VideoFilterPipeline.loadDefault(.sharpenAmount, fallback: 0.2) {
+    @Published var sharpenAmount: Float = VideoFilterPipeline.loadDefault(.sharpenAmount, fallback: 0.0) {
         didSet { saveDefault(.sharpenAmount, sharpenAmount); if oldValue != sharpenAmount { logChange("sharpenAmount", sharpenAmount) } }
     }
 
@@ -188,7 +188,7 @@ final class VideoFilterPipeline: ObservableObject {
         if let v = exposure   { self.exposure   = v }
         if let v = pixelLevel { self.pixelLevel = max(-2.0, min(8.0, v)) }
         if let v = enabled    { self.enabled    = v }
-        print("📷 [Filter] 批量应用 (\(source)): exp=\(self.exposure) pixel=\(self.pixelLevel) bp=\(self.blackPoint) bright=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) sat=\(self.saturation) redGlow=\(self.redGlow) hi=\(self.highlightLift) enabled=\(self.enabled)")
+        print("📷 [Filter] 批量应用 (\(source)): enabled=\(self.enabled) passThrough=\(self.isPassThrough) | exposure=\(self.exposure) pixelLevel=\(self.pixelLevel) blackPoint=\(self.blackPoint) brightness=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) saturation=\(self.saturation) redGlow=\(self.redGlow) highlightLift=\(self.highlightLift) noiseLevel=\(self.noiseLevel) sharpenAmount=\(self.sharpenAmount) sharpness=\(self.sharpness)")
     }
 
     // ===== Metal CIColorKernel: 一次 dispatch 完成所有色彩运算 =====
@@ -354,36 +354,81 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     weak var inner: RTCVideoCapturerDelegate?           // 🔥 推送输出（受后端fps控制）
     weak var previewDelegate: RTCVideoCapturerDelegate? // 🔥 预览输出（固定60fps）
     var videoFilter: VideoFilterPipeline?               // ⭐ 参数管理（UserDefaults / 服务端推送）
-    var nv12Processor: NV12MetalProcessor?              // ⭐ GPU-native NV12 处理器（与玉麒麟链路一致）
-    var nv12LutProcessor: NV12LUTProcessor?            // ⭐ LUT 阶段（玉麒麟 Lookup）
-    var lutModeEnabled: Bool = true                     // ⭐ LUT 开关（默认开）
+    // ⭐ A：处理器跨线程安全 —— process() 在采集队列，替换/改 LUT 在主线程，统一用 processorLock 互斥
+    private let processorLock = NSLock()
+    private var _nv12Processor: NV12MetalProcessor?     // ⭐ GPU-native NV12 处理器（与玉麒麟链路一致）
+    private var _nv12LutProcessor: NV12LUTProcessor?    // ⭐ LUT 阶段（玉麒麟 Lookup）
+
+    /// 线程安全替换 Metal 处理器（主线程调用，采集线程若正在 process 会等其结束）
+    func setNV12Processor(_ p: NV12MetalProcessor?) {
+        processorLock.lock(); _nv12Processor = p; processorLock.unlock()
+    }
+    /// 线程安全替换 LUT 处理器
+    func setLutProcessor(_ p: NV12LUTProcessor?) {
+        processorLock.lock(); _nv12LutProcessor = p; processorLock.unlock()
+    }
+    /// 线程安全：LUT 处理器是否已存在
+    var lutProcessorExists: Bool {
+        processorLock.lock(); defer { processorLock.unlock() }; return _nv12LutProcessor != nil
+    }
+    /// 线程安全：当前 LUT 名
+    var currentLutNameSafe: String? {
+        processorLock.lock(); defer { processorLock.unlock() }; return _nv12LutProcessor?.currentLutName
+    }
+    /// 线程安全切换 LUT 名（原地换纹理）；处理器不存在或切换失败返回 false
+    func switchLutName(_ name: String) -> Bool {
+        processorLock.lock(); defer { processorLock.unlock() }
+        guard let lut = _nv12LutProcessor else { return false }
+        return lut.setLutName(name)
+    }
+
+    var lutModeEnabled: Bool = false                    // ⭐ LUT 开关（默认关，等登录 iosPipeline 下发）
     var filterModeEnabled: Bool = false                 // ⭐ Metal 滤镜栈（默认关，对标玉麒麟）
+    private var pipelineFrameLogCounter: Int = 0
 
     /// 相机 NV12 → [Metal 滤镜(开关)] → [LUT(开关，高光在此)] → 编码
     private func applyFilter(_ frame: RTCVideoFrame) -> RTCVideoFrame {
         guard let cvBuffer = (frame.buffer as? RTCCVPixelBuffer)?.pixelBuffer else { return frame }
 
+        // ⭐ A：整段处理与处理器替换互斥 —— 持锁期间主线程的 setNV12Processor/setLutProcessor/switchLutName 会等待，
+        //        保证 process() 永远看不到换了一半的处理器或被原地替换的 LUT 纹理。
+        processorLock.lock()
+        defer { processorLock.unlock() }
+
         var currentBuffer = cvBuffer
         var didProcess = false
+        var ranMetalFilter = false
+        var ranLut = false
 
         if filterModeEnabled, let filter = videoFilter, filter.enabled, !filter.isPassThrough {
-            if let proc = nv12Processor {
+            if let proc = _nv12Processor {
                 proc.sync(from: filter)
                 if let processed = proc.process(currentBuffer) {
                     currentBuffer = processed
                     didProcess = true
+                    ranMetalFilter = true
                 }
             } else if let processed = filter.processFrame(currentBuffer) {
                 currentBuffer = processed
                 didProcess = true
+                ranMetalFilter = true
             }
         }
 
-        if lutModeEnabled, let lut = nv12LutProcessor {
+        if lutModeEnabled, let lut = _nv12LutProcessor {
             if let processed = lut.process(currentBuffer) {
                 currentBuffer = processed
                 didProcess = true
+                ranLut = true
             }
+        }
+
+        pipelineFrameLogCounter &+= 1
+        if didProcess && (pipelineFrameLogCounter <= 5 || pipelineFrameLogCounter % 300 == 0) {
+            let pass = videoFilter.map { "enabled=\($0.enabled) passThrough=\($0.isPassThrough) exposure=\($0.exposure) pixelLevel=\($0.pixelLevel) blackPoint=\($0.blackPoint) brightness=\($0.brightness) gamma=\($0.gamma) contrast=\($0.contrast) saturation=\($0.saturation) redGlow=\($0.redGlow) highlightLift=\($0.highlightLift) noiseLevel=\($0.noiseLevel) sharpenAmount=\($0.sharpenAmount)" } ?? "noFilter"
+            let nv12 = _nv12Processor.map { "nv12(exp=\($0.exposure), pixel=\($0.pixelLevel), bp=\($0.blackPoint), bright=\($0.brightness), gamma=\($0.gamma), contrast=\($0.contrast), sat=\($0.saturation), redGlow=\($0.redGlow), sharpen=\($0.sharpen), enabled=\($0.enabled))" } ?? "nv12=nil"
+            let lut = _nv12LutProcessor.map { "lut(name=\($0.currentLutName), intensity=\($0.intensity), exposure=\($0.exposure), temperature=\($0.temperature), redLift=\($0.redLift), redSat=\($0.redSat), preContrast=\($0.preContrast), preGamma=\($0.preGamma))" } ?? "lut=nil"
+            print("[FrameThrottler] 帧#\(pipelineFrameLogCounter) 处理 metal=\(ranMetalFilter) lut=\(ranLut) | filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled) | \(pass) | \(nv12) | \(lut)")
         }
 
         guard didProcess else { return frame }
@@ -615,14 +660,36 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
             captureFpsDetectStartTime = nowSec
         }
         
-        // ========== 🔥 预览输出：累加器算法 ==========
-        if shouldSendPreviewFrame() {
-            sendPreviewFrame(capturer, videoFrame: videoFrame)
-        }
-        
-        // ========== 🔥 推送输出：累加器算法 + 等差时间戳 ==========
-        if shouldSendPushFrame() {
-            sendFrameWithArithmeticTimestamp(capturer, videoFrame: videoFrame)
+        // ⭐ C：每帧只跑一次 applyFilter（GPU 处理），预览与推送复用同一处理结果，GPU 负载减半
+        let needPreview = shouldSendPreviewFrame()
+        let needPush = shouldSendPushFrame()
+        if needPreview || needPush {
+            let filtered = applyFilter(videoFrame)
+
+            // ========== 🔥 预览输出：累加器算法 ==========
+            if needPreview {
+                previewSentCounter += 1
+                let previewFrame = RTCVideoFrame(
+                    buffer: filtered.buffer,
+                    rotation: ._0,
+                    timeStampNs: videoFrame.timeStampNs
+                )
+                previewDelegate?.capturer(capturer, didCapture: previewFrame)
+            }
+
+            // ========== 🔥 推送输出：累加器算法 + 90k RTP 等差时间戳 ==========
+            if needPush {
+                sentCounter += 1
+                diagPushCount += 1
+                let timestampNs = rtp90kTimestamp * 1_000_000_000 / rtpClockRate
+                rtp90kTimestamp += rtp90kStep
+                let pushFrame = RTCVideoFrame(
+                    buffer: filtered.buffer,
+                    rotation: ._0,
+                    timeStampNs: timestampNs
+                )
+                inner?.capturer(capturer, didCapture: pushFrame)
+            }
         }
         
         // 每秒上报一次采集/推送FPS（异步，不阻塞采集线程）
@@ -660,52 +727,9 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
         }
     }
     
-    // 🔥 发送到预览（与推流同走 滤镜→LUT，所见即所得）
-    private func sendPreviewFrame(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
-        previewSentCounter += 1
+    // ⭐ C：预览/推送的发送逻辑已内联进 capturer(_:didCapture:)，每帧只跑一次 applyFilter，
+    //        旧的 sendPreviewFrame / sendFrameWithArithmeticTimestamp / sendFrame 已移除以防重复处理。
 
-        let filtered = applyFilter(videoFrame)
-        let fixedFrame = RTCVideoFrame(
-            buffer: filtered.buffer,
-            rotation: ._0,
-            timeStampNs: videoFrame.timeStampNs
-        )
-        previewDelegate?.capturer(capturer, didCapture: fixedFrame)
-    }
-    
-    // 🔥 发送到推送（使用 90k RTP 时钟，无累积误差）
-    private func sendFrameWithArithmeticTimestamp(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
-        sentCounter += 1
-        diagPushCount += 1  // 🔥 诊断：实际喂给 WebRTC 的帧数
-
-        // 🔥 方案B：90k RTP 时钟 → 纳秒
-        let timestampNs = rtp90kTimestamp * 1_000_000_000 / rtpClockRate
-        rtp90kTimestamp += rtp90kStep
-
-        // ⭐ 滤镜→LUT 后处理
-        let filtered = applyFilter(videoFrame)
-        let fixedFrame = RTCVideoFrame(
-            buffer: filtered.buffer,
-            rotation: ._0,
-            timeStampNs: timestampNs
-        )
-        inner?.capturer(capturer, didCapture: fixedFrame)
-    }
-
-    // 🔥 发送到推送（保留原始时间戳，备用）
-    private func sendFrame(_ capturer: RTCVideoCapturer, videoFrame: RTCVideoFrame) {
-        sentCounter += 1
-
-        // ⭐ 滤镜后处理
-        let filtered = applyFilter(videoFrame)
-        let fixedFrame = RTCVideoFrame(
-            buffer: filtered.buffer,
-            rotation: ._0,
-            timeStampNs: videoFrame.timeStampNs
-        )
-        inner?.capturer(capturer, didCapture: fixedFrame)
-    }
-    
     /// 重置节流器状态
     func reset() {
         // 重置累加器
@@ -820,6 +844,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     @Published var wbAmber: Float = 0
     /// PC 下发采集颜色时递增，驱动 iOS 面板滑块同步（iOS 本地调节不回传 PC）
     @Published private(set) var captureColorRemoteTick: UInt = 0
+    @Published var whiteBalanceIsAuto: Bool = false
+    @Published var whiteBalanceStatusText: String = "--"
+    private var whiteBalanceStatusTimer: Timer?
     // 额外暴露采集/推送FPS，便于UI区分显示
    var currentCaptureFps: Int = 0   // 🔥 去掉@Published，纯统计不触发UI刷新
    var currentSendFps: Int = 0      // 🔥 去掉@Published，纯统计不触发UI刷新
@@ -886,7 +913,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
         let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 3500, maxPushFps: 60, scaleDown: 1.0)
         let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 2500, maxPushFps: 60, scaleDown: 1.0)
-        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 4000, minKbps: 4000, maxPushFps: 60, scaleDown: 1.0)  // 低清：min/max 均由 2000→4000
+        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2500, minKbps: 2500, maxPushFps: 60, scaleDown: 1.0)  // 低清：4000→2500
 
         let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
         
@@ -903,7 +930,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("   超高帧(ultra) = 1280x720  @240fps → 3500kbps (16:9单独采集)")
             print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
             print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 4000-4000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 2500-2500kbps (采集1920x1440缩放)")
         } else {
             currentLadder = [
                 .p4k:      p4kPreset,
@@ -917,7 +944,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("   超高帧(ultra) = 1280x720  @120fps → 3500kbps (16:9单独采集)")
             print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
             print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 4000-4000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 2500-2500kbps (采集1920x1440缩放)")
         }
     }
     
@@ -1049,11 +1076,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     ///   - rttMs: 往返延迟（毫秒）
     ///   - bitrateRatio: 码率达成率（v2.1不再使用，仅日志记录）
     private func processAdaptiveFps(instantLossRate: Double, packetsLostPerSec: Int, rttMs: Int, bitrateRatio: Double) {
-        // 抗频闪模式下不触发自适应升降帧
-        if antiFlickerEnabled { return }
-
         let now = Date()
-        
+
         // 🔥 v2.1: 每秒只执行一次核心逻辑（statsTimer是200ms，但自适应以1秒为单位）
         let timeSinceLastProcess = now.timeIntervalSince(lastAdaptiveProcessTime)
         if timeSinceLastProcess < 0.9 {
@@ -1061,6 +1085,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             return
         }
         lastAdaptiveProcessTime = now
+
+        // 抗频闪模式下不触发自适应升降帧
+        if antiFlickerEnabled {
+            print("shengzhen 📊 [自适应] ⏸️ 抗频闪开启，自适应升降帧已停摆 档位=\(currentProfile) adaptiveFps=\(adaptiveFps)")
+            return
+        }
         
         // 🔥 后端消息设置FPS后1秒内，自适应逻辑不介入（避免冲突）
         let timeSinceRemoteFps = now.timeIntervalSince(lastRemoteFpsTime)
@@ -1099,7 +1129,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         let isNetworkGood = isRttGood && isLossGood
         
         let status = isNetworkBad ? "🔴差" : (isNetworkGood ? "🟢好" : "🟡中")
-        //print("📊 [自适应] fps=\(adaptiveFps)/\(maxFps) RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%(3s均) \(status) ↓\(highLossCounter)/\(downgradeHoldSec) ↑\(lowLossCounter)/\(upgradeHoldSec)")
+        print("shengzhen 📊 [自适应] 档位=\(currentProfile) fps=\(adaptiveFps)/\(maxFps)(上限=targetOutputFPS) RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%(3s均) \(status) ↓\(highLossCounter)/\(downgradeHoldSec) ↑\(lowLossCounter)/\(upgradeHoldSec)")
         
         var fpsChanged = false
         let oldFps = adaptiveFps
@@ -1219,7 +1249,14 @@ final class WebRTCManager: NSObject, ObservableObject {
         guard let userInfo = notification.userInfo else { return }
         let enabled = userInfo["enabled"] as? Bool ?? false
         lutModeEnabled = enabled
+        pipelineDefaultsApplied = true
         applyLutMode(enabled)
+    }
+
+    private var pipelineDefaultsApplied = false
+
+    private var shouldUsePipelineDefaults: Bool {
+        !pipelineDefaultsApplied
     }
 
     /// LUT 开关（与滤镜独立，可滤镜→LUT 串联）
@@ -1228,35 +1265,47 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.lutModeEnabled = enabled
         if enabled {
             ensureLutProcessor()
-            let lut = frameThrottler?.nv12LutProcessor?.currentLutName ?? pendingLutName ?? NV12LUTProcessor.defaultLutName
+            let lut = frameThrottler?.currentLutNameSafe ?? pendingLutName ?? NV12LUTProcessor.defaultLutName
+            print("[LUT] 开启 — \(lut)")
             print("✅ [LUT] 开启 — \(lut)")
         } else {
+            print("[LUT] 关闭")
             print("✅ [LUT] 关闭")
         }
     }
 
     /// Metal 滤镜栈开关（与 LUT 独立）
     private func applyFilterMode(_ enabled: Bool) {
+        let before = "filterMode=\(filterModeEnabled) videoFilter.enabled=\(videoFilter.enabled)"
         filterModeEnabled = enabled
         videoFilter.enabled = enabled
         frameThrottler?.filterModeEnabled = enabled
+        print("[滤镜] \(enabled ? "开启" : "关闭") | \(before) → filterMode=\(filterModeEnabled) enabled=\(videoFilter.enabled)")
         print("✅ [滤镜] \(enabled ? "开启" : "关闭")")
+    }
+
+    /// 登录后 / 预览初始化前：只同步三链路开关，不运用默认值（默认值等相机就绪后 applyPipelineDefaults）
+    func syncPipelineSwitchesFromConfig(source: String) {
+        let cfg = IOSPipelineConfig.shared
+        print("[syncPipelineSwitches] source=\(source) iosPipeline filter=\(cfg.switchFilter) lut=\(cfg.switchLut) hw=\(cfg.switchHardware) | 当前 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled)")
+        applyFilterMode(cfg.switchFilter)
+        applyLutMode(cfg.switchLut)
     }
 
     /// STOMP ptype=lutName：切换 5 张玉麒麟 LUT 之一
     func applyLutName(_ name: String) {
         let normalized = NV12LUTProcessor.normalizedLutName(name)
         pendingLutName = normalized
-        if frameThrottler?.nv12LutProcessor?.setLutName(normalized) != true {
-            frameThrottler?.nv12LutProcessor = NV12LUTProcessor(lutName: normalized)
+        if frameThrottler?.switchLutName(normalized) != true {
+            frameThrottler?.setLutProcessor(NV12LUTProcessor(lutName: normalized))
         }
         print("🎨 [LUT] STOMP 切换 → \(normalized)")
     }
 
     private func ensureLutProcessor() {
-        if frameThrottler?.nv12LutProcessor == nil {
+        if frameThrottler?.lutProcessorExists == false {
             let name = pendingLutName ?? NV12LUTProcessor.defaultLutName
-            frameThrottler?.nv12LutProcessor = NV12LUTProcessor(lutName: name)
+            frameThrottler?.setLutProcessor(NV12LUTProcessor(lutName: name))
         }
     }
 
@@ -1270,8 +1319,21 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 读取 IOSPipelineConfig.shared，按三个开关把登录下发的默认值运用到 滤镜/硬件/LUT 链路。
     /// 仅在「第一次（相机就绪）」和「切换档位（ptype="type"）」时调用。
     /// 运行期 PC 的 STOMP 推送（其它 ptype）会在此之后覆盖这些值 —— 两者不冲突。
-    func applyPipelineDefaults() {
+    func applyPipelineDefaults(source: String = "manual") {
         let cfg = IOSPipelineConfig.shared
+        print("[applyPipelineDefaults] source=\(source) 开始 iosPipeline filter=\(cfg.switchFilter) lut=\(cfg.switchLut) hw=\(cfg.switchHardware) shouldUseDefaults=\(shouldUsePipelineDefaults) | 当前 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled)")
+
+        if !shouldUsePipelineDefaults {
+            applyFilterMode(filterModeEnabled)
+            applyLutMode(lutModeEnabled)
+            if cfg.switchHardware {
+                capturer?.applyContinuousWhiteBalance()
+            }
+            print("[applyPipelineDefaults] source=\(source) 保持运行期链路状态 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled) passThrough=\(videoFilter.isPassThrough)")
+            return
+        }
+
+        pipelineDefaultsApplied = true
 
         // ① 滤镜链路：开关打开才运用，否则直通
         if cfg.switchFilter {
@@ -1284,8 +1346,10 @@ final class WebRTCManager: NSObject, ObservableObject {
                 blackPoint: cfg.blackPoint, highlightLift: cfg.highlightLift,
                 gamma: cfg.gamma, exposure: evStops,
                 enabled: true, source: "pipelineDefaults")
+            print("[applyPipelineDefaults] 滤镜已运用 brightness=\(cfg.brightness) exposureLinear=\(cfg.exposureLinear) ev=\(evStops)")
         } else {
             applyFilterMode(false)
+            print("[applyPipelineDefaults] 滤镜开关=关 → 直通")
         }
 
         // ② 硬件链路：开关打开才运用。增益(0-100)映射到设备实际 ISO min..max；白平衡始终自动（不下发具体值）
@@ -1301,7 +1365,9 @@ final class WebRTCManager: NSObject, ObservableObject {
             applyLutName(cfg.lutName)
         } else {
             applyLutMode(false)
+            print("[applyPipelineDefaults] LUT开关=关 → 直通")
         }
+        print("[applyPipelineDefaults] 完成 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled) passThrough=\(videoFilter.isPassThrough)")
         print("✅ [applyPipelineDefaults] filter=\(cfg.switchFilter) hardware=\(cfg.switchHardware) lut=\(cfg.switchLut)")
     }
 
@@ -1510,7 +1576,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 throttler.captureFps = currentCaptureFPS             // 🔥 设置采集FPS
                 throttler.targetSendFps = targetOutputFPS            // 🔥 设置推送FPS
                 throttler.videoFilter = self.videoFilter             // ⭐ 参数管理
-                throttler.nv12Processor = NV12MetalProcessor()       // ⭐ GPU-native NV12
+                throttler.setNV12Processor(NV12MetalProcessor())     // ⭐ GPU-native NV12
                 frameThrottler = throttler
                 applyPipelineModes()
                 print("🔄 [enableAverageThrottling] 创建新节流器，采集=\(currentCaptureFPS)fps，推送=\(targetOutputFPS)fps，预览=60fps")
@@ -1657,7 +1723,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 enableAverageThrottling(true)
             }
             // 🎨 切换档位会重建采集/管线，需按开关重新运用三链路默认值（之后 STOMP 推送仍可覆盖）
-            applyPipelineDefaults()
+            applyPipelineDefaults(source: "stomp:type")
 
         case "direction":
             // 方向："-1"后置；"1"前置（若不一致则切换一次）
@@ -1726,14 +1792,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
 
         case "lutName":
-            if let name = cfg.lutName, !name.isEmpty {
-                applyLutName(name)
-            } else {
-                print("⚠️ ptype=lutName 缺少值，忽略")
-            }
+            applyLutName("lookup")
 
         case "filterEnabled":
             if let enabled = cfg.filterEnabled {
+                print("[STOMP filterEnabled] PC 下发 enabled=\(enabled)")
+                pipelineDefaultsApplied = true
                 applyFilterMode(enabled)
             }
 
@@ -1772,6 +1836,9 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         case "pixelLevel", "pixel_level", "last_pixel_level":
             let level = cfg.exposure ?? cfg.brightness
+            if cfg.filterEnabled != nil {
+                pipelineDefaultsApplied = true
+            }
             videoFilter.applyAll(
                 brightness: nil,
                 contrast: nil,
@@ -1785,6 +1852,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ v3 滤镜直推 — STOMP 一跳到位, PC sendConfigUpdate("brightness", {"brightness": v}) 直接到这里
         case "brightness", "contrast", "saturation", "sharpness", "redBoost",
              "blackPoint", "redGlow", "highlightLift", "gamma", "exposure":
+            if cfg.filterEnabled != nil {
+                pipelineDefaultsApplied = true
+            }
             videoFilter.applyAll(
                 brightness:    cfg.brightness,
                 contrast:      cfg.contrast,
@@ -2095,13 +2165,15 @@ final class WebRTCManager: NSObject, ObservableObject {
                         throttler.captureFps = self.currentCaptureFPS   // 🔥 设置采集FPS（整除跳帧）
                         throttler.targetSendFps = self.targetOutputFPS  // 🔥 设置推送FPS
                         throttler.videoFilter = self.videoFilter        // ⭐ 参数管理
-                        throttler.nv12Processor = NV12MetalProcessor()  // ⭐ GPU-native NV12（玉麒麟同链路）
+                        throttler.setNV12Processor(NV12MetalProcessor())  // ⭐ GPU-native NV12（玉麒麟同链路）
                         throttler.fpsReportHandler = { [weak self] cap, snd in
                                 self?.currentCaptureFps = cap
                                 self?.currentSendFps = snd
                         }
 
                         self.frameThrottler = throttler
+                        // 🎨 预览初始化前先同步登录下发的三链路开关（避免 LUT/滤镜默认开跑一段）
+                        self.syncPipelineSwitchesFromConfig(source: "startPreviewIfNeeded")
                         self.applyPipelineModes()
                         self.capturer = CustomAVCaptureVideoCapturer(delegate: throttler)
                         // print("🔄 [初始化] 创建帧节流器")
@@ -2470,7 +2542,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self.reapplyFocusFromConfig()
             }
             // 🎨 首次相机就绪后，按开关运用登录下发的三链路默认值（推流+预览同一处理点）
-            self.applyPipelineDefaults()
+            self.applyPipelineDefaults(source: "startCaptureWithDevice")
             NotificationCenter.default.post(name: .cameraPreviewReady, object: nil)
         }
     }
@@ -2645,7 +2717,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 抗频闪模式（PC端控制，开启后锁定FPS，自适应不触发）
     var antiFlickerEnabled: Bool = false
     var antiFlickerFps: Int = 20  // 实际帧率（80/4=20, 100/4=25, 200/4=50）
-    var lutModeEnabled: Bool = true       // LUT 开关（默认开，对标玉麒麟）
+    var lutModeEnabled: Bool = false       // LUT 开关（默认关，等登录 iosPipeline 下发）
     var filterModeEnabled: Bool = false   // Metal 滤镜栈（默认关，PC 可开）
     var hardwareBrightnessSliderValue: Int = 20  // 后台 test_brightness value 0...100，20=0EV
     var hardwareWBSliderValue: Int = 50          // 后台 white_balance value 0...100，50=5000K
@@ -3034,7 +3106,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.reapplyConfigExceptFocus()
         }
-        
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + (needRecapture ? 0.7 : 0.05)) { [weak self] in
+            self?.applyPipelineDefaults(source: "profileSwitch-final")
+        }
+
         // 8️⃣ 🔥 切换后发送关键帧（解决绿幕问题）
         // 100ms 后发第一次关键帧
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -3238,7 +3314,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             throttler.captureFps = currentCaptureFPS         // 🔥 设置采集FPS（整除跳帧）
             throttler.targetSendFps = self.targetOutputFPS   // 🔥 设置推送FPS
             throttler.videoFilter = self.videoFilter         // ⭐ 参数管理
-            throttler.nv12Processor = NV12MetalProcessor()   // ⭐ GPU-native NV12
+            throttler.setNV12Processor(NV12MetalProcessor())   // ⭐ GPU-native NV12
             throttler.fpsReportHandler = { [weak self] cap, snd in
                     self?.currentCaptureFps = cap
                     self?.currentSendFps = snd
@@ -4305,7 +4381,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                    t.inner = self.videoSource
                    t.previewDelegate = self.previewVideoSource  // 🔥 预览输出（固定60fps）
                    t.videoFilter = self.videoFilter
-                   t.nv12Processor = NV12MetalProcessor()
+                   t.setNV12Processor(NV12MetalProcessor())
                    t.targetSendFps = self.targetOutputFPS       // 🔥 只影响推送
                    self.frameThrottler = t
                    self.applyPipelineModes()
@@ -4395,6 +4471,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             guard let self = self else { return }
             self.configureCameraAutoModes(device)
             self.applyMountTransform()
+            self.applyPipelineDefaults(source: "recapture-stabilized")
         }
 
         // 8️⃣ 用 adaptOutputFormat 通知 WebRTC 新分辨率 → 可靠触发 IDR 帧
@@ -4415,6 +4492,38 @@ final class WebRTCManager: NSObject, ObservableObject {
     func applyCaptureExperimentFormat() {
         applyOutputPixelFormatForCurrentRange()
         recaptureWithResolution(width: currentCaptureWidth, height: currentCaptureHeight, fps: max(30, currentCaptureFPS))
+    }
+
+    /// 读取相机白平衡状态（UI 1Hz 轮询）
+    func refreshWhiteBalanceStatus() {
+        capturer?.queryWhiteBalanceStatus { [weak self] status in
+            guard let self else { return }
+            self.whiteBalanceIsAuto = status.isAuto
+            self.whiteBalanceStatusText = status.displayText
+            let slider = Self.sliderFromTemperature(status.kelvin)
+            if self.hardwareWBSliderValue != slider {
+                self.hardwareWBSliderValue = slider
+                WebSocketManager.shared.sendWhiteBalanceResult(sliderValue: slider)
+            }
+        }
+    }
+
+    func startWhiteBalanceStatusPolling() {
+        stopWhiteBalanceStatusPolling()
+        refreshWhiteBalanceStatus()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.whiteBalanceStatusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.refreshWhiteBalanceStatus()
+            }
+        }
+    }
+
+    func stopWhiteBalanceStatusPolling() {
+        DispatchQueue.main.async { [weak self] in
+            self?.whiteBalanceStatusTimer?.invalidate()
+            self?.whiteBalanceStatusTimer = nil
+        }
     }
 
     func applyCaptureColorAdjustment() {

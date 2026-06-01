@@ -113,6 +113,12 @@ struct ProfileView: View {
    // 🔥 激活会员相关
    @State private var showingActivation = false
    @State private var startWithScanner = false  // 是否直接进入扫码模式
+
+    private var appVersionText: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
     
     var body: some View {
         NavigationView {
@@ -610,7 +616,7 @@ struct ProfileView: View {
     
     private var settingsSection2: some View {
         VStack(spacing: 0) {
-            ProfileRowView(icon: "info.circle", title: "版本号", subtitle: "1.0.0", showArrow: true) {
+            ProfileRowView(icon: "info.circle", title: "版本号", subtitle: appVersionText, showArrow: true) {
                 handleVersionInfoAction()
             }
             Divider().padding(.leading, 60)

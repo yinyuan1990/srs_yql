@@ -997,7 +997,8 @@ extension WebSocketManager: SwiftStompDelegate {
                 NotificationCenter.default.post(name: .thinConfigUpdated, object: nil, userInfo: ["cfg": config])
                 print("相机方向配置 ✅ 配置更新成功（主线程）: deviceId=\(deviceId), ptype=\(config.ptype)")
             } else {
-                DispatchQueue.main.sync {
+                // ⭐ D：改 async —— 网络回调线程不再同步等主线程，避免卡住 WebSocket 接收循环 / 潜在死锁
+                DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .thinConfigUpdated, object: nil, userInfo: ["cfg": config])
                     print("相机方向配置 ✅ 配置更新成功（切换到主线程）: deviceId=\(deviceId), ptype=\(config.ptype)")
                 }
