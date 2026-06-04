@@ -820,6 +820,12 @@ struct LadderPreset {
 
 final class WebRTCManager: NSObject, ObservableObject {
     
+    /// 码率限制 / 自适应 FPS 调试日志统一前缀（控制台过滤: malvshezhing）
+    private static let malvshezhingLogPrefix = "malvshezhing"
+    private func malvshezhingLog(_ message: String) {
+        print("\(Self.malvshezhingLogPrefix) \(message)")
+    }
+    
     // MARK: - 快门速度上限（静态变量，程序启动时计算）
     /// 综合 16:9 和 4:3 格式的最快快门，取最小值，再和 900 比较取最小
     static var maxShutterSpeed: Int = 240  // 默认值，初始化时会重新计算
@@ -905,46 +911,48 @@ final class WebRTCManager: NSObject, ObservableObject {
         //              iPhone 13/14 采集1920x1440 (4:3) → 原始输出1920x1440，scaleDown=1.0
         let p4kPreset: LadderPreset
         if needP4kSeparateCapture {
-            p4kPreset = LadderPreset(width: 1920, height: 1080, fps: 60, maxKbps: 5500, maxPushFps: 60, scaleDown: 1.0)
+            p4kPreset = LadderPreset(width: 1920, height: 1080, fps: 60, maxKbps: 7500, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
         } else {
-            p4kPreset = LadderPreset(width: 1920, height: 1440, fps: 60, maxKbps: 5500, maxPushFps: 60, scaleDown: 1.0)
+            p4kPreset = LadderPreset(width: 1920, height: 1440, fps: 60, maxKbps: 7500, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
         }
 
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
-        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 3500, maxPushFps: 60, scaleDown: 1.0)
-        let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 2500, maxPushFps: 60, scaleDown: 1.0)
-        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2500, minKbps: 2500, maxPushFps: 60, scaleDown: 1.0)  // 低清：4000→2500
+        // ⭐ 除 640x480(low) 外，其他档位最大码率再 +1000kbps
+        // ⭐ minKbps 约为 max 的 60%，码率可向下波动
+        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0)
+        let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 4500, minKbps: 2700, maxPushFps: 60, scaleDown: 1.0)
+        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2500, minKbps: 1500, maxPushFps: 60, scaleDown: 1.0)  // 低清：max不变，1500~2500
 
         let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
         
         if device.position == .back {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 240, maxKbps: 3500, maxPushFps: 60, scaleDown: 1.0),
+                .ultra:    LadderPreset(width: 1280, height: 720, fps: 240, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 后置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 5500kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @240fps → 3500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 2500-2500kbps (采集1920x1440缩放)")
+            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
+            print("   超高帧(ultra) = 1280x720  @240fps → 3300-5500kbps (16:9单独采集)")
+            print("   超清(high)    = 1440x1080 @60fps  → 3300-5500kbps (采集1920x1440缩放)")
+            print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
         } else {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 120, maxKbps: 3500, maxPushFps: 60, scaleDown: 1.0),
+                .ultra:    LadderPreset(width: 1280, height: 720, fps: 120, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 前置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 5500kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @120fps → 3500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 3500kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 800x600   @60fps  → 2500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 2500-2500kbps (采集1920x1440缩放)")
+            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
+            print("   超高帧(ultra) = 1280x720  @120fps → 3300-5500kbps (16:9单独采集)")
+            print("   超清(high)    = 1440x1080 @60fps  → 3300-5500kbps (采集1920x1440缩放)")
+            print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
         }
     }
     
@@ -970,9 +978,18 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     private func applyEffectiveBitrateToWebRTC() {
-        let minK = effectiveMinKbpsForCurrentProfile()
-        let maxK = max(minK, effectiveMaxKbpsForCurrentProfile())
+        let baseMin = effectiveMinKbpsForCurrentProfile()
+        let baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
+        // 🚨 叠加弱网紧急降码率系数
+        let minK = max(100, Int(Double(baseMin) * emergencyBitrateScale))
+        let maxK = max(minK, Int(Double(baseMax) * emergencyBitrateScale))
         setBitrateRangeKbps(min: minK, max: maxK)
+        let pct = lastQualityPercent ?? 100
+        if emergencyBitrateScale < 0.999 {
+            malvshezhingLog("[码率] 应用 档位=\(currentProfile) 清晰度=\(pct)% 紧急系数=\(String(format: "%.2f", emergencyBitrateScale)) → \(minK)-\(maxK) kbps (基准\(baseMin)-\(baseMax))")
+        } else {
+            malvshezhingLog("[码率] 应用 档位=\(currentProfile) 清晰度=\(pct)% → \(minK)-\(maxK) kbps")
+        }
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -1088,7 +1105,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         // 抗频闪模式下不触发自适应升降帧
         if antiFlickerEnabled {
-            print("shengzhen 📊 [自适应] ⏸️ 抗频闪开启，自适应升降帧已停摆 档位=\(currentProfile) adaptiveFps=\(adaptiveFps)")
+            malvshezhingLog("[自适应] ⏸️ 抗频闪开启，升降帧停摆 档位=\(currentProfile) fps=\(adaptiveFps)")
             return
         }
         
@@ -1099,12 +1116,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             return
         }
         
-        // 冷却期检查（降帧后1秒，升帧后2秒）
+        // 冷却期时长（降帧后1秒，升帧后2秒）；判定在算出网络状态后进行
         let timeSinceLastChange = now.timeIntervalSince(lastFpsChangeTime)
         let cooldown = lastFpsDirection == .down ? cooldownAfterDown : cooldownAfterUp
-        if timeSinceLastChange < cooldown {
-            return
-        }
+        let inFpsCooldown = timeSinceLastChange < cooldown
         
         // 🔥 v2.1: 丢包率3秒移动平均（防止突发抖动误触发）
         lossRateHistory.append(instantLossRate)
@@ -1129,7 +1144,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         let isNetworkGood = isRttGood && isLossGood
         
         let status = isNetworkBad ? "🔴差" : (isNetworkGood ? "🟢好" : "🟡中")
-        print("shengzhen 📊 [自适应] 档位=\(currentProfile) fps=\(adaptiveFps)/\(maxFps)(上限=targetOutputFPS) RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%(3s均) \(status) ↓\(highLossCounter)/\(downgradeHoldSec) ↑\(lowLossCounter)/\(upgradeHoldSec)")
+        let bitratePct = targetBitrateKbps > 0 ? Int(bitrateRatio * 100) : 0
+        malvshezhingLog("[自适应] 档位=\(currentProfile) fps=\(adaptiveFps)/\(maxFps) RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%(3s均) 码率达成=\(bitratePct)% \(status) ↓\(highLossCounter)/\(downgradeHoldSec) ↑\(lowLossCounter)/\(upgradeHoldSec)")
+        
+        if inFpsCooldown {
+            if isNetworkBad {
+                malvshezhingLog("[自适应] 冷却中 剩\(String(format: "%.1f", cooldown - timeSinceLastChange))s 上次=\(lastFpsDirection == .down ? "降帧" : "升帧") fps=\(adaptiveFps)")
+            }
+            return
+        }
         
         var fpsChanged = false
         let oldFps = adaptiveFps
@@ -1142,11 +1165,23 @@ final class WebRTCManager: NSObject, ObservableObject {
             if highLossCounter >= downgradeHoldSec {
                 let newFps = fpsLadder.first(where: { $0 < adaptiveFps }) ?? fpsLadder.last ?? minAdaptiveFps
                 if newFps != adaptiveFps {
+                    // 还能降帧 → 先降帧
                     adaptiveFps = newFps
                     fpsChanged = true
                     lastFpsChangeTime = now
                     lastFpsDirection = .down
-                    print("⬇️ [降帧] \(oldFps)→\(adaptiveFps)fps (RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%)")
+                    malvshezhingLog("[自适应] ⬇️降帧 \(oldFps)→\(adaptiveFps)fps 网络差 RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%")
+                } else if emergencyBitrateScale > emergencyBitrateMinScale {
+                    // 🚨 fps 已到最低档仍网络差 → 紧急逐级降码率，缓解队列堆积
+                    let oldScale = emergencyBitrateScale
+                    emergencyBitrateScale = max(emergencyBitrateMinScale, emergencyBitrateScale * emergencyBitrateStepDown)
+                    lastFpsChangeTime = now
+                    lastFpsDirection = .down
+                    applyEffectiveBitrateToWebRTC()
+                    enforceBitrateImmediately()
+                    malvshezhingLog("[码率] 🚨紧急降码率 系数\(String(format: "%.2f", oldScale))→\(String(format: "%.2f", emergencyBitrateScale)) 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps)kbps (fps=\(adaptiveFps)已到底) RTT=\(rttMs)ms")
+                } else {
+                    malvshezhingLog("[码率] ⚠️已压到最低 系数=\(String(format: "%.2f", emergencyBitrateScale)) 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps)kbps fps=\(adaptiveFps) RTT=\(rttMs)ms 仍差")
                 }
                 highLossCounter = 0
             }
@@ -1156,13 +1191,24 @@ final class WebRTCManager: NSObject, ObservableObject {
             highLossCounter = 0
 
             if lowLossCounter >= upgradeHoldSec {
-                let newFps = min(maxFps, fpsLadder.last(where: { $0 > adaptiveFps }) ?? fpsLadder.first ?? 60)
-                if newFps != adaptiveFps {
-                    adaptiveFps = newFps
-                    fpsChanged = true
+                if emergencyBitrateScale < 0.999 {
+                    // 🚨 先把紧急压低的码率逐级恢复，再考虑升帧
+                    let oldScale = emergencyBitrateScale
+                    emergencyBitrateScale = min(1.0, emergencyBitrateScale + emergencyBitrateStepUp)
                     lastFpsChangeTime = now
                     lastFpsDirection = .up
-                    print("⬆️ [升帧] \(oldFps)→\(adaptiveFps)fps (上限\(maxFps)fps, RTT=\(rttMs)ms)")
+                    applyEffectiveBitrateToWebRTC()
+                    enforceBitrateImmediately()
+                    malvshezhingLog("[码率] ✅恢复码率 系数\(String(format: "%.2f", oldScale))→\(String(format: "%.2f", emergencyBitrateScale)) 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps)kbps RTT=\(rttMs)ms")
+                } else {
+                    let newFps = min(maxFps, fpsLadder.last(where: { $0 > adaptiveFps }) ?? fpsLadder.first ?? 60)
+                    if newFps != adaptiveFps {
+                        adaptiveFps = newFps
+                        fpsChanged = true
+                        lastFpsChangeTime = now
+                        lastFpsDirection = .up
+                        malvshezhingLog("[自适应] ⬆️升帧 \(oldFps)→\(adaptiveFps)fps 网络好 上限=\(maxFps) RTT=\(rttMs)ms")
+                    }
                 }
                 lowLossCounter = 0
             }
@@ -1190,12 +1236,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             if currentCaptureFPS != captureFps {
                 capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
-                print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
+                malvshezhingLog("[自适应] 已应用 fps=\(fps) 采集=\(captureFps)fps（已调相机）")
             } else {
-                print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:\(captureFps)fps（无变化）")
+                malvshezhingLog("[自适应] 已应用 fps=\(fps) 采集=\(captureFps)fps（相机无变化）")
             }
         } else {
-            print("🎯 [FPS同步-自适应] 推流:\(fps)fps → 采集:未知（capturer未就绪）")
+            malvshezhingLog("[自适应] 已应用 fps=\(fps) 采集未就绪")
         }
         
         // 3. 更新WebRTC编码参数
@@ -1212,8 +1258,6 @@ final class WebRTCManager: NSObject, ObservableObject {
             lastNotifiedFps = fps
             WebSocketManager.shared.sendFpsUpdate(fps: fps)
         }
-        
-        print("📡 [iOS自适应] 已应用fps=\(fps), 推送通知PC端")
     }
     
     // MARK: - 🔥 v2.0 PC端自适应FPS指令处理
@@ -1480,14 +1524,14 @@ final class WebRTCManager: NSObject, ObservableObject {
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
             keyframeIntervalSec = gopExtreme
-            print("🚨 [critical] 保码率+降FPS→\(targetFps)fps, GOP=\(gopExtreme)s, 立即插I帧")
+            malvshezhingLog("[set_fps] critical \(oldFps)→\(targetFps)fps GOP=\(gopExtreme)s 码率=\(bitrate)")
 
         case "high":
             // ⚡ 高优先级：保码率不降，只降FPS + 插I帧
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
             keyframeIntervalSec = gopWeak
-            print("⚡ [high] 保码率+降FPS→\(targetFps)fps, GOP=\(gopWeak)s, 立即插I帧")
+            malvshezhingLog("[set_fps] high \(oldFps)→\(targetFps)fps GOP=\(gopWeak)s 码率=\(bitrate)")
             
         case "normal":
             // 正常：可短暂过渡，码率不变
@@ -1509,7 +1553,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         // 计算执行时间
         let execTime = Date().timeIntervalSince(startTime) * 1000
-        print("🎯 [set_fps] ✅ 已应用: \(oldFps)fps → \(targetFps)fps, urgency=\(urgency), 耗时=\(String(format: "%.1f", execTime))ms")
+        malvshezhingLog("[set_fps] 已应用 \(oldFps)→\(targetFps)fps urgency=\(urgency) 耗时=\(String(format: "%.1f", execTime))ms")
         
         // 发送确认（可选）
         WebSocketManager.shared.sendSetFpsAck(fps: targetFps, status: "applied")
@@ -1527,12 +1571,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             if currentCaptureFPS != captureFps {
                 capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
-                print("🎯 [FPS同步] 推流:\(fps)fps → 采集:\(captureFps)fps ✅已调整")
-            } else {
-                print("🎯 [FPS同步] 推流:\(fps)fps → 采集:\(captureFps)fps（无变化）")
+                malvshezhingLog("[set_fps] 采集 \(fps)→\(captureFps)fps 已调相机")
             }
         } else {
-            print("🎯 [FPS同步] 推流:\(fps)fps → 采集:未知（capturer未就绪）")
+            malvshezhingLog("[set_fps] 采集未就绪 推流=\(fps)fps")
         }
         
         // 3. 更新 WebRTC 编码参数
@@ -1543,6 +1585,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 
                 if bitrate > 0 {
                     params.encodings[0].maxBitrateBps = NSNumber(value: bitrate)
+                    malvshezhingLog("[码率] set_fps 附带 max=\(bitrate/1000) kbps fps=\(fps)")
                 }
                 
                 sender.parameters = params
@@ -2075,8 +2118,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             lastQualityPercent = snapped
             
             if currentLadder[currentProfile] != nil {
+                emergencyBitrateScale = 1.0  // 🚨 显式调清晰度，重置弱网紧急降码率系数
                 applyEffectiveBitrateToWebRTC()
-                //print("🎨 质量百分比: \(oldPercent)% → \(snapped)% | 码率调整为: \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
+                enforceBitrateImmediately()
+                malvshezhingLog("[码率] 清晰度 \(oldPercent)% → \(snapped)% 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps) kbps")
             } else {
                 //print("✨ 质量百分比=", snapped, "%")
             }
@@ -2734,12 +2779,20 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 4. 升降帧后3秒冷却期（防止抖动）
     /// 5. 计数器以"秒"为单位，每秒只更新一次
     
-    private let minAdaptiveFps: Int = 20     // 最低20fps（档位切换最低档）
+    private let minAdaptiveFps: Int = 15     // 最低15fps（弱网最低档）
     private let minCaptureFps: Int = 15      // 최저 camera capture fps (발열/화면 끊김 균형)
+
+    /// 🚨 弱网紧急降码率系数（1.0=不降）。当 fps 已到最低档仍持续网络差时，逐级把
+    /// min/max 码率往下压，缓解发送队列堆积（bufferbloat/RTT 飙升导致的断流）；
+    /// 网络恢复后逐级升回 1.0。档位切换/清晰度变更等显式指令会重置为 1.0。
+    private var emergencyBitrateScale: Double = 1.0
+    private let emergencyBitrateMinScale: Double = 0.2   // 最低压到基准的 20%（如 low 档 1500→300kbps）
+    private let emergencyBitrateStepDown: Double = 0.7   // 每次下压 ×0.7
+    private let emergencyBitrateStepUp: Double = 0.15    // 恢复每次 +0.15
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
-    private let fpsLadder: [Int] = [60, 30, 20]
+    private let fpsLadder: [Int] = [60, 30, 20, 15]
 
     /// 丢包率阈值（基于3秒移动平均）
     private let lossRateDownThreshold: Double = 0.025   // 3秒均值>2.5%，降级
@@ -3066,9 +3119,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             currentProfile = p
         
         // 4️⃣ 设置码率（min/max 均按档位 + 清晰度百分比）
+        emergencyBitrateScale = 1.0  // 🚨 显式切档，重置弱网紧急降码率系数
         applyEffectiveBitrateToWebRTC()
         enforceBitrateImmediately()
-        print("   码率: \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
+        malvshezhingLog("[码率] 档位切换 \(oldProfile)→\(p) 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps) kbps")
             
         // 5️⃣ 更新 FrameThrottler（采集和输出分辨率）
         let captureRes = getCaptureResolutionForProfile(p)
@@ -4903,6 +4957,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         params.degradationPreference = NSNumber(value: 2)  // maintainResolution
         
         sender.parameters = params
+        malvshezhingLog("[码率] 立即强制 min=\(minBps/1000) max=\(maxBps/1000) kbps WebRTCfps=\(webrtcFps) 档位=\(currentProfile)")
         
         // 🔥 连续设置两次，确保立即生效（WebRTC有时需要多次设置才能立即响应）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -4934,7 +4989,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             // 计算输出分辨率
             let outputW = Int(Double(self.currentCaptureWidth) / scaleDown3)
             let outputH = Int(Double(self.currentCaptureHeight) / scaleDown3)
-            print("✅ WebRTC码率已设置: \(minBps2/1000)-\(maxBps2/1000)kbps, WebRTC=\(webrtcFps2)fps, 采集=\(self.currentCaptureWidth)x\(self.currentCaptureHeight) → 输出=\(outputW)x\(outputH) (scale=\(scaleDown3))")
+            self.malvshezhingLog("[码率] 二次确认 min=\(minBps2/1000) max=\(maxBps2/1000) kbps WebRTCfps=\(webrtcFps2) 输出=\(outputW)x\(outputH) scale=\(scaleDown3)")
         }
     }
     
@@ -4961,6 +5016,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 // RTCDegradationPreference: 0=disabled, 1=maintainFramerate, 2=maintainResolution, 3=balanced
         params.degradationPreference = NSNumber(value: 2)  // maintainResolution
                 sender.parameters = params
+                self.malvshezhingLog("[码率] 周期纠正 WebRTC被改 min=\(currentMin/1000)→\(minBps/1000) max=\(currentMax/1000)→\(maxBps/1000) kbps 实际=\(self.currentKbps) 目标=\(self.targetBitrateKbps)")
             }
         }
     }
@@ -5494,23 +5550,19 @@ final class WebRTCManager: NSObject, ObservableObject {
                             let percentage = targetMaxKbps > 0 ? Int((Double(actualKbps) / Double(targetMaxKbps)) * 100) : 0
                             let qlrStr = qlr ?? "none"
                             
-                            // ✅ 验证编码器参数是否被修改
-                            var encoderInfo = ""
                             if let sender = self.videoSender,
                                let encoding = sender.parameters.encodings.first {
                                 let encMin = encoding.minBitrateBps?.intValue ?? 0
                                 let encMax = encoding.maxBitrateBps?.intValue ?? 0
-                                encoderInfo = " | 编码器: min=\(encMin/1000)k max=\(encMax/1000)k"
-                                
-                                // ⚠️ 警告：如果编码器参数不是目标值，说明被WebRTC内部修改了
-                                if encMin != self.targetMinBitrateKbps * 1000 || encMax != self.targetBitrateKbps * 1000 {
-                                    encoderInfo += " ⚠️被修改"
+                                let targetMin = self.targetMinBitrateKbps * 1000
+                                let targetMax = self.targetBitrateKbps * 1000
+                                let encoderDrift = encMin != targetMin || encMax != targetMax
+                                let overCap = self.targetBitrateKbps > 0 && actualKbps > self.targetBitrateKbps + 500
+                                let networkStress = rttMs > self.rttDownThreshold || packetLossRate > self.lossRateDownThreshold
+                                if encoderDrift || (overCap && networkStress) {
+                                    self.malvshezhingLog("[码率] 监控 实际=\(actualKbps) 目标=\(self.targetMinBitrateKbps)-\(self.targetBitrateKbps) (\(percentage)%) 编码器=\(encMin/1000)-\(encMax/1000)kbps\(encoderDrift ? " ⚠️漂移" : "") RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", packetLossRate * 100))% QLR=\(qlrStr)")
                                 }
                             }
-                            
-                            /*
-                            print("📊 码率监控: \(actualKbps)/\(targetKbps) kbps (\(percentage)%) | FPS: \(self.currentFps) | QLR: \(qlrStr)\(encoderInfo)")
-                            print("🌐 网络质量: \(quality) | 丢包率: \(String(format: "%.2f%%", packetLossRate * 100)) | RTT: \(rttMs)ms | 抖动: \(String(format: "%.2f", jitter * 1000))ms")*/
                         }
                         
                         self.evaluate(qlr: qlr)

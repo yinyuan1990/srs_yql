@@ -43,8 +43,8 @@
 		2C596C5F2E58E22600C94789 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C596C5E2E58E22600C94789 /* Preview Assets.xcassets */; };
 		2C5B00502E90D20800755FBF /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5B004F2E90D20800755FBF /* WebRTC */; };
 		2C5B00522E90DC5100755FBF /* WebRTCManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00512E90DC5100755FBF /* WebRTCManager.swift */; };
-		2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */; };
 		2C5B00542E90DD2600755FBF /* WebRTCPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */; };
+		2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */; };
 		2CB8FA4E2E73C59A00F90666 /* ImagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */; };
 		2CB8FA502E73D38100F90666 /* WebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4F2E73D38100F90666 /* WebView.swift */; };
 		2CB8FA532E73FAFC00F90666 /* SwiftStomp in Frameworks */ = {isa = PBXBuildFile; productRef = 2CB8FA522E73FAFC00F90666 /* SwiftStomp */; };
@@ -92,8 +92,8 @@
 		2C596C5B2E58E22600C94789 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2C596C5E2E58E22600C94789 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		2C5B00512E90DC5100755FBF /* WebRTCManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCManager.swift; sourceTree = "<group>"; };
-		2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomAVCaptureVideoCapturer.swift; sourceTree = "<group>"; };
 		2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCPreview.swift; sourceTree = "<group>"; };
+		2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomAVCaptureVideoCapturer.swift; sourceTree = "<group>"; };
 		2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePicker.swift; sourceTree = "<group>"; };
 		2CB8FA4F2E73D38100F90666 /* WebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebView.swift; sourceTree = "<group>"; };
 		2CC405762E63B22400E31EF8 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
@@ -475,7 +475,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_ASSET_PATHS = "\"srs/Preview Content\"";
 				DEVELOPMENT_TEAM = 89V3HHXY9F;
 				ENABLE_PREVIEWS = YES;
@@ -490,7 +490,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.1;
+				MARKETING_VERSION = 2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ai.yql;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -511,7 +511,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_ASSET_PATHS = "\"srs/Preview Content\"";
 				DEVELOPMENT_TEAM = 89V3HHXY9F;
 				ENABLE_PREVIEWS = YES;
@@ -526,7 +526,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.1;
+				MARKETING_VERSION = 2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ai.yql;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

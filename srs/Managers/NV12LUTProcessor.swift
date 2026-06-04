@@ -20,8 +20,8 @@ final class NV12LUTProcessor {
     var intensity: Float = 1.0
     var exposure: Float = 0.0
     var temperature: Float = 0.0
-    var redLift: Float = 0.18
-    var redSat: Float = 0.18
+    var redLift: Float = 0.0
+    var redSat: Float = 0.0
     /// LUT 前降对比（绕中点 0.5）：<1 降对比，1=不变。发牌场景柔化采集端硬过渡
     var preContrast: Float = 0.90
     /// LUT 前抬中间调（gamma，两端不动）：>1 提亮暗部/中间调，1=不变。发牌场景提亮主力
@@ -98,8 +98,8 @@ final class NV12LUTProcessor {
         intensity = 0.85 + (v / 100.0) * 0.15   // 0→0.85, 50→0.925, 100→1.0
         exposure = 0
         temperature = 0
-        redLift = 0.12
-        redSat = 0.16
+        redLift = 0.0
+        redSat = 0.0
         print("[NV12LUT] applyNativeBrightness value=\(value) → intensity=\(intensity) exposure=\(exposure) temperature=\(temperature) redLift=\(redLift) redSat=\(redSat) preContrast=\(preContrast) preGamma=\(preGamma)")
     }
 
