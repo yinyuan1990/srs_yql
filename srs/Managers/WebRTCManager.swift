@@ -990,6 +990,8 @@ final class WebRTCManager: NSObject, ObservableObject {
         } else {
             malvshezhingLog("[码率] 应用 档位=\(currentProfile) 清晰度=\(pct)% → \(minK)-\(maxK) kbps")
         }
+        // ⭐ P2P：同步码率到所有直连会话
+        if isP2PMode { p2pManager.applyEncodingToAllSessions() }
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -2693,6 +2695,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var previewVideoTrack: RTCVideoTrack?      // 🔥 预览轨道
     var capturer: CustomAVCaptureVideoCapturer!
     private var videoSender: RTCRtpSender?
+
+    // ⭐ 两种连接方式各自独立管理类，按 connect_mode 二选一（互斥不混用）
+    let p2pManager = P2PManager()
+    let srsManager = SRSManager()
+    /// 当前连接方式："srs" | "p2p"（默认 p2p）
+    var connectMode: String { (UserDefaults.standard.string(forKey: "connect_mode") ?? "p2p").lowercased() }
+    var isP2PMode: Bool { connectMode == "p2p" }
     
     // 记录当前采集FPS
     private var currentCaptureFPS: Int = 60 {
@@ -2991,6 +3000,10 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: NSNotification.Name("WhiteBalanceCommand"),
                 object: nil
         )
+
+        // ⭐ 两种连接管理类（P2P / SRS）的数据源
+        p2pManager.dataSource = self
+        srsManager.dataSource = self
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
@@ -3246,6 +3259,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             //print("========================================\n")
             return
         }
+
+        // ⭐ 连接方式 == p2p：走 P2P 直连，不启动 SRS 推流（二选一不混用）
+        if isP2PMode {
+            startP2PPublish(initialProfile: initialProfile)
+            return
+        }
         
         // 🔥 检查摄像头预览是否准备好（只有在预览模式下才需要检查）
         // 如果 capturer 和 localVideoTrack 都不存在，后面会自动初始化（无预览模式）
@@ -3311,43 +3330,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("⚠️ [初始化-推流] 无法获取服务器配置，使用默认FPS: \(targetOutputFPS)fps")
         }
         
-        // 建立 PeerConnection
-        let cfg = RTCConfiguration()
-        cfg.sdpSemantics = .unifiedPlan
-        
-        // 🔥 优化ICE服务器（解决5G网络卡顿）
-        cfg.iceServers = [
-            // 国内STUN优先（延迟低）
-            RTCIceServer(urlStrings: ["stun:stun.miwifi.com:3478"]),      // 小米
-            RTCIceServer(urlStrings: ["stun:stun.qq.com:3478"]),          // 腾讯
-            RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])    // Google备用
-        ]
-        
-        cfg.continualGatheringPolicy = .gatherContinually
-        cfg.iceBackupCandidatePairPingInterval = 2000  // 🔥 2秒快速切换（5G基站切换）
-        cfg.iceCandidatePoolSize = 2                   // 🔥 预分配候选池（加速连接）
-       
-           // 优化DTLS配置以提高连接稳定性
-        cfg.iceTransportPolicy = .all   // 允许所有类型的ICE传输
-        cfg.bundlePolicy = .maxBundle   // 强制使用BUNDLE策略
-        cfg.rtcpMuxPolicy = .require    // 要求RTCP复用
-        
-        
-        
-        let cons = RTCMediaConstraints(mandatoryConstraints: nil,
-                                       optionalConstraints: ["DtlsSrtpKeyAgreement":"true"])
-        pc = factory.peerConnection(with: cfg, constraints: cons, delegate: self)
-        //print("✅ 新 PeerConnection 已创建")
-
-        // 音频轨
-        //let audioSrc = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
-        //let audioTrack = factory.audioTrack(with: audioSrc, trackId: "audio0")
-        //_ = pc.add(audioTrack, streamIds: ["s0"])
+        // ⭐ SRS 连接由 SRSManager 负责创建（pc/offer/answer/ICE重连）
+        //    这里只准备采集管线与本地视频轨；连接在 srsManager.start() 中建立。
 
         // 视频轨：优先复用预览管线
-        if let pushTrack = localVideoTrack, capturer != nil {
-            // 🔥 复用推送轨道（localVideoTrack 已经绑定到 videoSource）
-            videoSender = pc.add(pushTrack, streamIds: ["s0"]) // 保存 sender，便于设码率
+        if let _ = localVideoTrack, capturer != nil {
+            // 🔥 复用推送轨道（localVideoTrack 已绑定到 videoSource，由 SRSManager add 到 pc）
             
             // 🔥🔥 关键修复：复用预览管线时，必须同步更新 frameThrottler 的推送FPS
             // 否则 frameThrottler 还是预览时的默认值（30fps），后端下发的FPS不生效
@@ -3384,10 +3372,9 @@ final class WebRTCManager: NSObject, ObservableObject {
             previewVideoTrack = previewTrack
             previewVideoTrack?.add(localView)
             
-            // 🔥 推送轨道绑定到 videoSource
+            // 🔥 推送轨道绑定到 videoSource（由 SRSManager add 到 pc）
             let videoTrack = factory.videoTrack(with: videoSource, trackId: "video0")
             localVideoTrack = videoTrack
-            videoSender = pc.add(videoTrack, streamIds: ["s0"]) // 保存 sender
             
             // ✅ 根据配置选择初始摄像头
             let devices = CustomAVCaptureVideoCapturer.captureDevices()
@@ -3456,84 +3443,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         // 🔥 设置码率（此时 currentCaptureFPS 已根据前后置摄像头正确设置）
         applyEffectiveBitrateToWebRTC()
-        //print("📊 推流初始化：档位=\(useProfile), 码率=\(targetKbps)kbps")
 
-        // Offer（发送端不接收远端）
-        let sdpCons = RTCMediaConstraints(
-            mandatoryConstraints: ["OfferToReceiveAudio":"false","OfferToReceiveVideo":"false"],
-            optionalConstraints: nil
-        )
-        
-        pc.offer(for: sdpCons) { [weak self] sdp, err in
-            guard let self, let sdp else { print("offer err", err ?? "nil"); return }
-            
-            // 🔥 安全检查：pc 可能在异步期间被清空
-            guard let pc = self.pc else {
-                print("⚠️ pc 已被清空，跳过 setLocalDescription")
-                return
-            }
-            
-            pc.setLocalDescription(sdp) { _ in }
-            Task {
-                do {
-                    let ans = try await self.postOfferToSRS(
-                        apiPath: "/rtc/v1/publish/",
-                        streamurl: "webrtc://\(self.srsIP)/\(self.app)/\(self.streamKey)",
-                        offer: sdp.sdp
-                    )
-                    
-                    // 🔥 安全检查：pc 可能在异步网络请求期间被清空
-                    guard let pc = self.pc else {
-                        print("⚠️ pc 已被清空，跳过 setRemoteDescription")
-                        return
-                    }
-                    
-                    //print("🔄 开始设置 Remote Description (SRS Answer)...")
-                    pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { err in
-                        if let err {
-                            //print("❌ setRemoteDescription 失败：\(err)")
-                            // 发送失败通知
-                            DispatchQueue.main.async {
-                                NotificationCenter.default.post(
-                                    name: .publishFailed,
-                                    object: nil,
-                                    userInfo: ["reason": "设置 Answer 失败: \(err.localizedDescription)"]
-                                )
-                            }
-                        } else {
-                            //print("✅ setRemoteDescription 成功")
-                            DispatchQueue.main.async {
-                                self.isPublishing = true
-                                WebSocketManager.isPublishingFlag = 1
-                                print("🟢 [publishStatus] 1 ← SRS推流连接成功(ICE trickle)")
-                                
-                                self.startStats()   // 启动统计 + 自适应
-                                
-                                // 🔥🔥 关键修复：推流成功后强制设置正确的 scaleResolutionDownBy
-                                // 防止 WebRTC 内部自动调整导致分辨率变化
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                    let correctScale = self.currentLadder[self.currentProfile]?.scaleDown ?? 1.0
-                                    print("🔧 [推流成功] 强制设置 scaleResolutionDownBy = \(correctScale)")
-                                    self.setResolutionScale(correctScale)
-                                    self.enforceBitrateImmediately()
-                                }
-                            }
-                            //print("✅ 发布成功：\(self.streamKey)")
-                        }
-                    }
-                } catch {
-                    //print("❌ 发布失败：\(error.localizedDescription)")
-                    // 🔥 关键修复：发送推流失败通知，触发重试机制
-                    DispatchQueue.main.async {
-                        NotificationCenter.default.post(
-                            name: .publishFailed,
-                            object: nil,
-                            userInfo: ["reason": "SRS 服务器错误: \(error.localizedDescription)"]
-                        )
-                    }
-                }
-            }
-        }
+        // ⭐ 交给 SRSManager 建立连接（Offer→/rtc/v1/publish→Answer + ICE重连）
+        srsManager.dataSource = self
+        srsManager.start()
     }
     
     // 类内新增：SDP 改写（确保 H.264 fmtp 关键参数）
@@ -3598,60 +3511,6 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     
 
-    // 发给 SRS 并设置 Answer
-    private func postAndSetAnswer(local: RTCSessionDescription) {
-        Task {
-            do {
-                let ans = try await self.postOfferToSRS(
-                    apiPath: "/rtc/v1/publish/",
-                    streamurl: "webrtc://\(self.srsIP)/\(self.app)/\(self.streamKey)",
-                    offer: local.sdp
-                )
-                
-                // 🔥 安全检查：pc 可能在异步网络请求期间被清空
-                guard let pc = self.pc else {
-                    print("⚠️ pc 已被清空，跳过 setRemoteDescription (postAndSetAnswer)")
-                    return
-                }
-                
-                //print("🔄 开始设置 Remote Description (SRS Answer)...")
-                pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { err in
-                    if let err {
-                        //print("❌ setRemoteDescription 失败：\(err)")
-                        // 发送失败通知
-                        DispatchQueue.main.async {
-                            NotificationCenter.default.post(
-                                name: .publishFailed,
-                                object: nil,
-                                userInfo: ["reason": "设置 Answer 失败: \(err.localizedDescription)"]
-                            )
-                        }
-                    } else {
-                        //print("✅ setRemoteDescription 成功")
-                        DispatchQueue.main.async {
-                            self.isPublishing = true
-                            WebSocketManager.isPublishingFlag = 1
-                            print("🟢 [publishStatus] 1 ← SRS推流连接成功(非trickle)")
-                            
-                            self.startStats()
-                        }
-                        //print("✅ 发布成功：\(self.streamKey)")
-                    }
-                }
-            } catch {
-                //print("❌ 发布失败：\(error.localizedDescription)")
-                // 🔥 关键修复：发送推流失败通知，触发重试机制
-                DispatchQueue.main.async {
-                    NotificationCenter.default.post(
-                        name: .publishFailed,
-                        object: nil,
-                        userInfo: ["reason": "SRS 服务器错误: \(error.localizedDescription)"]
-                    )
-                }
-            }
-        }
-    }
-
     // 简单等待 ICE 完整（最多 timeoutSec 秒）
     private func waitForIceComplete(timeoutSec: TimeInterval,
                                     done: @escaping (RTCSessionDescription?) -> Void) {
@@ -3702,6 +3561,30 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebSocketManager.rtt = 0
         isPublishing = false
         pc?.close(); pc = nil
+        // ⭐ 停止对应连接管理类
+        if p2pManager.isActive { p2pManager.stop() }
+        if srsManager.isActive { srsManager.stop() }
+    }
+
+    // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
+    @MainActor
+    func startP2PPublish(initialProfile: LadderProfile? = nil) {
+        print("🎬 [P2P] 启动 P2P 直连推流")
+        // 复用预览采集管线，确保 localVideoTrack 就绪
+        if localVideoTrack == nil || capturer == nil {
+            startPreviewIfNeeded(initialProfile: initialProfile)
+        }
+        // 从服务器配置应用 FPS / 档位（与 SRS 路径一致，仅不建立 SRS 连接）
+        if let serverCfg = ConfigManager.shared.getCurrentConfig(), let serverFps = serverCfg.fps {
+            setAverageOutputFPS(serverFps)
+            enableAverageThrottling(true)
+        }
+        isPublishing = true
+        WebSocketManager.isPublishingFlag = 1
+        p2pManager.dataSource = self
+        p2pManager.start()
+        startStats()
+        print("✅ [P2P] 就绪，等待 PC 发起 WEBRTC_REQUEST")
     }
     
     // MARK: - 摄像头休眠/唤醒（节省电量）
@@ -4749,9 +4632,6 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var targetMinBitrateKbps: Int = 2000
     private var targetBitrateKbps: Int = 2000
     private var bitrateEnforceTimer: Timer?
-    private var iceReconnectTimer: Timer?
-    private var iceRestartAttempts = 0
-    private let maxIceRestartAttempts = 3
     
     func setMaxBitrateKbps(_ kbps: Int) {
         setBitrateRangeKbps(min: kbps, max: kbps)
@@ -5654,315 +5534,37 @@ final class WebRTCManager: NSObject, ObservableObject {
         return (n >= LOWEST_PROFILE.rawValue) ? LadderProfile(rawValue: n) : nil
     }
 
-    // MARK: - SRS HTTP
-    private func postOfferToSRS(apiPath: String, streamurl: String, offer: String) async throws -> String {
-        // 🔥 检查 srsIP 是否为空
-        guard !srsIP.isEmpty else {
-            print("❌ [SRS] 推流IP为空，请检查登录接口返回的 streamPushIp")
-            throw NSError(domain: "srs", code: -1, userInfo: [NSLocalizedDescriptionKey: "推流IP为空，请重新登录"])
-        }
-        
-        // 🔥 获取推流Token
-        let username = UserDefaults.standard.string(forKey: "username") ?? ""
-        var finalStreamUrl = streamurl
-        
-        do {
-            let tokenResponse = try await APIService.shared.getStreamToken(username: username, streamName: streamKey)
-            streamToken = tokenResponse.token
-            // 🔥 构造带Token的streamurl: webrtc://ip/app/stream?token=xxx&username=xxx
-            finalStreamUrl = "\(streamurl)?token=\(tokenResponse.token)&username=\(username)"
-            print("🔑 推流Token获取成功")
-        } catch {
-            print("⚠️ 获取推流Token失败: \(error.localizedDescription)，使用无Token推流")
-            // 无Token继续推流（SRS可能不强制要求Token）
-        }
-        
-        let url = URL(string: "http://\(srsIP):1985\(apiPath)")!
-        let body: [String: Any] = [
-            "api": "http://\(srsIP):1985\(apiPath)",
-            "streamurl": finalStreamUrl,
-            "sdp": offer
-        ]
-        
-        // 🔥 打印请求详情
-        print("📤 [SRS] 推流请求:")
-        print("   URL: \(url)")
-        print("   streamurl: \(finalStreamUrl)")
-        
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        
-        // 🔥 打印 HTTP 响应状态
-        if let httpResponse = response as? HTTPURLResponse {
-            //print("📥 SRS 响应：HTTP \(httpResponse.statusCode)")
-        }
-        
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        
-        // 🔥 打印完整的 SRS 响应
-        //print("📥 SRS 响应内容：")
-        if let jsonData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            print(jsonString)
-        }
-        
-        if let code = json["code"] as? Int, code != 0 {
-            // 🔥 获取详细错误信息
-            let msg = json["msg"] as? String ?? "未知错误"
-            let server = json["server"] as? String ?? "未知"
-            
-            print("❌ [SRS] 推流错误:")
-            print("   code: \(code)")
-            print("   msg: \(msg)")
-            print("   server: \(server)")
-            print("   srsIP: \(srsIP)")
-            
-            throw NSError(domain: "srs", code: code, userInfo: [
-                NSLocalizedDescriptionKey: "SRS code=\(code), msg: \(msg)"
-            ])
-        }
-        
-        guard let sdp = json["sdp"] as? String else {
-            //print("❌ SRS 响应中没有 sdp 字段")
-            //print("========================================\n")
-            throw NSError(domain: "srs", code: -1, userInfo: [NSLocalizedDescriptionKey: "no sdp in response"])
-        }
-        
-        //print("✅ 成功获取 SRS Answer SDP")
-        //print("========================================\n")
-        return sdp
-    }
-    
-    // MARK: - 删除 SRS 流（重试前调用，清理旧流，失败也忽略）
-    func deleteStream(streamKey: String) {
-        let streamUrl = "webrtc://\(srsIP)/\(app)/\(streamKey)"
-        guard let url = URL(string: "http://\(srsIP):1985/rtc/v1/unpublish/") else {
-            print("❌ [deleteStream] URL 无效")
-            return
-        }
-        
-        print("🗑️ [deleteStream] 删除旧流: \(streamKey)")
-        
-        let body: [String: Any] = [
-            "api": "http://\(srsIP):1985/rtc/v1/unpublish/",
-            "streamurl": streamUrl
-        ]
-        
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
-        // 异步调用，不等待结果
-        URLSession.shared.dataTask(with: req) { data, response, error in
-            if let error = error {
-                print("🗑️ [deleteStream] 请求失败（忽略）: \(error.localizedDescription)")
-            } else if let httpResponse = response as? HTTPURLResponse {
-                print("🗑️ [deleteStream] 响应: HTTP \(httpResponse.statusCode)（忽略成功与否）")
-            }
-        }.resume()
-    }
+    // SRS HTTP（postOfferToSRS / deleteStream）已抽取到 SRSManager
 }
 
-// MARK: - PC Delegate（推流场景回调很少）
-// MARK: - PC Delegate
-extension WebRTCManager: RTCPeerConnectionDelegate {
-    // 信令状态变化
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didChange stateChanged: RTCSignalingState) {}
+// MARK: - ⭐ SRSManagerDataSource（向独立 SRS 类提供工厂/视频轨/参数 + 回调）
+extension WebRTCManager: SRSManagerDataSource {
+    var srsFactory: RTCPeerConnectionFactory { factory }
+    var srsLocalVideoTrack: RTCVideoTrack? { localVideoTrack }
+    // srsIP / app 已是 WebRTCManager 现有属性
+    var srsApp: String { app }
+    var srsStreamKey: String { streamKey }
+    var srsUsername: String { UserDefaults.standard.string(forKey: "username") ?? "" }
+    var srsIsPublishing: Bool { isPublishing }
 
-    // 旧版（Plan B）：添加/移除媒体流
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didAdd stream: RTCMediaStream) {}
-
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didRemove stream: RTCMediaStream) {}
-
-    // 需要重新协商
-    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-
-    // 🔥 ICE 连接状态变化（重要！这里监听断线等）
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didChange newState: RTCIceConnectionState) {
-        DispatchQueue.main.async {
-            // 🔥🔥 关键修复：只处理当前活跃连接的状态变化
-            // 旧连接关闭时的回调不应该影响新连接
-            guard peerConnection === self.pc else {
-                print("🔴 ICE Connection: \(newState) (旧连接，忽略)")
-                return
-            }
-            
-            switch newState {
-            case .new:
-                print("🔵 ICE Connection: New")
-            case .checking:
-                print("🔵 ICE Connection: Checking...")
-            case .connected:
-                print("✅ ICE Connection: Connected")
-            case .completed:
-                print("✅ ICE Connection: Completed")
-            case .failed:
-                print("❌ ICE Connection: Failed")
-                // ICE failed 才真正重连（比 disconnected 更严重）
-                if self.isPublishing {
-                    self.scheduleIceReconnect(delay: 2.0, reason: "ICE failed")
-                }
-            case .disconnected:
-                print("⚠️ ICE Connection: Disconnected")
-                // disconnected 可能是网络抖动，给 WebRTC 8 秒自愈机会再重连
-                if self.isPublishing {
-                    self.scheduleIceReconnect(delay: 8.0, reason: "ICE disconnected")
-                }
-            case .closed:
-                print("🔴 ICE Connection: Closed")
-            case .count:
-                break
-            @unknown default:
-                print("⚠️ ICE Connection: Unknown state")
-            }
+    func srsDidConnect(pc: RTCPeerConnection, sender: RTCRtpSender?) {
+        // 回填活动连接，供统计/码率强制/关键帧等共享逻辑使用
+        self.pc = pc
+        self.videoSender = sender
+        self.isPublishing = true
+        WebSocketManager.isPublishingFlag = 1
+        print("🟢 [publishStatus] 1 ← SRS 推流连接成功")
+        startStats()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            let correctScale = self.currentLadder[self.currentProfile]?.scaleDown ?? 1.0
+            self.setResolutionScale(correctScale)
+            self.enforceBitrateImmediately()
         }
     }
 
-    // ICE 收集状态变化
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didChange newState: RTCIceGatheringState) {}
-
-    // 生成候选
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didGenerate candidate: RTCIceCandidate) {}
-
-    // ✅ 必须补的：移除候选
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didRemove candidates: [RTCIceCandidate]) {}
-
-    // DataChannel 打开
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didOpen dataChannel: RTCDataChannel) {}
-    
-    // MARK: - ICE 重连（分级恢复：ICE Restart → 全重建）
-
-    private func scheduleIceReconnect(delay: TimeInterval, reason: String) {
-        iceReconnectTimer?.invalidate()
-        print("⏳ [ICE] \(reason)，\(delay)秒后检查是否需要重连...")
-        iceReconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            guard let self = self, self.isPublishing else { return }
-            let state = self.pc?.iceConnectionState
-            if state == .disconnected || state == .failed || state == .closed {
-                if self.iceRestartAttempts < self.maxIceRestartAttempts {
-                    // 先尝试 ICE Restart（保持采集和编码不停）
-                    self.iceRestartAttempts += 1
-                    print("🔄 [ICE] 自愈失败，尝试 ICE Restart (\(self.iceRestartAttempts)/\(self.maxIceRestartAttempts))")
-                    self.triggerICERestart()
-                    // 5秒后再检查，如果还没恢复则继续重试或全重建
-                    self.scheduleIceReconnect(delay: 5.0, reason: "ICE Restart 后等待恢复")
-                } else {
-                    // ICE Restart 耗尽，全重建
-                    print("🔄 [ICE] ICE Restart \(self.maxIceRestartAttempts)次均失败，全重建连接")
-                    self.iceRestartAttempts = 0
-                    self.stopPublish()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                        self?.reconnectPublish()
-                    }
-                }
-            } else {
-                print("✅ [ICE] 自愈成功，state=\(String(describing: state))，无需重连")
-                self.iceRestartAttempts = 0
-            }
-        }
-    }
-
-    /// ICE Restart: 重新生成 Offer 带 IceRestart 约束，不销毁 PeerConnection
-    private func triggerICERestart() {
-        guard let pc = self.pc else { return }
-        let constraints = RTCMediaConstraints(
-            mandatoryConstraints: ["IceRestart": kRTCMediaConstraintsValueTrue],
-            optionalConstraints: nil
-        )
-        pc.offer(for: constraints) { [weak self] sdp, error in
-            guard let self = self, let sdp = sdp else {
-                print("❌ [ICE Restart] 生成 Offer 失败: \(error?.localizedDescription ?? "unknown")")
-                return
-            }
-            pc.setLocalDescription(sdp) { _ in }
-            Task {
-                do {
-                    let ans = try await self.postOfferToSRS(
-                        apiPath: "/rtc/v1/publish/",
-                        streamurl: "webrtc://\(self.srsIP)/\(self.app)/\(self.streamKey)",
-                        offer: sdp.sdp
-                    )
-                    guard let pc = self.pc else { return }
-                    pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { err in
-                        if let err {
-                            print("❌ [ICE Restart] setRemoteDescription 失败: \(err.localizedDescription)")
-                        } else {
-                            print("✅ [ICE Restart] 重新协商完成，等待 ICE 恢复")
-                        }
-                    }
-                } catch {
-                    print("❌ [ICE Restart] postOfferToSRS 失败: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    private func reconnectPublish() {
-        guard !isPublishing else { return }
-        print("🔄 [ICE] 自动重新推流...")
-        Task { @MainActor [weak self] in
-            self?.startPublish()
-        }
-    }
-
-    // Unified Plan：收到远端轨（拉流时用得到）
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didAdd rtpReceiver: RTCRtpReceiver,
-                        streams: [RTCMediaStream]) {
-        if let track = rtpReceiver.track as? RTCVideoTrack {
-            track.add(remoteView)
-        }
-    }
-
-    // 🔥 整体连接状态变化（综合状态）
-    func peerConnection(_ peerConnection: RTCPeerConnection,
-                        didChange state: RTCPeerConnectionState) {
-        DispatchQueue.main.async {
-            // 🔥🔥 关键修复：只处理当前活跃连接的状态变化
-            // 旧连接关闭时的回调不应该影响新连接
-            guard peerConnection === self.pc else {
-                print("🔴 PeerConnection State: \(state) (旧连接，忽略)")
-                return
-            }
-            
-            switch state {
-            case .new:
-                print("🔵 PeerConnection State: New")
-            case .connecting:
-                print("🔵 PeerConnection State: Connecting...")
-            case .connected:
-                print("✅ PeerConnection State: Connected")
-            case .disconnected:
-                print("⚠️ PeerConnection State: Disconnected")
-                // disconnected 可能是网络抖动，给 8 秒自愈机会
-                if self.isPublishing {
-                    self.scheduleIceReconnect(delay: 8.0, reason: "PeerConnection disconnected")
-                }
-            case .failed:
-                print("❌ PeerConnection State: Failed")
-                // failed 立刻重连
-                if self.isPublishing {
-                    self.scheduleIceReconnect(delay: 2.0, reason: "PeerConnection failed")
-                }
-            case .closed:
-                print("🔴 PeerConnection State: Closed")
-            @unknown default:
-                print("⚠️ PeerConnection State: Unknown")
-            }
-        }
+    func srsDidFail(reason: String) {
+        NotificationCenter.default.post(name: .publishFailed, object: nil, userInfo: ["reason": reason])
     }
 }
 
@@ -5970,6 +5572,26 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
 extension Notification.Name {
     static let cameraPreviewReady = Notification.Name("cameraPreviewReady")
     static let publishFailed = Notification.Name("publishFailed")
+}
+
+// MARK: - ⭐ P2PManagerDataSource（向独立 P2P 类提供工厂/视频轨/编码参数）
+extension WebRTCManager: P2PManagerDataSource {
+    var p2pFactory: RTCPeerConnectionFactory { factory }
+    var p2pLocalVideoTrack: RTCVideoTrack? { localVideoTrack }
+    func p2pBitrateRangeKbps() -> (min: Int, max: Int) {
+        let baseMin = effectiveMinKbpsForCurrentProfile()
+        let baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
+        let minK = max(100, Int(Double(baseMin) * emergencyBitrateScale))
+        let maxK = max(minK, Int(Double(baseMax) * emergencyBitrateScale))
+        return (minK, maxK)
+    }
+    func p2pTargetFps() -> Int {
+        let target = frameThrottler?.targetSendFps ?? targetOutputFPS
+        return min(getMaxPushFpsForCurrentProfile(), target)
+    }
+    func p2pScaleDown() -> Double {
+        return currentLadder[currentProfile]?.scaleDown ?? 1.0
+    }
 }
 
 

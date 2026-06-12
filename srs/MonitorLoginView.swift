@@ -487,6 +487,17 @@ struct MonitorLoginView: View {
                         UserDefaults.standard.set(streamPushIp, forKey: "stream_push_ip")
                         print("✅ 保存推流IP: \(streamPushIp)")
                     }
+
+                    // ⭐ 连接方式与 P2P 配置（缺省 p2p；srs/p2p 全局二选一）
+                    let connectMode = (loginResponse.connectMode ?? "p2p").lowercased()
+                    UserDefaults.standard.set(connectMode, forKey: "connect_mode")
+                    UserDefaults.standard.set(loginResponse.forceRelay ?? false, forKey: "forceRelay")
+                    UserDefaults.standard.set(loginResponse.maxP2PViewers ?? 4, forKey: "maxP2PViewers")
+                    if let iceServers = loginResponse.iceServers,
+                       let iceData = try? JSONEncoder().encode(iceServers) {
+                        UserDefaults.standard.set(iceData, forKey: "iceServers")
+                    }
+                    print("✅ 连接方式: \(connectMode), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
                     
                     if let trialInfo = loginResponse.trialInfo {
                         saveTrialInfo(trialInfo)

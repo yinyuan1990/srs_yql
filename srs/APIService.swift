@@ -108,6 +108,36 @@ struct TrialInfo: Codable {
     let message: String?              // 提示信息
 }
 
+// MARK: - P2P ICE 服务器配置模型（登录接口下发）
+struct IceServer: Codable {
+    let urls: [String]
+    let username: String?
+    let credential: String?
+    let region: String?
+
+    init(urls: [String], username: String? = nil, credential: String? = nil, region: String? = nil) {
+        self.urls = urls
+        self.username = username
+        self.credential = credential
+        self.region = region
+    }
+
+    enum CodingKeys: String, CodingKey { case urls, username, credential, region }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let arr = try? c.decode([String].self, forKey: .urls) {
+            urls = arr
+        } else if let single = try? c.decode(String.self, forKey: .urls) {
+            urls = [single]
+        } else {
+            urls = []
+        }
+        username = try? c.decode(String.self, forKey: .username)
+        credential = try? c.decode(String.self, forKey: .credential)
+        region = try? c.decode(String.self, forKey: .region)
+    }
+}
+
 // 登录响应结构
 struct LoginResponse: Codable {
     let token: String
@@ -124,6 +154,11 @@ struct LoginResponse: Codable {
     let trialInfo: TrialInfo?     // 🔥 新增：试用/激活信息
     let boundControlCount: Int?   // 🔥 绑定的控制端数量，0时需要跳转扫码绑定页面
     let scan: Int?                // 🔥 是否需要扫码绑定：1=需要跳转扫码，0=不需要
+    // ⭐ 连接方式与 P2P 配置（全局二选一，srs/p2p 不混用；缺省 p2p）
+    let connectMode: String?      // "srs" | "p2p"
+    let iceServers: [IceServer]?  // P2P 模式 STUN/TURN 列表
+    let forceRelay: Bool?         // 强制 TURN 中继
+    let maxP2PViewers: Int?       // 最大 P2P 观看端数
 }
 
 

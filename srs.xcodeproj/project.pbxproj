@@ -24,6 +24,9 @@
 		2C25E1242E5FBB5B00EA9245 /* ConfigManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */; };
 		2C25E1262E5FBBEB00EA9245 /* APIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E1252E5FBBEB00EA9245 /* APIService.swift */; };
 		2C25E12B2E5FCF6000EA9245 /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */; };
+		2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000A001 /* P2PManager.swift */; };
+		2CBBBBBB2E0000000000B002 /* SRSManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBBBBBB2E0000000000B001 /* SRSManager.swift */; };
+		2CP2P00012E5FCF6000EA9245 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CP2P00002E5FCF6000EA9245 /* P2PManager.swift */; };
 		2C404C5B2E6A27DD0015CF69 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C404C5A2E6A27DD0015CF69 /* ProfileView.swift */; };
 		2C4151A12F13AB7600272C01 /* user_agreement.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A02F13AB7600272C01 /* user_agreement.html */; };
 		2C4151A32F13AB8400272C01 /* privacy_policy.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A22F13AB8400272C01 /* privacy_policy.html */; };
@@ -73,6 +76,8 @@
 		2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigManager.swift; sourceTree = "<group>"; };
 		2C25E1252E5FBBEB00EA9245 /* APIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIService.swift; sourceTree = "<group>"; };
 		2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
+		2CAAAAAA2E0000000000A001 /* P2PManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PManager.swift; sourceTree = "<group>"; };
+		2CBBBBBB2E0000000000B001 /* SRSManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRSManager.swift; sourceTree = "<group>"; };
 		2C404C5A2E6A27DD0015CF69 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
 		2C4151A02F13AB7600272C01 /* user_agreement.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = user_agreement.html; sourceTree = "<group>"; };
 		2C4151A22F13AB8400272C01 /* privacy_policy.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = privacy_policy.html; sourceTree = "<group>"; };
@@ -143,6 +148,8 @@
 				2C4E72DC2FC5501800BC4D30 /* NV12LUTFilter.metal */,
 				2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */,
 				2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */,
+				2CAAAAAA2E0000000000A001 /* P2PManager.swift */,
+				2CBBBBBB2E0000000000B001 /* SRSManager.swift */,
 				2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */,
 				2C5B00512E90DC5100755FBF /* WebRTCManager.swift */,
 				2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */,
@@ -340,6 +347,8 @@
 				2C0BB2D92EF2CFA700332D6F /* ChangePasswordView.swift in Sources */,
 				2CC405772E63B22400E31EF8 /* AppState.swift in Sources */,
 				2C25E12B2E5FCF6000EA9245 /* WebSocketManager.swift in Sources */,
+				2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */,
+				2CBBBBBB2E0000000000B002 /* SRSManager.swift in Sources */,
 				2CFE49342E5E2FCF00FCC88C /* HomeView.swift in Sources */,
 				2CB8FA502E73D38100F90666 /* WebView.swift in Sources */,
 				2C25E1262E5FBBEB00EA9245 /* APIService.swift in Sources */,
@@ -475,7 +484,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 16;
 				DEVELOPMENT_ASSET_PATHS = "\"srs/Preview Content\"";
 				DEVELOPMENT_TEAM = 89V3HHXY9F;
 				ENABLE_PREVIEWS = YES;
@@ -490,7 +499,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.2;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ai.yql;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -511,7 +520,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 16;
 				DEVELOPMENT_ASSET_PATHS = "\"srs/Preview Content\"";
 				DEVELOPMENT_TEAM = 89V3HHXY9F;
 				ENABLE_PREVIEWS = YES;
@@ -526,7 +535,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.2;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ai.yql;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

@@ -132,6 +132,9 @@ class WebSocketManager: ObservableObject {
         let ts = isoFormatter.string(from: Date())
         let streamKey = WebSocketManager.publishingStreamKey
         let streamPushIp = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""  // 🔥 推流IP
+        // ⭐ 连接方式 + P2P 观看端数（供 PC 决定走 P2P 直连还是 SRS 拉流）
+        let connectMode = UserDefaults.standard.string(forKey: "connect_mode") ?? "p2p"
+        let p2pViewerCount = P2PManager.currentViewerCount
         
         // 🔥 从 UserDefaults 读取试用/激活信息
         let trialRequired = UserDefaults.standard.bool(forKey: "trial_required")
@@ -155,6 +158,10 @@ class WebSocketManager: ObservableObject {
             "publishStatus": publish,
             "streamKey": streamKey,
             "streamPushIp": streamPushIp,  // 🔥 推流IP地址
+            // ⭐ 连接方式 + P2P 状态
+            "connectstype": connectMode == "p2p" ? 1 : 0,
+            "connectMode": connectMode,
+            "p2pViewerCount": p2pViewerCount,
             "kbps": kbps,
             "fps": fps,
             "sendFps": sendFps,  // WebRTC实际推送FPS
@@ -330,6 +337,9 @@ class WebSocketManager: ObservableObject {
         guard let deviceId = deviceId else { return }
         let destination = "/topic/device/\(deviceId)/config"
         swiftStomp?.subscribe(to: destination)
+        // ⭐ P2P：订阅 WebRTC 信令频道
+        swiftStomp?.subscribe(to: "/topic/device/\(deviceId)/webrtc")
+        print("✅ [P2P] 已订阅 WebRTC 信令频道")
         //print("✅ 已订阅频道: \(destination)")
     }
     
@@ -359,6 +369,46 @@ class WebSocketManager: ObservableObject {
         //print("💓 [心跳] 发送: deviceId=\(deviceId ?? "unknown"), timestamp=\(ts)")
     }
     
+    // MARK: - ⭐ P2P WebRTC 信令发送（统一发到 /app/webrtc/signal）
+    func sendWebRTCSignalingSDP(sdpType: String, sdp: String, toDevice: String) {
+        guard let deviceId = deviceId else { return }
+        sendWebRTCSignalingPayload([
+            "type": "WEBRTC_SDP", "sdpType": sdpType, "sdp": sdp,
+            "fromDevice": deviceId, "toDevice": toDevice
+        ])
+    }
+
+    func sendWebRTCSignalingICE(candidate: String, sdpMid: String, sdpMLineIndex: Int32, toDevice: String) {
+        guard let deviceId = deviceId else { return }
+        sendWebRTCSignalingPayload([
+            "type": "WEBRTC_ICE", "candidate": candidate, "sdpMid": sdpMid,
+            "sdpMLineIndex": sdpMLineIndex, "fromDevice": deviceId, "toDevice": toDevice
+        ])
+    }
+
+    func sendWebRTCSignalingHangup(reason: String, toDevice: String) {
+        guard let deviceId = deviceId else { return }
+        sendWebRTCSignalingPayload([
+            "type": "WEBRTC_HANGUP", "reason": reason,
+            "fromDevice": deviceId, "toDevice": toDevice
+        ])
+    }
+
+    func sendWebRTCSignaling(type: String, reason: String = "", toDevice: String) {
+        guard let deviceId = deviceId else { return }
+        var payload: [String: Any] = ["type": type, "fromDevice": deviceId, "toDevice": toDevice]
+        if !reason.isEmpty { payload["reason"] = reason }
+        sendWebRTCSignalingPayload(payload)
+    }
+
+    private func sendWebRTCSignalingPayload(_ payload: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let body = String(data: data, encoding: .utf8) {
+            swiftStomp?.send(body: body, to: "/app/webrtc/signal")
+            print("📤 [P2P] 信令已发送: type=\(payload["type"] ?? ""), to=\(payload["toDevice"] ?? "")")
+        }
+    }
+
     // MARK: - （保留）一次性外部重连计时器
     private func stopReconnectTimer() {
         reconnectTimer?.invalidate()
@@ -446,6 +496,9 @@ extension WebSocketManager: SwiftStompDelegate {
         
         // —— 新增：本轮重连成功，清除重连标记 —— //
         isReconnectingOnce = false
+
+        // ⭐ P2P：WebSocket 重连成功后通知 P2PManager 做 ICE Restart
+        NotificationCenter.default.post(name: .webSocketDidReconnect, object: nil)
     }
     
     func onDisconnect(swiftStomp: SwiftStomp, disconnectType: StompDisconnectType) {
@@ -460,6 +513,24 @@ extension WebSocketManager: SwiftStompDelegate {
     
     
     func onMessageReceived(swiftStomp: SwiftStomp, message: Any?, messageId: String, destination: String, headers: [String : String]) {
+        // ⭐ P2P：WebRTC 信令频道，解析后整包转给 P2PManager
+        if destination.contains("/topic/device/") && destination.contains("/webrtc") {
+            var dict: [String: Any]?
+            if let text = message as? String, let data = text.data(using: .utf8) {
+                dict = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            } else if let d = message as? [String: Any] {
+                dict = d
+            } else if let data = message as? Data {
+                dict = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            }
+            if let dict = dict {
+                print("📥 [P2P] 收到信令: type=\(dict["type"] as? String ?? ""), from=\(dict["fromDevice"] as? String ?? "")")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .webrtcSignalingReceived, object: nil, userInfo: dict)
+                }
+            }
+            return
+        }
         if destination.contains("/topic/device/") && destination.contains("/config") {
             let receiveTime = Date()
             let threadInfo = Thread.isMainThread ? "主线程" : "后台线程"
