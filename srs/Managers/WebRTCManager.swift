@@ -1271,6 +1271,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             let fps = (notification.userInfo?["fps"] as? Int) ?? 0
             print("📺 [VIEWER] PC 已连接，接收 \(fps)fps")
         }
+        // ⭐ 维护观看者注册表（用于 P2P/SRS 自动协商计数）
+        if let pcId = notification.userInfo?["fromDevice"] as? String, !pcId.isEmpty {
+            let net = (notification.userInfo?["networkType"] as? String) ?? "unknown"
+            viewerRegistry[pcId] = (Date(), net)
+        }
     }
 
     @objc private func onAntiFlickerCommand(_ notification: Notification) {
@@ -2696,12 +2701,34 @@ final class WebRTCManager: NSObject, ObservableObject {
     var capturer: CustomAVCaptureVideoCapturer!
     private var videoSender: RTCRtpSender?
 
-    // ⭐ 两种连接方式各自独立管理类，按 connect_mode 二选一（互斥不混用）
+    // ⭐ 两种连接方式各自独立管理类，自动协商：能 P2P 就 P2P（省流量），否则 SRS（互斥不混用）
     let p2pManager = P2PManager()
     let srsManager = SRSManager()
-    /// 当前连接方式："srs" | "p2p"（默认 p2p）
-    var connectMode: String { (UserDefaults.standard.string(forKey: "connect_mode") ?? "p2p").lowercased() }
-    var isP2PMode: Bool { connectMode == "p2p" }
+
+    /// 后端开关："srs"=强制 SRS；其它(p2p/auto)=自动协商
+    private var backendConnectMode: String { (UserDefaults.standard.string(forKey: "connect_mode") ?? "auto").lowercased() }
+    private var backendForceSRS: Bool { backendConnectMode == "srs" }
+
+    /// 当前生效连接方式（0=SRS,1=P2P），供 WebSocketManager 心跳上报；PC 跟随此值
+    static var effectiveConnectstype: Int = 0
+    /// 当前会话实际模式
+    enum ConnMode { case none, p2p, srs }
+    private var currentConnMode: ConnMode = .none
+
+    /// 观看者注册表：pcDeviceId → 最近心跳时间/网络类型（PC 每 ~1.5s 发 VIEWER_HEARTBEAT）
+    private var viewerRegistry: [String: (lastSeen: Date, net: String)] = [:]
+    /// SRS→P2P 升级防抖：需连续满足条件的起始时间
+    private var p2pUpgradeEligibleSince: Date?
+    private let p2pUpgradeHoldSec: TimeInterval = 8.0
+    private var modeEvalTimer: Timer?
+    /// 本次会话 P2P 失败过（ICE 打不通）→ 锁定 SRS，直到重新推流
+    private var p2pBlockedThisSession = false
+
+    /// 当前观看者数（注册表 + P2P 活动会话取大）
+    private var currentViewerCount: Int {
+        let regCount = viewerRegistry.count
+        return max(regCount, p2pManager.viewerCount)
+    }
     
     // 记录当前采集FPS
     private var currentCaptureFPS: Int = 60 {
@@ -2975,6 +3002,11 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self.viewerConnected = false
                 print("📺 [VIEWER] 心跳超时，PC 未连接")
             }
+            // ⭐ 清理过期观看者（>4s 无心跳）
+            let now = Date()
+            let before = self.viewerRegistry.count
+            self.viewerRegistry = self.viewerRegistry.filter { now.timeIntervalSince($0.value.lastSeen) <= 4.0 }
+            if self.viewerRegistry.count != before { self.evaluateConnectMode(reason: "viewer-change") }
         }
 
         // 测试模式监听（PC端 LUT 开关）
@@ -3004,6 +3036,16 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ 两种连接管理类（P2P / SRS）的数据源
         p2pManager.dataSource = self
         srsManager.dataSource = self
+        // iOS 本机网络变化 → 重新评估 P2P/SRS（蜂窝下整体切 SRS）
+        p2pManager.onLocalNetworkChange = { [weak self] in
+            self?.evaluateConnectMode(reason: "ios-network-change")
+        }
+        // P2P 打不通 → 本次会话锁 SRS 并切换
+        p2pManager.onViewerPermanentlyFailed = { [weak self] _ in
+            guard let self = self else { return }
+            self.p2pBlockedThisSession = true
+            self.evaluateConnectMode(reason: "p2p-ice-failed")
+        }
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
@@ -3260,11 +3302,18 @@ final class WebRTCManager: NSObject, ObservableObject {
             return
         }
 
-        // ⭐ 连接方式 == p2p：走 P2P 直连，不启动 SRS 推流（二选一不混用）
-        if isP2PMode {
+        // ⭐ 自动协商：决定本次走 P2P 还是 SRS（能 P2P 就 P2P 省流量，否则 SRS）
+        let mode = decideMode()
+        if mode == .p2p {
+            currentConnMode = .p2p
+            WebRTCManager.effectiveConnectstype = 1
             startP2PPublish(initialProfile: initialProfile)
+            startModeEvalTimer()
             return
         }
+        currentConnMode = .srs
+        WebRTCManager.effectiveConnectstype = 0
+        startModeEvalTimer()
         
         // 🔥 检查摄像头预览是否准备好（只有在预览模式下才需要检查）
         // 如果 capturer 和 localVideoTrack 都不存在，后面会自动初始化（无预览模式）
@@ -3561,7 +3610,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebSocketManager.rtt = 0
         isPublishing = false
         pc?.close(); pc = nil
-        // ⭐ 停止对应连接管理类
+        // ⭐ 停止对应连接管理类 + 协商定时器
+        modeEvalTimer?.invalidate(); modeEvalTimer = nil
+        currentConnMode = .none
+        p2pUpgradeEligibleSince = nil
+        p2pBlockedThisSession = false
+        viewerRegistry.removeAll()
         if p2pManager.isActive { p2pManager.stop() }
         if srsManager.isActive { srsManager.stop() }
     }
@@ -3585,6 +3639,67 @@ final class WebRTCManager: NSObject, ObservableObject {
         p2pManager.start()
         startStats()
         print("✅ [P2P] 就绪，等待 PC 发起 WEBRTC_REQUEST")
+    }
+
+    // MARK: - ⭐ P2P/SRS 自动协商决策与切换
+
+    /// 决策：能 P2P 就 P2P（省流量），否则 SRS
+    /// 规则：后端强制SRS / iOS非WiFi / 观看者≥2 → SRS；否则(单观看+iOS WiFi)→ P2P
+    private func decideMode() -> ConnMode {
+        if backendForceSRS { return .srs }
+        if p2pBlockedThisSession { return .srs }           // P2P 打不通 → 本次会话锁 SRS
+        if !WebSocketManager.shared.isOnWiFi { return .srs }
+        if currentViewerCount >= 2 { return .srs }
+        return .p2p
+    }
+
+    private func startModeEvalTimer() {
+        modeEvalTimer?.invalidate()
+        modeEvalTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.evaluateConnectMode(reason: "tick")
+        }
+    }
+
+    /// 周期/事件触发：当目标模式和当前模式不一致时切换（P2P→SRS立即，SRS→P2P需稳定8s防抖）
+    func evaluateConnectMode(reason: String) {
+        guard isPublishing else { return }
+        let desired = decideMode()
+        if desired == currentConnMode { p2pUpgradeEligibleSince = nil; return }
+
+        if currentConnMode == .p2p && desired == .srs {
+            // 降级：立即切（保手机上行）
+            print("🔻 [协商] P2P→SRS (\(reason)) viewer=\(currentViewerCount) wifi=\(WebSocketManager.shared.isOnWiFi)")
+            switchToSRS()
+        } else if currentConnMode == .srs && desired == .p2p {
+            // 升级：需连续满足 8s 防抖
+            if p2pUpgradeEligibleSince == nil { p2pUpgradeEligibleSince = Date() }
+            if let since = p2pUpgradeEligibleSince, Date().timeIntervalSince(since) >= p2pUpgradeHoldSec {
+                print("🔺 [协商] SRS→P2P (\(reason)) 稳定\(Int(p2pUpgradeHoldSec))s，升级直连")
+                p2pUpgradeEligibleSince = nil
+                switchToP2P()
+            }
+        }
+    }
+
+    private func switchToSRS() {
+        currentConnMode = .srs
+        WebRTCManager.effectiveConnectstype = 0
+        if p2pManager.isActive { p2pManager.stop() }   // 通知所有 PC HANGUP
+        // 重新生成 streamKey 并走 SRS（PC 端读到 connectstype=0 会切 SRS 拉流）
+        let timestamp = Int(Date().timeIntervalSince1970)
+        streamKey = "\(baseStreamKey)_\(timestamp)"
+        WebSocketManager.publishingStreamKey = streamKey
+        srsManager.dataSource = self
+        srsManager.start()
+    }
+
+    private func switchToP2P() {
+        currentConnMode = .p2p
+        WebRTCManager.effectiveConnectstype = 1
+        if srsManager.isActive { srsManager.stop() }
+        pc = nil; videoSender = nil
+        p2pManager.dataSource = self
+        p2pManager.start()
     }
     
     // MARK: - 摄像头休眠/唤醒（节省电量）

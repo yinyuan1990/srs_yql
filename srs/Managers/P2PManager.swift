@@ -39,6 +39,10 @@ final class P2PManager: NSObject {
     static var currentViewerCount: Int = 0
 
     weak var dataSource: P2PManagerDataSource?
+    /// iOS 本机网络类型变化时回调（用于触发上层 P2P/SRS 重新评估）
+    var onLocalNetworkChange: (() -> Void)?
+    /// 某 PC 的 P2P 彻底失败（ICE 重试耗尽）→ 上层应回落 SRS
+    var onViewerPermanentlyFailed: ((String) -> Void)?
 
     private(set) var isActive = false
     /// 是否就绪接收观看请求（采集/视频轨已就绪）
@@ -129,7 +133,11 @@ final class P2PManager: NSObject {
                 self.isOnCellular = newCellular
                 print("📶 [P2P] 网络类型变化: \(newCellular ? "蜂窝" : "WiFi/有线")")
                 DispatchQueue.main.async { [weak self] in
-                    self?.restartAllIceForNetworkSwitch()
+                    guard let self = self else { return }
+                    // 先让上层重新评估（蜂窝→可能整体切 SRS）
+                    self.onLocalNetworkChange?()
+                    // 仍在 P2P 的会话做 ICE Restart
+                    self.restartAllIceForNetworkSwitch()
                 }
             }
         }
@@ -373,10 +381,11 @@ final class P2PManager: NSObject {
                 print("🔄 [P2P] ICE Restart Offer 已发送 \(pcId) (\(cur + 1)/\(self.maxICERetries))")
             }
         } else {
-            print("❌ [P2P] \(pcId) ICE 重试耗尽，断开")
+            print("❌ [P2P] \(pcId) ICE 重试耗尽，断开 → 回落 SRS")
             iceRetryCount.removeValue(forKey: pcId)
             removeViewerSession(pcId, notifyPC: false)
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP", reason: "ice_failed", toDevice: pcId)
+            onViewerPermanentlyFailed?(pcId)
         }
     }
 

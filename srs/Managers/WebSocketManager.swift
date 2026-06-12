@@ -22,6 +22,8 @@ class WebSocketManager: ObservableObject {
     private var isPublishingCache: Int = 0
     private var networkMonitor: NWPathMonitor?
     private var currentNetworkType: String = "Unknown"
+    /// iOS 本机当前是否 WiFi（供 P2P/SRS 自动协商判断）
+    var isOnWiFi: Bool { currentNetworkType == "WiFi" }
     
     // 单例
     static let shared = WebSocketManager()
@@ -132,8 +134,9 @@ class WebSocketManager: ObservableObject {
         let ts = isoFormatter.string(from: Date())
         let streamKey = WebSocketManager.publishingStreamKey
         let streamPushIp = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""  // 🔥 推流IP
-        // ⭐ 连接方式 + P2P 观看端数（供 PC 决定走 P2P 直连还是 SRS 拉流）
-        let connectMode = UserDefaults.standard.string(forKey: "connect_mode") ?? "p2p"
+        // ⭐ 自动协商：连接方式由 WebRTCManager 实时决策（0=SRS,1=P2P），供 PC 跟随
+        let connectstype = WebRTCManager.effectiveConnectstype
+        let connectMode = connectstype == 1 ? "p2p" : "srs"
         let p2pViewerCount = P2PManager.currentViewerCount
         
         // 🔥 从 UserDefaults 读取试用/激活信息
@@ -158,8 +161,8 @@ class WebSocketManager: ObservableObject {
             "publishStatus": publish,
             "streamKey": streamKey,
             "streamPushIp": streamPushIp,  // 🔥 推流IP地址
-            // ⭐ 连接方式 + P2P 状态
-            "connectstype": connectMode == "p2p" ? 1 : 0,
+            // ⭐ 自动协商：连接方式 + P2P 状态，PC 跟随 connectstype 切换
+            "connectstype": connectstype,
             "connectMode": connectMode,
             "p2pViewerCount": p2pViewerCount,
             "kbps": kbps,
@@ -581,13 +584,19 @@ extension WebSocketManager: SwiftStompDelegate {
                 handleSetFpsCommand(messageDict: msgDict)
             }
 
-            // PC 拉流心跳：收到就标记 PC 已连接
+            // PC 拉流心跳：收到就标记 PC 已连接（带 fromDevice + networkType 供观看者注册表）
             if msgType == "VIEWER_HEARTBEAT" {
+                let fromDevice = (msgDict?["fromDevice"] as? String) ?? (msgDict?["pcDeviceId"] as? String) ?? ""
+                let viewerNet = (msgDict?["networkType"] as? String) ?? "unknown"
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(
                         name: NSNotification.Name("ViewerHeartbeat"),
                         object: nil,
-                        userInfo: ["fps": msgDict?["fps"] as? Int ?? 0]
+                        userInfo: [
+                            "fps": msgDict?["fps"] as? Int ?? 0,
+                            "fromDevice": fromDevice,
+                            "networkType": viewerNet
+                        ]
                     )
                 }
             }
