@@ -124,6 +124,13 @@ final class VideoFilterPipeline: ObservableObject {
         didSet { saveDefault(.highlightLift, highlightLift); if oldValue != highlightLift { logChange("highlightLift", highlightLift) } }
     }
 
+    /// ⭐ 色度: 黄色拉白（保留红色）, 0.0~1.0
+    /// 0 = 不动, 1 = 黄色色相完全中性化（拉成白/灰）。仅作用于黄色色相一段，红色不受影响。
+    /// 与"饱和度"是不同维度：饱和度整体缩放 UV，色度只定向去掉黄色。
+    @Published var chroma: Float = VideoFilterPipeline.loadDefault(.chroma, fallback: 0.0) {
+        didSet { saveDefault(.chroma, chroma); if oldValue != chroma { logChange("chroma", chroma) } }
+    }
+
     // ===== 编码前降噪 + 锐化（对标看家宝 TAA+hqdn3d+sharpen 链路）=====
     /// 降噪强度: 0=关闭, 0.02=轻度(推荐), 0.05=强力. 消除传感器噪点，节省码率
     @Published var noiseLevel: Float = VideoFilterPipeline.loadDefault(.noiseLevel, fallback: 0.0) {
@@ -157,6 +164,7 @@ final class VideoFilterPipeline: ObservableObject {
         case pixelLevel    = "videoFilter.pixelLevel"
         case noiseLevel    = "videoFilter.noiseLevel"
         case sharpenAmount = "videoFilter.sharpenAmount"
+        case chroma        = "videoFilter.chroma"
     }
 
     // 滤镜/硬件/LUT 参数不持久化到本地：仅用内存默认值，运行期靠登录下发 + STOMP 覆盖
@@ -175,6 +183,7 @@ final class VideoFilterPipeline: ObservableObject {
                   sharpness: Float?, redBoost: Float? = nil,
                   blackPoint: Float? = nil, redGlow: Float? = nil, highlightLift: Float? = nil,
                   gamma: Float? = nil, exposure: Float? = nil, pixelLevel: Float? = nil,
+                  chroma: Float? = nil,
                   enabled: Bool? = nil, source: String = "remote") {
         if let v = brightness { self.brightness = v }
         if let v = contrast   { self.contrast   = v }
@@ -187,8 +196,9 @@ final class VideoFilterPipeline: ObservableObject {
         if let v = gamma      { self.gamma      = v }
         if let v = exposure   { self.exposure   = v }
         if let v = pixelLevel { self.pixelLevel = max(-2.0, min(8.0, v)) }
+        if let v = chroma     { self.chroma     = max(0.0, min(1.0, v)) }
         if let v = enabled    { self.enabled    = v }
-        print("📷 [Filter] 批量应用 (\(source)): enabled=\(self.enabled) passThrough=\(self.isPassThrough) | exposure=\(self.exposure) pixelLevel=\(self.pixelLevel) blackPoint=\(self.blackPoint) brightness=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) saturation=\(self.saturation) redGlow=\(self.redGlow) highlightLift=\(self.highlightLift) noiseLevel=\(self.noiseLevel) sharpenAmount=\(self.sharpenAmount) sharpness=\(self.sharpness)")
+        print("📷 [Filter] 批量应用 (\(source)): enabled=\(self.enabled) passThrough=\(self.isPassThrough) | exposure=\(self.exposure) pixelLevel=\(self.pixelLevel) blackPoint=\(self.blackPoint) brightness=\(self.brightness) gamma=\(self.gamma) contrast=\(self.contrast) saturation=\(self.saturation) redGlow=\(self.redGlow) highlightLift=\(self.highlightLift) chroma=\(self.chroma) noiseLevel=\(self.noiseLevel) sharpenAmount=\(self.sharpenAmount) sharpness=\(self.sharpness)")
     }
 
     // ===== Metal CIColorKernel: 一次 dispatch 完成所有色彩运算 =====
@@ -202,7 +212,8 @@ final class VideoFilterPipeline: ObservableObject {
                             float contrast,
                             float saturation,
                             float redGlow,
-                            float highlightLift) {
+                            float highlightLift,
+                            float chroma) {
         vec3 rgb = s.rgb;
 
         // 0. 曝光: rgb × 2^EV
@@ -235,6 +246,13 @@ final class VideoFilterPipeline: ObservableObject {
         // 4. 饱和度
         float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
         rgb = mix(vec3(luma), rgb, saturation);
+
+        // 4.5 色度: 黄色拉白 (保留红色)
+        //     黄色 = R,G 都高且 B 低 → yellowMask = clamp(min(R,G)-B); 红色 G 低 → mask 自动≈0.
+        //     把 B 抬到 min(R,G) 高度即中性化为白/灰, 红色不受影响.
+        float minRG = min(rgb.r, rgb.g);
+        float yellowMask = clamp(minRG - rgb.b, 0.0, 1.0);
+        rgb.b = rgb.b + chroma * yellowMask * (minRG - rgb.b);
 
         // 5. 对比度
         rgb = (rgb - 0.5) * contrast + 0.5;
@@ -285,7 +303,7 @@ final class VideoFilterPipeline: ObservableObject {
         if cardEnhanceKernel == nil { return true }
         return exposure == 0 && pixelLevel == 0 && blackPoint == 0 && brightness == 0 && gamma == 1.0
             && contrast == 1.0 && saturation == 1.0 && redGlow == 0 && highlightLift == 0
-            && noiseLevel == 0 && sharpenAmount == 0
+            && chroma == 0 && noiseLevel == 0 && sharpenAmount == 0
     }
 
     /// 处理一帧, 返回新的 CVPixelBuffer (BGRA) 或 nil (失败/直通时调用方使用原帧)
@@ -330,7 +348,7 @@ final class VideoFilterPipeline: ObservableObject {
         // Step 2: 色彩增强 (CIColorKernel 单 pass)
         guard let colorResult = kernel.apply(
             extent: ciImage.extent,
-            arguments: [ciImage, exposure, pixelLevel, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift]
+            arguments: [ciImage, exposure, pixelLevel, blackPoint, brightness, gamma, contrast, saturation, redGlow, highlightLift, chroma]
         ) else { return nil }
 
         // Step 3: 锐化（2米远牌面天然偏软，必须锐化）
@@ -345,6 +363,13 @@ final class VideoFilterPipeline: ObservableObject {
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outputPB)
         guard let out = outputPB else { return nil }
         ciContext.render(finalImage, to: out)
+        // ⭐ 补色彩元数据（BT.709 满范围），编码 BGRA→YUV 时矩阵一致，避免偏色
+        CVBufferSetAttachment(out, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(out, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(out, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
         return out
     }
 }
@@ -991,7 +1016,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             malvshezhingLog("[码率] 应用 档位=\(currentProfile) 清晰度=\(pct)% → \(minK)-\(maxK) kbps")
         }
         // ⭐ P2P：同步码率到所有直连会话
-        if isP2PMode { p2pManager.applyEncodingToAllSessions() }
+        if currentConnMode == .p2p { p2pManager.applyEncodingToAllSessions() }
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -1901,7 +1926,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         // ⭐ v3 滤镜直推 — STOMP 一跳到位, PC sendConfigUpdate("brightness", {"brightness": v}) 直接到这里
         case "brightness", "contrast", "saturation", "sharpness", "redBoost",
-             "blackPoint", "redGlow", "highlightLift", "gamma", "exposure":
+             "blackPoint", "redGlow", "highlightLift", "gamma", "exposure", "chroma":
             if cfg.filterEnabled != nil {
                 pipelineDefaultsApplied = true
             }
@@ -1916,6 +1941,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                 highlightLift: cfg.highlightLift,
                 gamma:         cfg.gamma,
                 exposure:      cfg.exposure,
+                chroma:        cfg.chroma,
                 enabled:       cfg.filterEnabled,
                 source:        "stomp:\(cfg.ptype)"
             )
@@ -2668,13 +2694,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             let enc = RTCDefaultVideoEncoderFactory()
             let dec = RTCDefaultVideoDecoderFactory()
             
-            // 🔥🔥 超低延迟优化：使用 Constrained Baseline Profile (42e01f)
-            // 方案要求：硬编码+低延迟Profile，减少编码延迟
+            // 🔥🔥 画质优化：改用 High Profile（提升远处细节/红牌清晰度）
             // profile-level-id 说明：
-            // - 42e01f: Constrained Baseline Level 3.1 (最低延迟，硬件支持最好)
-            // - 4d401f: Main Profile Level 3.1 (中等延迟，B帧导致延迟增加)
-            // - 640c34: High Profile Level 5.2 (高画质但延迟较高)
-            // 超低延迟选择 Constrained Baseline：无B帧，编码延迟最低
+            // - 42e01f: Constrained Baseline Level 3.1（最弱，无 8x8 变换/CABAC，细节糊）
+            // - 640c34: High Profile Level 5.2（8x8变换+CABAC，同码率细节明显更好；无 B 帧仍低延迟）
+            // High Profile 不强制 B 帧（VideoToolbox 推流默认不插 B 帧），延迟基本不变，画质显著提升。
             let codecs = RTCDefaultVideoEncoderFactory.supportedCodecs()
             if let h264 = codecs.first(where: {
                         $0.name.caseInsensitiveCompare(kRTCH264CodecName) == .orderedSame ||
@@ -2683,13 +2707,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 let compatibleH264 = RTCVideoCodecInfo(
                                 name: h264.name,
                                 parameters: [
-                                   "profile-level-id": "42e01f",  // Constrained Baseline Level 3.1 (最低延迟)
+                                   "profile-level-id": "640c34",  // High Profile Level 5.2（覆盖 1080p60，不限级）
                                    "level-asymmetry-allowed": "1",
                                    "packetization-mode": "1"
                                ]
                 )
                 enc.preferredCodec = compatibleH264
-                print("🎯 超低延迟: H.264 Constrained Baseline (42e01f, 无B帧)")
+                print("🎯 画质优先: H.264 High Profile (640c34, 8x8+CABAC, 无B帧)")
             }
             
             return RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
@@ -3621,12 +3645,17 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
-    @MainActor
     func startP2PPublish(initialProfile: LadderProfile? = nil) {
         print("🎬 [P2P] 启动 P2P 直连推流")
-        // 复用预览采集管线，确保 localVideoTrack 就绪
+        // 预览采集管线应已就绪（进主页/唤醒时已 startPreviewIfNeeded）；未就绪则回主线程补起后重试
         if localVideoTrack == nil || capturer == nil {
-            startPreviewIfNeeded(initialProfile: initialProfile)
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.startPreviewIfNeeded(initialProfile: initialProfile)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self.startP2PPublish(initialProfile: initialProfile)
+            }
+            return
         }
         // 从服务器配置应用 FPS / 档位（与 SRS 路径一致，仅不建立 SRS 连接）
         if let serverCfg = ConfigManager.shared.getCurrentConfig(), let serverFps = serverCfg.fps {
@@ -3643,9 +3672,14 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - ⭐ P2P/SRS 自动协商决策与切换
 
+    /// ⭐ 强制 SRS 总开关：P2P 当前不够稳定，全程走 SRS 兜底。
+    /// 置为 false 即可恢复「P2P 优先 + 自动协商」逻辑。
+    private static let forceSRSOnly = true
+
     /// 决策：能 P2P 就 P2P（省流量），否则 SRS
-    /// 规则：后端强制SRS / iOS非WiFi / 观看者≥2 → SRS；否则(单观看+iOS WiFi)→ P2P
+    /// 规则：强制SRS / 后端强制SRS / iOS非WiFi / 观看者≥2 → SRS；否则(单观看+iOS WiFi)→ P2P
     private func decideMode() -> ConnMode {
+        if WebRTCManager.forceSRSOnly { return .srs }      // ⭐ 客户端硬锁：彻底不走 P2P
         if backendForceSRS { return .srs }
         if p2pBlockedThisSession { return .srs }           // P2P 打不通 → 本次会话锁 SRS
         if !WebSocketManager.shared.isOnWiFi { return .srs }

@@ -11,6 +11,7 @@ struct NV12Params {
     float sharpen;
     float redGlow;
     float pixelLevel;
+    float chroma;       // 色度：黄色拉白强度 0=关 1=黄色完全中性化（保留红色）
 };
 
 // Y 平面：亮度 + 锐化（全分辨率）
@@ -73,8 +74,25 @@ kernel void processUV(
     if (gid.x >= w || gid.y >= h) return;
 
     float2 uv = uvIn.read(gid).rg;
-    uv = 0.5 + (uv - 0.5) * p.saturation;
-    uv = clamp(uv, 0.0, 1.0);
+
+    // 1) 全局饱和度：整体缩放色度向量（U=Cb, V=Cr 绕中性点 0.5）
+    float2 c = (uv - 0.5) * p.saturation;
+
+    // 2) 色度（黄色拉白，保留红色）：只把"黄色色相"那一段的色度往中性(白/灰)拉。
+    //    NV12(BT.709 满范围)下色度平面 (Cb-0.5, Cr-0.5) 的色相角：黄≈175°、红≈103°，
+    //    相差约 72°。用以黄色为中心的 ±45° 窗口加权，红色落在窗口外权重为 0 → 不受影响。
+    if (p.chroma > 0.001) {
+        if (length(c) > 0.0001) {
+            float ang = atan2(c.y, c.x);              // c.x=Cb-0.5, c.y=Cr-0.5
+            float d = fabs(ang - 3.054);              // 175° 对应弧度
+            d = min(d, 2.0 * M_PI_F - d);             // 环绕到 [0, π]
+            float w = clamp(1.0 - d / 0.785, 0.0, 1.0); // 45° 半窗 → 红色处 w=0
+            w = w * w * (3.0 - 2.0 * w);              // smoothstep 平滑过渡
+            c *= (1.0 - p.chroma * w);                // 黄色方向去色，拉向中性
+        }
+    }
+
+    uv = clamp(0.5 + c, 0.0, 1.0);
 
     uvOut.write(float4(uv.r, uv.g, 0, 1), gid);
 }

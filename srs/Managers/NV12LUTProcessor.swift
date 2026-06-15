@@ -128,6 +128,10 @@ final class NV12LUTProcessor {
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outBuf) == kCVReturnSuccess,
               let output = outBuf else { return nil }
 
+        // ⭐ 关键：补回色彩元数据（BT.709 + 满范围），否则编码后 H264 不带 colour_description，
+        //    PC 解码端按有限范围还原 → 红色发暗、整体偏色。设这三项后 VideoToolbox 会写 video_full_range_flag=1。
+        setColorAttachments(output)
+
         guard let cache = textureCache,
               let yInTex = makeTexture(cache, input, .r8Unorm, w, h, plane: 0),
               let uvInTex = makeTexture(cache, input, .rg8Unorm, w / 2, h / 2, plane: 1),
@@ -171,6 +175,16 @@ final class NV12LUTProcessor {
     }
 
     // MARK: - Private
+
+    /// 给输出 NV12 buffer 打上 BT.709 满范围色彩标签（与相机 420f FullRange 一致）
+    private func setColorAttachments(_ buffer: CVPixelBuffer) {
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+    }
 
     private struct LUTParamsMetal {
         var intensity: Float

@@ -34,6 +34,7 @@ struct ThinRemoteConfig: Codable {
     var highlightLift: Float?   // 高光提亮
     var gamma: Float?           // 伽马 0.5..2.0
     var exposure: Float?        // 曝光 -3..+3 stops
+    var chroma: Float?          // 色度：黄色拉白 0.0~1.0（保留红色）
     var filterEnabled: Bool?    // 滤镜主开关
     var lutName: String?        // 玉麒麟 LUT 图名 (5 张之一)
     var videoHDR: Bool?         // Video HDR 开关
@@ -77,6 +78,7 @@ struct ThinRemoteConfig: Codable {
         case highlightLift
         case gamma
         case exposure
+        case chroma
         case filterEnabled
         case lutName
         case videoHDR
@@ -145,6 +147,7 @@ struct ThinRemoteConfig: Codable {
         highlightLift = try container.decodeIfPresent(Float.self, forKey: .highlightLift)
         gamma = try container.decodeIfPresent(Float.self, forKey: .gamma)
         exposure = try container.decodeIfPresent(Float.self, forKey: .exposure)
+        chroma = try container.decodeIfPresent(Float.self, forKey: .chroma)
         filterEnabled = try container.decodeIfPresent(Bool.self, forKey: .filterEnabled)
         lutName = try container.decodeIfPresent(String.self, forKey: .lutName)
         videoHDR = try container.decodeIfPresent(Bool.self, forKey: .videoHDR)
@@ -190,6 +193,7 @@ struct ThinRemoteConfig: Codable {
         self.highlightLift = nil
         self.gamma = nil
         self.exposure = nil
+        self.chroma = nil
         self.filterEnabled = nil
         self.lutName = nil
         self.videoHDR = nil

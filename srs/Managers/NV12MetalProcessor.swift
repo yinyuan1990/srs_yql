@@ -16,6 +16,7 @@ final class NV12MetalProcessor {
     var sharpen:     Float = 0.0
     var redGlow:     Float = 0.0
     var pixelLevel:  Float = 0.0
+    var chroma:      Float = 0.0   // 色度：黄色拉白强度 0.0~1.0
     var enabled:     Bool  = true
 
     // MARK: - Metal 资源
@@ -87,6 +88,15 @@ final class NV12MetalProcessor {
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outBuf) == kCVReturnSuccess,
               let output = outBuf else { return nil }
 
+        // ⭐ 关键：补回色彩元数据（BT.709 + 满范围），否则编码后 H264 不带 colour_description，
+        //    PC 解码端按有限范围还原 → 红色发暗、整体偏色。
+        CVBufferSetAttachment(output, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(output, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(output, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+
         // 获取 Metal 纹理（IOSurface 零拷贝）
         guard let cache = textureCache,
               let yInTex  = makeTexture(cache, input,  .r8Unorm,  w,   h,   plane: 0),
@@ -100,7 +110,7 @@ final class NV12MetalProcessor {
         var params = NV12Params(
             exposure: exposure, blackPoint: blackPoint, brightness: brightness,
             gamma: gamma, contrast: contrast, saturation: saturation,
-            sharpen: sharpen, redGlow: redGlow, pixelLevel: pixelLevel
+            sharpen: sharpen, redGlow: redGlow, pixelLevel: pixelLevel, chroma: chroma
         )
 
         // Pass 1：Y 平面（全分辨率）
@@ -140,13 +150,14 @@ final class NV12MetalProcessor {
         sharpen    = fp.sharpenAmount
         redGlow    = fp.redGlow
         pixelLevel = fp.pixelLevel
+        chroma     = fp.chroma
         enabled    = fp.enabled
-        print("[NV12Metal] sync enabled=\(enabled) exposure=\(exposure) pixelLevel=\(pixelLevel) blackPoint=\(blackPoint) brightness=\(brightness) gamma=\(gamma) contrast=\(contrast) saturation=\(saturation) redGlow=\(redGlow) sharpen=\(sharpen)")
+        print("[NV12Metal] sync enabled=\(enabled) exposure=\(exposure) pixelLevel=\(pixelLevel) blackPoint=\(blackPoint) brightness=\(brightness) gamma=\(gamma) contrast=\(contrast) saturation=\(saturation) redGlow=\(redGlow) sharpen=\(sharpen) chroma=\(chroma)")
     }
 
     // MARK: - 私有工具
     private struct NV12Params {
-        var exposure, blackPoint, brightness, gamma, contrast, saturation, sharpen, redGlow, pixelLevel: Float
+        var exposure, blackPoint, brightness, gamma, contrast, saturation, sharpen, redGlow, pixelLevel, chroma: Float
     }
 
     private func makeTexture(_ cache: CVMetalTextureCache,
