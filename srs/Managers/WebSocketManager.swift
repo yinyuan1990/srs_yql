@@ -657,6 +657,20 @@ extension WebSocketManager: SwiftStompDelegate {
                     )
                 }
             }
+
+            // 🔑 P0-1 关键帧请求：PC 的 RTCP PLI 兜底通道（SRS 不回传 RTCP 时走此路）
+            //    收到后用 adaptOutputFormat 触发 IDR（不再用码率微调 hack）
+            if let config = msgDict?["config"] as? [String: Any],
+               let cmd = config["cmd"] as? String, cmd == "request_keyframe" {
+                print("🔑 [request_keyframe] 收到PC关键帧请求")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("RequestKeyframeCommand"),
+                        object: nil,
+                        userInfo: [:]
+                    )
+                }
+            }
             
         }
         if destination.contains("/queue/heartbeat") {

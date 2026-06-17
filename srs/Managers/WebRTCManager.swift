@@ -1512,6 +1512,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     /// 处理 PC 端发来的 set_fps 通知
+    /// 🔑 P0-1：收到 PC 端 WebSocket 关键帧请求（RTCP PLI 兜底）
+    /// 用 videoSource.adaptOutputFormat 触发 IDR，废弃不可靠的码率微调 hack。
+    @objc private func onRequestKeyframeCommand(_ notification: Notification) {
+        print("🔑 [request_keyframe] 处理PC关键帧请求 → adaptOutputFormat")
+        requestKeyframeFromSource()
+    }
+
     @objc private func onSetFpsRequested(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let fps = userInfo["fps"] as? Int else {
@@ -3009,6 +3016,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self,
                 selector: #selector(onAntiFlickerCommand(_:)),
                 name: NSNotification.Name("AntiFlickerCommand"),
+                object: nil
+        )
+
+        // 🔑 P0-1 关键帧请求监听（PC RTCP PLI 的 WebSocket 兜底）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onRequestKeyframeCommand(_:)),
+                name: NSNotification.Name("RequestKeyframeCommand"),
                 object: nil
         )
 
@@ -5062,11 +5077,11 @@ final class WebRTCManager: NSObject, ObservableObject {
     private func startKeyframeTimer() {
         stopKeyframeTimer()
         keyframeTimer = Timer.scheduledTimer(withTimeInterval: keyframeIntervalSec, repeats: true) { [weak self] _ in
-            // 🔥 通过码率微调触发关键帧（不阻塞，不改分辨率）
-            self?.forceKeyframeViaBitrate()
+            // 🔑 P0-1：统一走 adaptOutputFormat 触发 IDR（不再用码率微调 hack）
+            self?.forceKeyframe()
         }
         DispatchQueue.global(qos: .utility).async {
-            print("🔑 [关键帧] 定时器已启动，每 \(self.keyframeIntervalSec) 秒通过码率微调触发")
+            print("🔑 [关键帧] 定时器已启动，每 \(self.keyframeIntervalSec) 秒通过 adaptOutputFormat 触发")
         }
     }
     
@@ -5076,13 +5091,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         keyframeTimer = nil
     }
     
-    /// 🔥 通过码率微调触发关键帧（不改变分辨率，避免画面跳动）
+    /// 🔑 P0-1：强制关键帧 —— 全局统一走 adaptOutputFormat 触发 IDR。
+    /// 码率微调 hack（forceKeyframeViaBitrate）已废弃：依赖编码器重配的副作用，不可靠且会干扰码控。
     func forceKeyframe() {
-        forceKeyframeViaBitrate()
-        }
+        requestKeyframeFromSource()
+    }
     
-    /// 🔥 通过码率微调触发关键帧
+    /// ⚠️ 已废弃（P0-1）：码率微调 hack，保留仅作参考，请勿调用。改用 forceKeyframe()/requestKeyframeFromSource()。
     /// 原理：临时改变码率 → 触发编码器重新配置 → 发送 IDR 帧
+    @available(*, deprecated, message: "改用 forceKeyframe()/requestKeyframeFromSource()（adaptOutputFormat）")
     private func forceKeyframeViaBitrate() {
         guard let sender = videoSender else { return }
         
