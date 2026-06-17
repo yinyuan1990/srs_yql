@@ -1512,11 +1512,12 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     /// 处理 PC 端发来的 set_fps 通知
-    /// 🔑 P0-1：收到 PC 端 WebSocket 关键帧请求（RTCP PLI 兜底）
-    /// 用 videoSource.adaptOutputFormat 触发 IDR，废弃不可靠的码率微调 hack。
+    /// 🔑 P0-1：收到 PC 端 WebSocket 关键帧请求（RTCP PLI 的兜底通道）
+    /// 此路用于「RTCP 没回传」的场景，必须可靠本地强制 IDR → 走 forceKeyframe()（码率微调）。
+    /// 注意：adaptOutputFormat 传相同分辨率是 no-op，不能用于此处。
     @objc private func onRequestKeyframeCommand(_ notification: Notification) {
-        print("🔑 [request_keyframe] 处理PC关键帧请求 → adaptOutputFormat")
-        requestKeyframeFromSource()
+        print("🔑 [request_keyframe] 处理PC关键帧请求 → forceKeyframe")
+        forceKeyframe()
     }
 
     @objc private func onSetFpsRequested(_ notification: Notification) {
@@ -1562,25 +1563,25 @@ final class WebRTCManager: NSObject, ObservableObject {
             // 🚨 紧急：50ms内执行，保码率不降（降FPS已足够，降码率会双重恶化画质）
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
-            keyframeIntervalSec = gopExtreme
+            setKeyframeInterval(gopExtreme)   // ⭐ 改间隔即重启定时器使其生效
             malvshezhingLog("[set_fps] critical \(oldFps)→\(targetFps)fps GOP=\(gopExtreme)s 码率=\(bitrate)")
 
         case "high":
             // ⚡ 高优先级：保码率不降，只降FPS + 插I帧
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
-            keyframeIntervalSec = gopWeak
+            setKeyframeInterval(gopWeak)   // ⭐ 改间隔即重启定时器使其生效
             malvshezhingLog("[set_fps] high \(oldFps)→\(targetFps)fps GOP=\(gopWeak)s 码率=\(bitrate)")
             
         case "normal":
             // 正常：可短暂过渡，码率不变
             applyFpsImmediately(targetFps, bitrate: bitrate)
-            keyframeIntervalSec = gopNormal  // GOP恢复为1秒
+            setKeyframeInterval(gopNormal)  // GOP恢复为1秒（即重启定时器使其生效）
             
         case "low":
             // 低优先级：平滑过渡（升帧时用），码率可能恢复
             applyFpsWithTransition(targetFps, bitrate: bitrate, duration: 0.3)
-            keyframeIntervalSec = gopNormal  // GOP恢复为1秒
+            setKeyframeInterval(gopNormal)  // GOP恢复为1秒（即重启定时器使其生效）
             
         default:
             applyFpsImmediately(targetFps, bitrate: bitrate)
@@ -5077,11 +5078,10 @@ final class WebRTCManager: NSObject, ObservableObject {
     private func startKeyframeTimer() {
         stopKeyframeTimer()
         keyframeTimer = Timer.scheduledTimer(withTimeInterval: keyframeIntervalSec, repeats: true) { [weak self] _ in
-            // 🔑 P0-1：统一走 adaptOutputFormat 触发 IDR（不再用码率微调 hack）
             self?.forceKeyframe()
         }
         DispatchQueue.global(qos: .utility).async {
-            print("🔑 [关键帧] 定时器已启动，每 \(self.keyframeIntervalSec) 秒通过 adaptOutputFormat 触发")
+            print("🔑 [关键帧] 定时器已启动，每 \(self.keyframeIntervalSec) 秒强制一个 IDR")
         }
     }
     
@@ -5091,15 +5091,29 @@ final class WebRTCManager: NSObject, ObservableObject {
         keyframeTimer = nil
     }
     
-    /// 🔑 P0-1：强制关键帧 —— 全局统一走 adaptOutputFormat 触发 IDR。
-    /// 码率微调 hack（forceKeyframeViaBitrate）已废弃：依赖编码器重配的副作用，不可靠且会干扰码控。
-    func forceKeyframe() {
-        requestKeyframeFromSource()
+    /// ⭐ 点2 修复：设置关键帧间隔；若定时器正在运行则立即重启，使新间隔生效。
+    /// 旧实现只改 keyframeIntervalSec 不重启 → 间隔变化要等下次开流才生效。
+    private func setKeyframeInterval(_ sec: Double) {
+        guard keyframeIntervalSec != sec else { return }
+        keyframeIntervalSec = sec
+        if keyframeTimer != nil {   // 仅在运行中才重启
+            startKeyframeTimer()
+        }
     }
     
-    /// ⚠️ 已废弃（P0-1）：码率微调 hack，保留仅作参考，请勿调用。改用 forceKeyframe()/requestKeyframeFromSource()。
-    /// 原理：临时改变码率 → 触发编码器重新配置 → 发送 IDR 帧
-    @available(*, deprecated, message: "改用 forceKeyframe()/requestKeyframeFromSource()（adaptOutputFormat）")
+    /// 🔑 强制关键帧（本地强制路径）。
+    /// ⚠️ 点3 修复：iOS WebRTC 用标准 RTCDefaultVideoEncoderFactory，无直接强制 IDR 的 API。
+    ///    实测 adaptOutputFormat 仅在「输出格式真正变化」时才触发编码器重配出 IDR；
+    ///    传相同分辨率/帧率是 no-op，不会出 I 帧。
+    ///    因此本地强制（定时器 / WebSocket REQUEST_KEYFRAME 兜底 / 档位切换补帧）改回可靠的码率微调；
+    ///    干净的「按需」恢复主路是 P0-1 的 RTCP PLI（PC 发，编码器自动响应出 IDR）。
+    ///    adaptOutputFormat 仅保留给真实分辨率变化处（recapture / 切档已直接调用）。
+    func forceKeyframe() {
+        forceKeyframeViaBitrate()
+    }
+    
+    /// 码率微调强制 IDR：临时 +1kbps 再恢复 → 触发编码器重配发 IDR。
+    /// iOS WebRTC 下唯一可靠的本地强制关键帧方式（无自定义编码器时）。
     private func forceKeyframeViaBitrate() {
         guard let sender = videoSender else { return }
         
@@ -5124,7 +5138,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
     
-    /// 通过 videoSource.adaptOutputFormat 请求关键帧（备用方式）
+    /// 通过 videoSource.adaptOutputFormat 请求关键帧。
+    /// ⚠️ 仅在「输出格式真正变化」时才会触发 IDR；传相同分辨率/帧率为 no-op。
+    /// 本地强制关键帧请用 forceKeyframe()。
     func requestKeyframeFromSource() {
         guard let source = videoSource else { return }
         
