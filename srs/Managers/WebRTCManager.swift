@@ -2696,6 +2696,13 @@ final class WebRTCManager: NSObject, ObservableObject {
    
     
     
+    // 🔧 [临时测试] 强制 H.264 Profile 降档（仅影响 SRS/WebRTC 推流编码与 SDP）
+    // 背景：老 PC（Intel Sandy Bridge 核显 / Todesk 远程会话）对 High Profile 硬解失败，PC 端 GStreamer
+    //      报 "Internal data stream error"（src=nicesrc0/queue0），画面出不来。这里把 profile-level-id
+    //      从 High（640c34 / 640028）降到 Constrained Baseline 3.1（42e01f，正是 PC offer 请求的档）验证能否出画面。
+    //      验证 OK 后请改回 High（编码器 640c34、SDP 640028），或按机型/档位二方协商下发。想试 Main 4.0 用 "4d0028"。
+    private static let forcedH264ProfileLevelId = "42e01f"
+
     private let factory: RTCPeerConnectionFactory = {
             RTCInitializeSSL()
             
@@ -2715,13 +2722,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 let compatibleH264 = RTCVideoCodecInfo(
                                 name: h264.name,
                                 parameters: [
-                                   "profile-level-id": "640c34",  // High Profile Level 5.2（覆盖 1080p60，不限级）
+                                   "profile-level-id": WebRTCManager.forcedH264ProfileLevelId,  // 🔧 临时降档测试（原 "640c34" High 5.2）
                                    "level-asymmetry-allowed": "1",
                                    "packetization-mode": "1"
                                ]
                 )
                 enc.preferredCodec = compatibleH264
-                print("🎯 画质优先: H.264 High Profile (640c34, 8x8+CABAC, 无B帧)")
+                print("🎯 [临时降档测试] H.264 preferredCodec profile-level-id=\(WebRTCManager.forcedH264ProfileLevelId)（原 640c34 High）")
             }
             
             return RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
@@ -3566,7 +3573,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                     if kv.count == 2 { dict[String(kv[0])] = String(kv[1]) }
                 }
                 dict["packetization-mode"] = "1"
-                dict["profile-level-id"] = "640028"   // High 4.0 (支持 1080p，取代 Baseline 3.1)
+                dict["profile-level-id"] = WebRTCManager.forcedH264ProfileLevelId   // 🔧 临时降档测试（原 "640028" High 4.0）
                 dict["level-asymmetry-allowed"] = "1"
                 
                 let targetMinKbps = effectiveMinKbpsForCurrentProfile()
@@ -3587,7 +3594,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
         if !modified {
-            let appended = "a=fmtp:\(pt) level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640028"
+            let appended = "a=fmtp:\(pt) level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=\(WebRTCManager.forcedH264ProfileLevelId)"  // 🔧 临时降档测试（原 640028 High 4.0）
             if let idx = lines.firstIndex(where: { $0.lowercased().hasPrefix("a=rtpmap:\(pt)") }) {
                 lines.insert(appended, at: idx + 1)
             } else {
