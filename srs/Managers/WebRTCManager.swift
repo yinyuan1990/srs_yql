@@ -5295,7 +5295,17 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         // 🔥 每200ms抓一次stats（更敏感的自适应FPS检测）
         statsTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-                guard let self, let pc = self.pc else { return }
+                guard let self else { return }
+                // 🔥 关键修复：P2P 模式下 PeerConnection 在 P2PManager.viewerSessions，self.pc 恒为 nil，
+                //   旧代码 `guard let pc = self.pc` 直接 return，导致 stats 空转、上报 kbps/sendFps/networkQuality 恒为 0。
+                //   按模式选取统计用的 PeerConnection：SRS 用 self.pc，P2P 用已连接的观看会话（取一路，代表本机发送码率）。
+                let statsPC: RTCPeerConnection?
+                if self.currentConnMode == .p2p {
+                    statsPC = self.p2pManager.connectedViewerPeerConnections.first
+                } else {
+                    statsPC = self.pc
+                }
+                guard let pc = statsPC else { return }
                 // 🔥 统计处理移到后台队列
                 DispatchQueue.global(qos: .utility).async { [weak self] in
                     guard let self else { return }

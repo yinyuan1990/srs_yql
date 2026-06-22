@@ -52,6 +52,14 @@ final class P2PManager: NSObject {
     private(set) var viewerSessions: [String: RTCPeerConnection] = [:] {
         didSet { P2PManager.currentViewerCount = viewerSessions.count }
     }
+
+    /// 已连接（ICE connected/completed）的观看会话，供 WebRTCManager 采集码率/网络 stats。
+    /// P2P 模式下 PeerConnection 不在 WebRTCManager.pc 上，码率统计需从这里取，否则上报 kbps 恒为 0。
+    var connectedViewerPeerConnections: [RTCPeerConnection] {
+        viewerSessions.values.filter {
+            $0.iceConnectionState == .connected || $0.iceConnectionState == .completed
+        }
+    }
     private var viewerSenders: [String: RTCRtpSender] = [:]
     private var pendingRemoteIce: [String: [RTCIceCandidate]] = [:]
     private var pendingIceRestart: Set<String> = []
