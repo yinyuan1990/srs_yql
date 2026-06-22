@@ -90,7 +90,17 @@ final class SRTManager {
 
         // streamid 约定（与 PC/SRS 对齐）：
         // srt://IP:PORT?streamid=#!::r=<app>/<streamKey>,m=publish
-        let urlString = "srt://\(ip):\(port)?streamid=#!::r=\(app)/\(streamKey),m=publish"
+        // streamid 里含 # ! : , 等特殊字符，需百分号编码后再放进 query，
+        // 否则 URL(string:) 会把 # 当成 fragment 截断，导致 connect 失败。
+        let streamIdRaw = "#!::r=\(app)/\(streamKey),m=publish"
+        let streamIdEncoded = streamIdRaw.addingPercentEncoding(
+            withAllowedCharacters: .alphanumerics) ?? streamIdRaw
+        let urlString = "srt://\(ip):\(port)?streamid=\(streamIdEncoded)"
+
+        guard let url = URL(string: urlString) else {
+            reportFailure("SRT URL 非法：\(urlString)")
+            return
+        }
 
         startTask?.cancel()
         startTask = Task { [weak self] in
@@ -99,7 +109,7 @@ final class SRTManager {
                 // mixer 输出接到 SRT 流；手动采集模式下我们只喂自定义帧。
                 await self.mixer.addOutput(self.stream)
 
-                try await self.connection.connect(urlString)
+                try await self.connection.connect(url)
                 await self.stream.publish(streamKey)
 
                 await MainActor.run {
