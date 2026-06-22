@@ -76,6 +76,10 @@ final class P2PManager: NSObject {
     private let nwMonitor = NWPathMonitor()
     private let nwQueue = DispatchQueue(label: "p2p.nwpath", qos: .utility)
     private var nwStarted = false
+    // 切网检测：记录上次 path 状态/接口指纹，用于捕获 WiFi↔WiFi（同类型）切换
+    private var lastPathSatisfied = false
+    private var lastInterfaceFingerprint = ""
+    private var lastNetSwitchAt: TimeInterval = 0
 
     var maxViewers: Int { let v = UserDefaults.standard.integer(forKey: "maxP2PViewers"); return v > 0 ? v : 4 }
     var forceRelay: Bool { UserDefaults.standard.bool(forKey: "forceRelay") }
@@ -137,16 +141,37 @@ final class P2PManager: NSObject {
             let wifi = path.usesInterfaceType(.wifi)
             let wired = path.usesInterfaceType(.wiredEthernet)
             let newCellular = cellular && !wifi && !wired
-            if newCellular != self.isOnCellular {
-                self.isOnCellular = newCellular
-                print("📶 [P2P] 网络类型变化: \(newCellular ? "蜂窝" : "WiFi/有线")")
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    // 先让上层重新评估（蜂窝→可能整体切 SRS）
-                    self.onLocalNetworkChange?()
-                    // 仍在 P2P 的会话做 ICE Restart
-                    self.restartAllIceForNetworkSwitch()
-                }
+
+            // 接口指纹：可用接口名集合（换路由器/换热点时通常变化）
+            let fingerprint = path.availableInterfaces.map { $0.name }.sorted().joined(separator: ",")
+            let satisfied = (path.status == .satisfied)
+
+            // 三类“切网”信号（任一命中即触发重连）：
+            //   1) 蜂窝↔WiFi 类型变化（原有逻辑）
+            //   2) 网络从断开恢复（unsatisfied → satisfied，换 WiFi 多经历此过渡）
+            //   3) 可用接口指纹变化（WiFi A → WiFi B 同类型切换的关键补充）
+            let typeChanged = (newCellular != self.isOnCellular)
+            let recovered = (satisfied && !self.lastPathSatisfied)
+            let ifaceChanged = (satisfied && !self.lastInterfaceFingerprint.isEmpty && fingerprint != self.lastInterfaceFingerprint)
+
+            self.isOnCellular = newCellular
+            self.lastPathSatisfied = satisfied
+            self.lastInterfaceFingerprint = fingerprint
+
+            guard satisfied, (typeChanged || recovered || ifaceChanged) else { return }
+
+            // 节流：5s 内多次抖动只触发一次，避免狂刷重连
+            let now = Date().timeIntervalSince1970
+            if now - self.lastNetSwitchAt < 5.0 { return }
+            self.lastNetSwitchAt = now
+
+            print("📶 [P2P] 网络切换检测: 蜂窝=\(newCellular) 类型变=\(typeChanged) 恢复=\(recovered) 接口变=\(ifaceChanged) [\(fingerprint)]")
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // 先让上层重新评估（蜂窝→可能整体切 SRS）
+                self.onLocalNetworkChange?()
+                // 仍在 P2P 的会话做 ICE Restart / 重连
+                self.restartAllIceForNetworkSwitch()
             }
         }
         nwMonitor.start(queue: nwQueue)
@@ -158,9 +183,11 @@ final class P2PManager: NSObject {
         if sessions.isEmpty { return }
         print("📶 [P2P] 网络切换，处理 \(sessions.count) 个会话")
         for (pcId, pc) in sessions {
+            // 切网是“新一次”重连，重置该会话的 ICE 重试计数，避免多次切网快速耗尽 maxICERetries 后彻底放弃
+            iceRetryCount[pcId] = 0
             let state = pc.connectionState
             if state == .closed || state == .failed {
-                // 无法 ICE Restart：拆掉并让 PC 重新发起（重建时按新网络选 relay/all）
+                // 无法 ICE Restart：拆掉并让 PC 重新发起（PC 收到 network_switch_reconnect 会自动重发观看请求）
                 removeViewerSession(pcId, notifyPC: false)
                 WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
                                                             reason: "network_switch_reconnect",
