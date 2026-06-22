@@ -14,8 +14,8 @@ enum ConnectModeOption: String, CaseIterable {
         }
     }
 
-    /// SRT 链路尚未开发，置灰禁用
-    var isEnabled: Bool { self != .srt }
+    /// 三条链路均可选（SRT 已接入独立链路，方案 A）。
+    var isEnabled: Bool { true }
 
     /// 本地记忆 key
     static let storageKey = "selected_connect_mode"

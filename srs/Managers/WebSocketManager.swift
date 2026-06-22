@@ -134,9 +134,15 @@ class WebSocketManager: ObservableObject {
         let ts = isoFormatter.string(from: Date())
         let streamKey = WebSocketManager.publishingStreamKey
         let streamPushIp = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""  // 🔥 推流IP
-        // ⭐ 自动协商：连接方式由 WebRTCManager 实时决策（0=SRS,1=P2P），供 PC 跟随
+        // ⭐ 连接方式由 WebRTCManager 实时决策（0=SRS,1=P2P,2=SRT），供 PC 跟随
+        // 方案 A 下 SRT 经 SRS 桥接成 WebRTC，PC 仍按 WebRTC 拉，故 connectMode 仍上报 "srs"（不影响 PC 现有逻辑）。
         let connectstype = WebRTCManager.effectiveConnectstype
-        let connectMode = connectstype == 1 ? "p2p" : "srs"
+        let connectMode: String
+        switch connectstype {
+        case 1:  connectMode = "p2p"
+        case 2:  connectMode = "srs"   // SRT → SRS 桥接 → PC 仍 WebRTC 拉
+        default: connectMode = "srs"
+        }
         let p2pViewerCount = P2PManager.currentViewerCount
         
         // 🔥 从 UserDefaults 读取试用/激活信息

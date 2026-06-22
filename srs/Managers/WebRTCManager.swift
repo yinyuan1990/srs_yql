@@ -378,6 +378,11 @@ final class VideoFilterPipeline: ObservableObject {
 final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     weak var inner: RTCVideoCapturerDelegate?           // 🔥 推送输出（受后端fps控制）
     weak var previewDelegate: RTCVideoCapturerDelegate? // 🔥 预览输出（固定60fps）
+
+    // MARK: - SRT (independent)
+    // 滤镜后帧旁路给 SRT 推流（与 WebRTC 推送同节流、同时间戳）。
+    // 为 nil 时完全无开销；设置后每「推送帧」回调一次。删除本闭包即可回退。
+    var srtFrameSink: ((_ pixelBuffer: CVPixelBuffer, _ timeStampNs: Int64) -> Void)?
     var videoFilter: VideoFilterPipeline?               // ⭐ 参数管理（UserDefaults / 服务端推送）
     // ⭐ A：处理器跨线程安全 —— process() 在采集队列，替换/改 LUT 在主线程，统一用 processorLock 互斥
     private let processorLock = NSLock()
@@ -714,6 +719,13 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
                     timeStampNs: timestampNs
                 )
                 inner?.capturer(capturer, didCapture: pushFrame)
+
+                // MARK: - SRT (independent)
+                // 同一滤镜后帧、同一时间戳旁路给 SRT；sink 为 nil 时零开销。
+                if let sink = srtFrameSink,
+                   let cvBuffer = (filtered.buffer as? RTCCVPixelBuffer)?.pixelBuffer {
+                    sink(cvBuffer, timestampNs)
+                }
             }
         }
         
@@ -2744,6 +2756,10 @@ final class WebRTCManager: NSObject, ObservableObject {
     let p2pManager = P2PManager()
     let srsManager = SRSManager()
 
+    // MARK: - SRT (independent)
+    /// SRT 推流管理器（第三条独立链路，方案 A）。删除此属性 + 相关分区即可回退。
+    let srtManager = SRTManager()
+
     /// 后端开关："srs"=强制 SRS；其它(p2p/auto)=自动协商
     private var backendConnectMode: String { (UserDefaults.standard.string(forKey: "connect_mode") ?? "auto").lowercased() }
     private var backendForceSRS: Bool { backendConnectMode == "srs" }
@@ -2751,7 +2767,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 当前生效连接方式（0=SRS,1=P2P），供 WebSocketManager 心跳上报；PC 跟随此值
     static var effectiveConnectstype: Int = 0
     /// 当前会话实际模式
-    enum ConnMode { case none, p2p, srs }
+    enum ConnMode { case none, p2p, srs, srt }
     private var currentConnMode: ConnMode = .none
 
     /// 观看者注册表：pcDeviceId → 最近心跳时间/网络类型（PC 每 ~1.5s 发 VIEWER_HEARTBEAT）
@@ -3348,6 +3364,14 @@ final class WebRTCManager: NSObject, ObservableObject {
             startModeEvalTimer()
             return
         }
+        // MARK: - SRT (independent)
+        // 三种连接方式互斥，本次会话只走一条。选 SRT 即只推 SRT，不建立 WebRTC/SRS。
+        if mode == .srt {
+            currentConnMode = .srt
+            WebRTCManager.effectiveConnectstype = 2   // 2=SRT；方案 A 下 SRS 桥接成 WebRTC，PC 仍 WebRTC 拉
+            startSRTPublish(initialProfile: initialProfile)
+            return
+        }
         currentConnMode = .srs
         WebRTCManager.effectiveConnectstype = 0
         startModeEvalTimer()
@@ -3653,6 +3677,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         viewerRegistry.removeAll()
         if p2pManager.isActive { p2pManager.stop() }
         if srsManager.isActive { srsManager.stop() }
+        // MARK: - SRT (independent)
+        frameThrottler?.srtFrameSink = nil
+        if srtManager.isPublishing { srtManager.stop() }
     }
 
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
@@ -3681,13 +3708,61 @@ final class WebRTCManager: NSObject, ObservableObject {
         print("✅ [P2P] 就绪，等待 PC 发起 WEBRTC_REQUEST")
     }
 
+    // MARK: - SRT (independent)
+    /// SRT 推流（connect_mode == "srt"）。完全独立链路、与 SRS/P2P 互斥（一次只走一条）：
+    /// 复用现有采集 + 滤镜（capturer / frameThrottler），把「滤镜后帧」旁路给 SRTManager，
+    /// 不建立 WebRTC PeerConnection、不调用 SRS/P2P。仅推视频，不接音频。
+    /// 删除本方法 + decideMode 的 .srt 分支 + SRTManager.swift 即可完全回退。
+    func startSRTPublish(initialProfile: LadderProfile? = nil) {
+        print("🎬 [SRT] 启动 SRT 推流（独立链路，与 SRS/P2P 互斥）")
+        // 预览采集管线应已就绪；未就绪则补起后重试（与 P2P 一致）。
+        if localVideoTrack == nil || capturer == nil || frameThrottler == nil {
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.startPreviewIfNeeded(initialProfile: initialProfile)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self.startSRTPublish(initialProfile: initialProfile)
+            }
+            return
+        }
+        // 从服务器配置应用 FPS / 档位（与 SRS/P2P 路径一致，仅不建立 SRS/PC 连接）。
+        if let serverCfg = ConfigManager.shared.getCurrentConfig(), let serverFps = serverCfg.fps {
+            setAverageOutputFPS(serverFps)
+            enableAverageThrottling(true)
+        }
+
+        // 方案 A：IP 复用登录返回的 stream_push_ip，端口写死 10080。
+        let ip = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""
+
+        srtManager.onFailure = { reason in
+            print("❌ [SRT] 失败：\(reason)")
+        }
+        srtManager.onStateChange = { publishing in
+            print("ℹ️ [SRT] publishing=\(publishing)")
+        }
+        srtManager.start(ip: ip, streamKey: streamKey)
+
+        // 把滤镜后帧旁路给 SRT（与原 WebRTC 推送同节流、同时间戳）。
+        frameThrottler?.srtFrameSink = { [weak self] pixelBuffer, ts in
+            self?.srtManager.appendVideoFrame(pixelBuffer: pixelBuffer, timeStampNs: ts)
+        }
+
+        isPublishing = true
+        WebSocketManager.isPublishingFlag = 1
+        startStats()
+        print("✅ [SRT] 就绪：srt://\(ip):10080 streamKey=\(streamKey)")
+    }
+
     // MARK: - ⭐ P2P/SRS 自动协商决策与切换
 
     /// 决策：完全静态，以用户在登录页的手动选择（connect_mode）为准，不再自动切换。
-    /// connect_mode == "p2p" → P2P；其它（"srs"/"srt"/"auto"/缺省）→ SRS。
-    /// 注：SRT 链路尚未开发，选 srt 暂按 SRS 处理。
+    /// connect_mode == "p2p" → P2P；"srt" → SRT（独立链路）；其它（"srs"/"auto"/缺省）→ SRS。
     private func decideMode() -> ConnMode {
-        return backendConnectMode == "p2p" ? .p2p : .srs
+        switch backendConnectMode {
+        case "p2p": return .p2p
+        case "srt": return .srt   // MARK: - SRT (independent)
+        default:    return .srs
+        }
     }
 
     /// ⛔ 已废弃：去掉 P2P↔SRS 自动切换后不再启动周期评估定时器（保留空实现避免调用点报错）。
