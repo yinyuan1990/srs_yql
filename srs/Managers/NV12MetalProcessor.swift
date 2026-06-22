@@ -152,7 +152,6 @@ final class NV12MetalProcessor {
         pixelLevel = fp.pixelLevel
         chroma     = fp.chroma
         enabled    = fp.enabled
-        print("[NV12Metal] sync enabled=\(enabled) exposure=\(exposure) pixelLevel=\(pixelLevel) blackPoint=\(blackPoint) brightness=\(brightness) gamma=\(gamma) contrast=\(contrast) saturation=\(saturation) redGlow=\(redGlow) sharpen=\(sharpen) chroma=\(chroma)")
     }
 
     // MARK: - 私有工具
