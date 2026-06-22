@@ -1,5 +1,32 @@
 import SwiftUI
 
+// 连接方式（登录页三选一，互斥，静态不自动切换）
+enum ConnectModeOption: String, CaseIterable {
+    case srs = "srs"
+    case srt = "srt"
+    case p2p = "p2p"
+
+    var title: String {
+        switch self {
+        case .srs: return "SRS"
+        case .srt: return "SRT"
+        case .p2p: return "P2P"
+        }
+    }
+
+    /// SRT 链路尚未开发，置灰禁用
+    var isEnabled: Bool { self != .srt }
+
+    /// 本地记忆 key
+    static let storageKey = "selected_connect_mode"
+
+    /// 读取上次选择（无则默认 SRS，与后端默认一致）
+    static var lastSelected: ConnectModeOption {
+        let raw = UserDefaults.standard.string(forKey: storageKey) ?? ""
+        return ConnectModeOption(rawValue: raw) ?? .srs
+    }
+}
+
 // 监控端登录视图
 struct MonitorLoginView: View {
     @EnvironmentObject var appState: AppState
@@ -9,6 +36,7 @@ struct MonitorLoginView: View {
     @State private var password: String = ""
     @State private var isPasswordVisible: Bool = false
     @State private var rememberPassword: Bool = false
+    @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected  // 连接方式（默认上次选择）
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -193,6 +221,40 @@ struct MonitorLoginView: View {
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 16)
+
+                        // 分隔线
+                        Divider()
+                            .background(Color(hex: "F0F0F0"))
+                            .padding(.leading, 50)
+
+                        // 连接方式三选一（SRS / SRT / P2P，互斥，静态不自动切换）
+                        HStack(spacing: 6) {
+                            // 连接方式图标
+                            ZStack {
+                                Circle()
+                                    .stroke(Color(hex: "B3B3B3"), lineWidth: 0.6)
+                                    .frame(width: 20, height: 20)
+
+                                Image(systemName: "antenna.radiowaves.left.and.right")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(Color(hex: "1A1A1A"))
+                            }
+                            .frame(width: 24, height: 24)
+
+                            Text("连接方式")
+                                .font(.system(size: 16))
+                                .foregroundColor(Color(hex: "1A1A1A"))
+
+                            Spacer()
+
+                            HStack(spacing: 8) {
+                                ForEach(ConnectModeOption.allCases, id: \.self) { mode in
+                                    connectModeChip(mode)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
                     }
                     .background(Color.white)
                     .cornerRadius(16, corners: [.topLeft, .topRight])
@@ -311,6 +373,7 @@ struct MonitorLoginView: View {
         }
         .onAppear {
             loadLocalAccountInfo()
+            selectedConnectMode = ConnectModeOption.lastSelected  // 同步上次选择
             setupWebSocketNotificationListener()
         }
         .onDisappear {
@@ -390,6 +453,44 @@ struct MonitorLoginView: View {
                 }
             }
         }
+    }
+
+    // 连接方式单个选项芯片
+    @ViewBuilder
+    private func connectModeChip(_ mode: ConnectModeOption) -> some View {
+        let isSelected = (selectedConnectMode == mode)
+        let enabled = mode.isEnabled
+
+        Button(action: {
+            guard enabled else {
+                showAlert(message: "\(mode.title) 即将上线，敬请期待")
+                return
+            }
+            selectedConnectMode = mode
+            UserDefaults.standard.set(mode.rawValue, forKey: ConnectModeOption.storageKey)
+        }) {
+            Text(mode.title)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .foregroundColor(
+                    !enabled ? Color(hex: "C4C4C4")
+                    : (isSelected ? .white : Color(hex: "65AEF7"))
+                )
+                .frame(minWidth: 44)
+                .padding(.vertical, 6)
+                .background(
+                    Group {
+                        if !enabled {
+                            Color(hex: "F0F0F0")
+                        } else if isSelected {
+                            Color(hex: "65AEF7")
+                        } else {
+                            Color(hex: "EAF4FE")
+                        }
+                    }
+                )
+                .cornerRadius(6)
+        }
+        .disabled(false)  // SRT 仍可点击以弹出提示
     }
 
     private func getLoginButtonText() -> String {
@@ -488,16 +589,17 @@ struct MonitorLoginView: View {
                         print("✅ 保存推流IP: \(streamPushIp)")
                     }
 
-                    // ⭐ 连接方式与 P2P 配置（缺省 p2p；srs/p2p 全局二选一）
-                    let connectMode = (loginResponse.connectMode ?? "p2p").lowercased()
+                    // ⭐ 连接方式：以用户在登录页的手动选择为准（静态、互斥、不自动切换），覆盖后端下发
+                    let connectMode = selectedConnectMode.rawValue
                     UserDefaults.standard.set(connectMode, forKey: "connect_mode")
+                    UserDefaults.standard.set(connectMode, forKey: ConnectModeOption.storageKey)  // 记住本次选择
                     UserDefaults.standard.set(loginResponse.forceRelay ?? false, forKey: "forceRelay")
                     UserDefaults.standard.set(loginResponse.maxP2PViewers ?? 4, forKey: "maxP2PViewers")
                     if let iceServers = loginResponse.iceServers,
                        let iceData = try? JSONEncoder().encode(iceServers) {
                         UserDefaults.standard.set(iceData, forKey: "iceServers")
                     }
-                    print("✅ 连接方式: \(connectMode), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
+                    print("✅ 连接方式(用户选): \(connectMode), 后端下发: \(loginResponse.connectMode ?? "nil"), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
                     
                     if let trialInfo = loginResponse.trialInfo {
                         saveTrialInfo(trialInfo)

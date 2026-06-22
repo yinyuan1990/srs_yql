@@ -291,6 +291,9 @@ final class P2PManager: NSObject {
         cfg.continualGatheringPolicy = .gatherContinually
         cfg.iceBackupCandidatePairPingInterval = 2000
         cfg.iceCandidatePoolSize = 2
+        // P0-2：补齐 ICE 稳定性参数
+        cfg.iceConnectionReceivingTimeout = 8000          // 8s 无收包才判 disconnected，弱网更耐抖
+        cfg.shouldPresumeWritableWhenFullyRelayed = true  // 全 relay 时预判可写，加快建连
         let useRelay = effectiveForceRelay(for: pcId)
         cfg.iceTransportPolicy = useRelay ? .relay : .all
         cfg.bundlePolicy = .maxBundle
