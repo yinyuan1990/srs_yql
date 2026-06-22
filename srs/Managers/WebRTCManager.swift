@@ -5381,10 +5381,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                             if let r = s.values["qualityLimitationReason"] as? String { qlr = r }
                         } else if type == "remote-inbound-rtp" && isVideo {
                             // ✅ 远端入站统计：包含丢包、RTT、抖动
+                            // ⚠️ packetsLost 规范上是有符号(long)，可能为负（重传补回时倒退）。
+                            //    必须按有符号读取后 clamp 到非负，否则负值经 uint64Value 会变成巨值，
+                            //    后续差值 Int(...) 转换会崩溃（Not enough bits to represent...）。
                             if let v = s.values["packetsLost"] {
-                                if let num = v as? NSNumber { packetsLost = num.uint64Value }
-                                else if let d = v as? Double { packetsLost = UInt64(d) }
-                                else if let i = v as? Int { packetsLost = UInt64(i) }
+                                if let num = v as? NSNumber { packetsLost = UInt64(max(0, num.int64Value)) }
+                                else if let d = v as? Double { packetsLost = UInt64(max(0, d)) }
+                                else if let i = v as? Int { packetsLost = UInt64(max(0, i)) }
                             }
                             if let v = s.values["roundTripTime"] {
                                 if let num = v as? NSNumber { roundTripTime = num.doubleValue }
@@ -5481,13 +5484,24 @@ final class WebRTCManager: NSObject, ObservableObject {
                         // }
                         
                         // 🔥 计算每秒丢包数和重传统计
+                        // ⚠️ 崩溃修复：packetsLost 在 WebRTC remote-inbound-rtp 里语义上是有符号的
+                        //    （可能为负，重传补回时甚至倒退），上面用 uint64Value 读取会把负值变成接近
+                        //    UInt64.max 的巨值；再 `Int(a &- b)` 转换就会触发
+                        //    "Not enough bits to represent the passed value" 致命错误并卡死。
+                        //    这里改成安全差值：累计值倒退或差值越界一律归 0，绝不溢出崩溃。
+                        func safeDeltaPerSec(_ current: UInt64, _ last: UInt64) -> Int {
+                            guard current >= last else { return 0 }          // 统计重置/倒退 → 本秒按 0 计
+                            let delta = current &- last
+                            guard delta <= UInt64(Int.max) else { return 0 } // 异常巨值（负数被误转）→ 丢弃
+                            return Int(delta)
+                        }
                         var packetsLostPerSec = 0
                         var nackPerSec = 0
                         var pliPerSec = 0
                         if self.lastTs > 0 {
-                            packetsLostPerSec = Int(packetsLost &- self.lastPacketsLost)
-                            nackPerSec = Int(nackCount &- self.lastNackCount)
-                            pliPerSec = Int(pliCount &- self.lastPliCount)
+                            packetsLostPerSec = safeDeltaPerSec(packetsLost, self.lastPacketsLost)
+                            nackPerSec = safeDeltaPerSec(nackCount, self.lastNackCount)
+                            pliPerSec = safeDeltaPerSec(pliCount, self.lastPliCount)
                         }
                         
                         // 🔥🔥 v10.1 PLI响应：收到PLI立即插I帧（50ms内响应）
@@ -5545,7 +5559,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                             // 🔥 计算本秒丢包率（更敏感的瞬时指标）
                             var instantLossRate: Double = 0.0
                             if self.lastTs > 0 {
-                                let sentThisSec = Int(packetsSent &- self.lastPacketsSent)
+                                // 复用上面的安全差值，避免 Int(UInt64) 溢出崩溃（统计重置/翻转时）
+                                let sentThisSec = safeDeltaPerSec(packetsSent, self.lastPacketsSent)
                                 let lostThisSec = packetsLostPerSec
                                 if sentThisSec > 0 {
                                     instantLossRate = Double(lostThisSec) / Double(sentThisSec + lostThisSec)
