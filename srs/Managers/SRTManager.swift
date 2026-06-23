@@ -90,17 +90,26 @@ final class SRTManager {
 
         // streamid 约定（与 PC/SRS 对齐）：
         // srt://IP:PORT?streamid=#!::r=<app>/<streamKey>,m=publish
-        // streamid 里含 # ! : , 等特殊字符，需百分号编码后再放进 query，
-        // 否则 URL(string:) 会把 # 当成 fragment 截断，导致 connect 失败。
-        let streamIdRaw = "#!::r=\(app)/\(streamKey),m=publish"
-        let streamIdEncoded = streamIdRaw.addingPercentEncoding(
-            withAllowedCharacters: .alphanumerics) ?? streamIdRaw
-        let urlString = "srt://\(ip):\(port)?streamid=\(streamIdEncoded)"
+        //
+        // ⚠️ 关键修复（2026-06-23）：streamid 必须以「原始明文」交给 libsrt。
+        // 之前用 addingPercentEncoding(.alphanumerics) 把整串编码成 %23%21%3A%3A...，
+        // 但 libsrt 不会反解码，SRS 收到后解析不出 #!:: 前缀 → connect 失败（error 1）。
+        // 服务端已用 ffmpeg 明文 streamid 实测推通，证明问题在客户端编码。
+        // 改用 URLComponents 拼接：它只对 query value 做标准 URL 转义，
+        // libsrt/HaishinKit 按标准 URL 解析时会正确还原成原始 streamid。
+        let streamId = "#!::r=\(app)/\(streamKey),m=publish"
 
-        guard let url = URL(string: urlString) else {
-            reportFailure("SRT URL 非法：\(urlString)")
+        var components = URLComponents()
+        components.scheme = "srt"
+        components.host = ip
+        components.port = port
+        components.queryItems = [URLQueryItem(name: "streamid", value: streamId)]
+
+        guard let url = components.url else {
+            reportFailure("SRT URL 构造失败：ip=\(ip) port=\(port)")
             return
         }
+        let urlString = url.absoluteString
 
         startTask?.cancel()
         startTask = Task { [weak self] in
