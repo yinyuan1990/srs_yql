@@ -46,6 +46,22 @@ final class SRTManager {
     /// 状态变化回调（主线程）。
     var onStateChange: ((_ isPublishing: Bool) -> Void)?
 
+    /// 统计回调（主线程，每秒一次）：上报实际推送 fps 与码率 kbps。
+    /// 解耦：SRTManager 不直接引用 WebSocketManager，由 WebRTCManager 在回调里转写状态。
+    var onStats: ((_ fps: Int, _ kbps: Int) -> Void)?
+
+    /// 目标码率（kbps），由 WebRTCManager 注入当前档位/清晰度对应的目标码率。
+    /// SRT 链路无 WebRTC stats，故用目标码率作为上报近似（与发送字节统计择优）。
+    var targetBitrateKbps: Int = 0
+
+    // MARK: - 统计（fps 实测 + 码率近似）
+
+    /// 本统计窗口内实际喂入 SRT 的帧数（用 statLock 保护）。
+    private var statFrameCount: Int = 0
+    private let statLock = NSLock()
+    /// 每秒统计定时器（主队列）。
+    private var statsTimer: DispatchSourceTimer?
+
     // MARK: - 连接参数（方案 A：端口写死，IP 复用登录返回的 stream_push_ip）
 
     /// SRT 服务端口（与 SRS srt_server listen 对齐，默认 10080）。
@@ -145,6 +161,7 @@ final class SRTManager {
                 await MainActor.run {
                     self.isPublishing = true
                     self.onStateChange?(true)
+                    self.startStatsTimer()
                     print("✅ [SRT] 已连接并 publish：\(urlString)")
                 }
             } catch {
@@ -159,6 +176,7 @@ final class SRTManager {
 
     /// 停止 SRT 推流并释放资源。
     func stop() {
+        stopStatsTimer()
         startTask?.cancel()
         startTask = nil
         let stream = self.stream
@@ -173,10 +191,40 @@ final class SRTManager {
         formatDescription = nil
         cachedWidth = 0
         cachedHeight = 0
+        statLock.lock()
+        statFrameCount = 0
+        statLock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onStateChange?(false)
+            self?.onStats?(0, 0)   // 通知清零（PC 端码率回到 0）
         }
         print("🛑 [SRT] 已停止推流")
+    }
+
+    // MARK: - 统计定时器
+
+    /// 启动每秒统计：实测 fps + 目标码率近似，通过 onStats 回调上报。
+    private func startStatsTimer() {
+        stopStatsTimer()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.isPublishing else { return }
+            self.statLock.lock()
+            let fps = self.statFrameCount
+            self.statFrameCount = 0
+            self.statLock.unlock()
+            // SRT 无 WebRTC stats，码率用 WebRTCManager 注入的目标码率作为近似。
+            let kbps = self.targetBitrateKbps
+            self.onStats?(fps, kbps)
+        }
+        timer.resume()
+        statsTimer = timer
+    }
+
+    private func stopStatsTimer() {
+        statsTimer?.cancel()
+        statsTimer = nil
     }
 
     // MARK: - 帧注入（喂「滤镜后」的 NV12 帧）
@@ -194,6 +242,10 @@ final class SRTManager {
         guard let sampleBuffer = makeSampleBuffer(from: pixelBuffer, timeStampNs: timeStampNs) else {
             return
         }
+        // 统计：累计实际喂入帧数（用于每秒计算推送 fps）。
+        statLock.lock()
+        statFrameCount += 1
+        statLock.unlock()
         // MediaMixer.append 为 nonisolated-safe 的 actor 方法；用 Task 转交。
         Task { [mixer] in
             await mixer.append(sampleBuffer, track: 0)

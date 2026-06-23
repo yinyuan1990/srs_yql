@@ -3740,6 +3740,17 @@ final class WebRTCManager: NSObject, ObservableObject {
         srtManager.onStateChange = { publishing in
             print("ℹ️ [SRT] publishing=\(publishing)")
         }
+        // ⭐ 注入目标码率（SRT 无 WebRTC stats，用目标码率作为上报近似）。
+        srtManager.targetBitrateKbps = targetBitrateKbps
+        // ⭐ SRT 统计回调：实测 fps + 目标码率 → 写入状态上报字段（PC 顶栏显示）。
+        srtManager.onStats = { [weak self] fps, kbps in
+            guard let self else { return }
+            WebSocketManager.publishingFps = fps
+            WebSocketManager.publishingSendFps = fps
+            WebSocketManager.publishingKbps = kbps
+            // 目标码率可能在运行中被档位/清晰度调整，持续同步给 SRTManager。
+            self.srtManager.targetBitrateKbps = self.targetBitrateKbps
+        }
         srtManager.start(ip: ip, streamKey: streamKey)
 
         // 把滤镜后帧旁路给 SRT（与原 WebRTC 推送同节流、同时间戳）。
@@ -3749,7 +3760,8 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         isPublishing = true
         WebSocketManager.isPublishingFlag = 1
-        startStats()
+        // 注意：不调用 startStats()（那是 WebRTC PeerConnection 统计，SRT 模式 pc 为 nil 空转）。
+        // SRT 码率/帧率由 srtManager.onStats 上报。
         print("✅ [SRT] 就绪：srt://\(ip):10080 streamKey=\(streamKey)")
     }
 

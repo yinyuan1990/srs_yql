@@ -140,7 +140,7 @@ class WebSocketManager: ObservableObject {
         let connectMode: String
         switch connectstype {
         case 1:  connectMode = "p2p"
-        case 2:  connectMode = "srs"   // SRT → SRS 桥接 → PC 仍 WebRTC 拉
+        case 2:  connectMode = "srt"   // 方案 B：PC 直接拉 SRT（connectstype=2 → PC playSRT）
         default: connectMode = "srs"
         }
         let p2pViewerCount = P2PManager.currentViewerCount
