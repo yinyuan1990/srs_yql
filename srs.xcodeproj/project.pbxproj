@@ -24,9 +24,6 @@
 		2C25E1242E5FBB5B00EA9245 /* ConfigManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */; };
 		2C25E1262E5FBBEB00EA9245 /* APIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E1252E5FBBEB00EA9245 /* APIService.swift */; };
 		2C25E12B2E5FCF6000EA9245 /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */; };
-		2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000A001 /* P2PManager.swift */; };
-		2CBBBBBB2E0000000000B002 /* SRSManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBBBBBB2E0000000000B001 /* SRSManager.swift */; };
-		2CP2P00012E5FCF6000EA9245 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CP2P00002E5FCF6000EA9245 /* P2PManager.swift */; };
 		2C404C5B2E6A27DD0015CF69 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C404C5A2E6A27DD0015CF69 /* ProfileView.swift */; };
 		2C4151A12F13AB7600272C01 /* user_agreement.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A02F13AB7600272C01 /* user_agreement.html */; };
 		2C4151A32F13AB8400272C01 /* privacy_policy.html in Resources */ = {isa = PBXBuildFile; fileRef = 2C4151A22F13AB8400272C01 /* privacy_policy.html */; };
@@ -40,6 +37,9 @@
 		2C4E72E12FC5501D00BC4D30 /* lookup_soft_elegance_1.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E52FC5502100BC4D30 /* lookup_soft_elegance_1.png */; };
 		2C4E72E22FC5501E00BC4D30 /* lookup_soft_elegance_2.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */; };
 		2C4E72E32FC5501F00BC4D30 /* lookup_miss_etikate.png in Resources */ = {isa = PBXBuildFile; fileRef = 2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */; };
+		2C5867CE2FE959F000624BF2 /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5867CD2FE959F000624BF2 /* HaishinKit */; };
+		2C5867D02FE959F000624BF2 /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5867CF2FE959F000624BF2 /* SRTHaishinKit */; };
+		2C5867D22FE95A0C00624BF2 /* SRTManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5867D12FE95A0C00624BF2 /* SRTManager.swift */; };
 		2C596C582E58E22500C94789 /* srsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C572E58E22500C94789 /* srsApp.swift */; };
 		2C596C5A2E58E22500C94789 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C592E58E22500C94789 /* ContentView.swift */; };
 		2C596C5C2E58E22600C94789 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C596C5B2E58E22600C94789 /* Assets.xcassets */; };
@@ -48,9 +48,11 @@
 		2C5B00522E90DC5100755FBF /* WebRTCManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00512E90DC5100755FBF /* WebRTCManager.swift */; };
 		2C5B00542E90DD2600755FBF /* WebRTCPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */; };
 		2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */; };
+		2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000A001 /* P2PManager.swift */; };
 		2CB8FA4E2E73C59A00F90666 /* ImagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */; };
 		2CB8FA502E73D38100F90666 /* WebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4F2E73D38100F90666 /* WebView.swift */; };
 		2CB8FA532E73FAFC00F90666 /* SwiftStomp in Frameworks */ = {isa = PBXBuildFile; productRef = 2CB8FA522E73FAFC00F90666 /* SwiftStomp */; };
+		2CBBBBBB2E0000000000B002 /* SRSManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBBBBBB2E0000000000B001 /* SRSManager.swift */; };
 		2CC405772E63B22400E31EF8 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC405762E63B22400E31EF8 /* AppState.swift */; };
 		2CC405972E67CBA500E31EF8 /* ThinRemoteConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC405962E67CBA500E31EF8 /* ThinRemoteConfig.swift */; };
 		2CF5F3452F263D6A00AA0575 /* MessageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CF5F3442F263D6A00AA0575 /* MessageView.swift */; };
@@ -76,8 +78,6 @@
 		2C25E1232E5FBB5B00EA9245 /* ConfigManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigManager.swift; sourceTree = "<group>"; };
 		2C25E1252E5FBBEB00EA9245 /* APIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIService.swift; sourceTree = "<group>"; };
 		2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
-		2CAAAAAA2E0000000000A001 /* P2PManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PManager.swift; sourceTree = "<group>"; };
-		2CBBBBBB2E0000000000B001 /* SRSManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRSManager.swift; sourceTree = "<group>"; };
 		2C404C5A2E6A27DD0015CF69 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
 		2C4151A02F13AB7600272C01 /* user_agreement.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = user_agreement.html; sourceTree = "<group>"; };
 		2C4151A22F13AB8400272C01 /* privacy_policy.html */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.html; path = privacy_policy.html; sourceTree = "<group>"; };
@@ -91,6 +91,7 @@
 		2C4E72E52FC5502100BC4D30 /* lookup_soft_elegance_1.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_soft_elegance_1.png; sourceTree = "<group>"; };
 		2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_soft_elegance_2.png; sourceTree = "<group>"; };
 		2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_miss_etikate.png; sourceTree = "<group>"; };
+		2C5867D12FE95A0C00624BF2 /* SRTManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRTManager.swift; sourceTree = "<group>"; };
 		2C596C542E58E22500C94789 /* 金凤凰.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "金凤凰.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		2C596C572E58E22500C94789 /* srsApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = srsApp.swift; sourceTree = "<group>"; };
 		2C596C592E58E22500C94789 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -99,8 +100,10 @@
 		2C5B00512E90DC5100755FBF /* WebRTCManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCManager.swift; sourceTree = "<group>"; };
 		2C5B00532E90DD2600755FBF /* WebRTCPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCPreview.swift; sourceTree = "<group>"; };
 		2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomAVCaptureVideoCapturer.swift; sourceTree = "<group>"; };
+		2CAAAAAA2E0000000000A001 /* P2PManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PManager.swift; sourceTree = "<group>"; };
 		2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePicker.swift; sourceTree = "<group>"; };
 		2CB8FA4F2E73D38100F90666 /* WebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebView.swift; sourceTree = "<group>"; };
+		2CBBBBBB2E0000000000B001 /* SRSManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRSManager.swift; sourceTree = "<group>"; };
 		2CC405762E63B22400E31EF8 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		2CC405962E67CBA500E31EF8 /* ThinRemoteConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinRemoteConfig.swift; sourceTree = "<group>"; };
 		2CF5F3442F263D6A00AA0575 /* MessageView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MessageView.swift; sourceTree = "<group>"; };
@@ -114,6 +117,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				2CB8FA532E73FAFC00F90666 /* SwiftStomp in Frameworks */,
+				2C5867CE2FE959F000624BF2 /* HaishinKit in Frameworks */,
+				2C5867D02FE959F000624BF2 /* SRTHaishinKit in Frameworks */,
 				2C5B00502E90D20800755FBF /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -142,6 +147,7 @@
 		2C25E1222E5FBB4200EA9245 /* Managers */ = {
 			isa = PBXGroup;
 			children = (
+				2C5867D12FE95A0C00624BF2 /* SRTManager.swift */,
 				2C4E72D72FC5501400BC4D30 /* NV12MetalProcessor.swift */,
 				2C4E72DD2FC5501900BC4D30 /* NV12LUTProcessor.swift */,
 				2C4E72D52FC5500C00BC4D30 /* NV12Filter.metal */,
@@ -249,6 +255,8 @@
 			packageProductDependencies = (
 				2CB8FA522E73FAFC00F90666 /* SwiftStomp */,
 				2C5B004F2E90D20800755FBF /* WebRTC */,
+				2C5867CD2FE959F000624BF2 /* HaishinKit */,
+				2C5867CF2FE959F000624BF2 /* SRTHaishinKit */,
 			);
 			productName = srs;
 			productReference = 2C596C542E58E22500C94789 /* 金凤凰.app */;
@@ -281,6 +289,7 @@
 			packageReferences = (
 				2CB8FA512E73FAFC00F90666 /* XCRemoteSwiftPackageReference "SwiftStomp" */,
 				2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "WebRTC" */,
+				2C5867CC2FE959F000624BF2 /* XCRemoteSwiftPackageReference "HaishinKit" */,
 			);
 			productRefGroup = 2C596C552E58E22500C94789 /* Products */;
 			projectDirPath = "";
@@ -352,6 +361,7 @@
 				2CFE49342E5E2FCF00FCC88C /* HomeView.swift in Sources */,
 				2CB8FA502E73D38100F90666 /* WebView.swift in Sources */,
 				2C25E1262E5FBBEB00EA9245 /* APIService.swift in Sources */,
+				2C5867D22FE95A0C00624BF2 /* SRTManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -573,6 +583,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		2C5867CC2FE959F000624BF2 /* XCRemoteSwiftPackageReference "HaishinKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/shogo4405/HaishinKit.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
 		2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "WebRTC" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/stasel/WebRTC.git";
@@ -592,6 +610,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		2C5867CD2FE959F000624BF2 /* HaishinKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2C5867CC2FE959F000624BF2 /* XCRemoteSwiftPackageReference "HaishinKit" */;
+			productName = HaishinKit;
+		};
+		2C5867CF2FE959F000624BF2 /* SRTHaishinKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2C5867CC2FE959F000624BF2 /* XCRemoteSwiftPackageReference "HaishinKit" */;
+			productName = SRTHaishinKit;
+		};
 		2C5B004F2E90D20800755FBF /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "WebRTC" */;
