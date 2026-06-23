@@ -133,6 +133,13 @@ final class SRTManager {
                 await self.mixer.addOutput(self.stream)
 
                 try await self.connection.connect(url)
+
+                // ⚠️ 关键修复（2026-06-23）：HaishinKit 2.x 自定义喂帧时，publish 前必须显式声明
+                // 期望的媒体轨道，否则报 "Please set expected media" 且不推视频。
+                // 我们只推视频、不推音频（mixer 未 attachAudio），故 audio:false, video:true。
+                // 需在 connect 之后、publish 之前调用。
+                await self.stream.setExpectedMedia(audio: false, video: true)
+
                 await self.stream.publish(streamKey)
 
                 await MainActor.run {
