@@ -91,25 +91,39 @@ final class SRTManager {
         // streamid 约定（与 PC/SRS 对齐）：
         // srt://IP:PORT?streamid=#!::r=<app>/<streamKey>,m=publish
         //
-        // ⚠️ 关键修复（2026-06-23）：streamid 必须以「原始明文」交给 libsrt。
-        // 之前用 addingPercentEncoding(.alphanumerics) 把整串编码成 %23%21%3A%3A...，
-        // 但 libsrt 不会反解码，SRS 收到后解析不出 #!:: 前缀 → connect 失败（error 1）。
-        // 服务端已用 ffmpeg 明文 streamid 实测推通，证明问题在客户端编码。
-        // 改用 URLComponents 拼接：它只对 query value 做标准 URL 转义，
-        // libsrt/HaishinKit 按标准 URL 解析时会正确还原成原始 streamid。
+        // ⚠️ 关键修复（2026-06-23，第二版）：streamid 必须以「原始明文」交给 libsrt。
+        //
+        // 根因（已查 HaishinKit 源码 SRTSocketOption.getQueryItems）：
+        //   HaishinKit 用 `uri.absoluteString` 取 query，按 '?' 和 '&' 切分后，
+        //   **直接把 value 传给 libsrt SRTO_STREAMID，不做任何百分号解码**。
+        //   所以无论 addingPercentEncoding 还是 URLComponents，只要 absoluteString 里
+        //   streamid 被编码成 %23/%3D/%2C，SRS 就会收到编码串（实测 app=%23!::r%3Dlive）。
+        //   → 必须让 url.absoluteString 里的 streamid 就是明文 #!::r=live/...,m=publish。
+        //
+        // 做法（已查 HaishinKit 源码 + Issue #1498 实证）：
+        //   HaishinKit.getQueryItems 用 `uri.absoluteString.split("?")[1].split("&")` 取 streamid，
+        //   **不做百分号解码**，原样传给 libsrt SRTO_STREAMID。
+        //   因此 url.absoluteString 里必须是明文 `streamid=#!::r=live/<key>,m=publish`。
+        //   Issue #1498 实测 `URL(string:"srt://ip:10080?streamid=#!::r=live/x,m=publish")` 可被 SRS 正确识别。
+        //   坑：iOS 17+ 的 URL(string:) 默认会把 '#' 百分号编码成 %23 → 必须用
+        //       encodingInvalidCharacters:false 保留明文；iOS 16 用经典 URL(string:)（# 进 fragment 但 absoluteString 保留全文）。
         let streamId = "#!::r=\(app)/\(streamKey),m=publish"
+        let urlString = "srt://\(ip):\(port)?streamid=\(streamId)"
 
-        var components = URLComponents()
-        components.scheme = "srt"
-        components.host = ip
-        components.port = port
-        components.queryItems = [URLQueryItem(name: "streamid", value: streamId)]
-
-        guard let url = components.url else {
-            reportFailure("SRT URL 构造失败：ip=\(ip) port=\(port)")
-            return
+        let url: URL
+        if #available(iOS 17.0, *) {
+            guard let u = URL(string: urlString, encodingInvalidCharacters: false) else {
+                reportFailure("SRT URL 非法：\(urlString)")
+                return
+            }
+            url = u
+        } else {
+            guard let u = URL(string: urlString) else {
+                reportFailure("SRT URL 非法：\(urlString)")
+                return
+            }
+            url = u
         }
-        let urlString = url.absoluteString
 
         startTask?.cancel()
         startTask = Task { [weak self] in
