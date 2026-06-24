@@ -47,9 +47,15 @@ final class SRTManager {
     /// 状态变化回调（主线程）。
     var onStateChange: ((_ isPublishing: Bool) -> Void)?
 
-    /// 统计回调（主线程，每秒一次）：上报实际推送 fps 与码率 kbps。
-    /// 解耦：SRTManager 不直接引用 WebSocketManager，由 WebRTCManager 在回调里转写状态。
-    var onStats: ((_ fps: Int, _ kbps: Int) -> Void)?
+    /// 统计/网络采样回调（主线程，每秒一次）。
+    /// 解耦：SRTManager 不直接引用 WebSocketManager / 自适应逻辑，
+    /// 由 WebRTCManager 在回调里转写上报字段并驱动自适应（与 SRS/P2P 同一套策略）。
+    /// - pushFps: 本秒实际喂入 SRT 的帧数（= 推送 fps）。
+    /// - kbps: 真实发送码率（取自 libsrt mbpsSendRate；拿不到时回退目标码率）。
+    /// - rttMs: SRT 链路 RTT（毫秒）。
+    /// - lossRate: 本秒发送丢包率（0~1，按发送/丢包计数增量算）。
+    /// - lossPerSec: 本秒发送丢包数。
+    var onSample: ((_ pushFps: Int, _ kbps: Int, _ rttMs: Int, _ lossRate: Double, _ lossPerSec: Int) -> Void)?
 
     /// 目标码率（kbps），由 WebRTCManager 注入当前档位/清晰度对应的目标码率。
     /// SRT 链路无 WebRTC stats，故用目标码率作为上报近似（与发送字节统计择优）。
@@ -76,6 +82,9 @@ final class SRTManager {
     private let statLock = NSLock()
     /// 每秒统计定时器（主队列）。
     private var statsTimer: DispatchSourceTimer?
+    /// 上次采样的累计发送包数 / 累计发送丢包数（用于按增量算每秒丢包率）。
+    private var lastPktSentTotal: Int64 = 0
+    private var lastPktSndLossTotal: Int32 = 0
 
     // MARK: - 连接参数（方案 A：端口写死，IP 复用登录返回的 stream_push_ip）
 
@@ -229,7 +238,7 @@ final class SRTManager {
         statLock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onStateChange?(false)
-            self?.onStats?(0, 0)   // 通知清零（PC 端码率回到 0）
+            self?.onSample?(0, 0, 0, 0, 0)   // 通知清零（PC 端码率/帧率回到 0）
         }
         print("🛑 [SRT] 已停止推流")
     }
@@ -279,9 +288,12 @@ final class SRTManager {
 
     // MARK: - 统计定时器
 
-    /// 启动每秒统计：实测 fps + 目标码率近似，通过 onStats 回调上报。
+    /// 启动每秒统计：实测推送 fps + 真实发送码率/RTT/丢包（取自 libsrt 性能数据），
+    /// 通过 onSample 回调上报并驱动自适应。
     private func startStatsTimer() {
         stopStatsTimer()
+        lastPktSentTotal = 0
+        lastPktSndLossTotal = 0
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
         timer.setEventHandler { [weak self] in
@@ -290,9 +302,33 @@ final class SRTManager {
             let fps = self.statFrameCount
             self.statFrameCount = 0
             self.statLock.unlock()
-            // SRT 无 WebRTC stats，码率用 WebRTCManager 注入的目标码率作为近似。
-            let kbps = self.targetBitrateKbps
-            self.onStats?(fps, kbps)
+            // libsrt 性能数据是 actor 隔离的异步属性，取回后在主线程回调。
+            Task { [weak self] in
+                guard let self else { return }
+                let pd = await self.connection.performanceData
+                await MainActor.run {
+                    guard self.isPublishing else { return }
+                    var kbps = self.targetBitrateKbps
+                    var rttMs = 0
+                    var lossRate = 0.0
+                    var lossPerSec = 0
+                    if let pd {
+                        // mbpsSendRate：真实发送速率（Mbps）→ kbps；0 时回退目标码率近似。
+                        let realKbps = Int((pd.mbpsSendRate * 1000.0).rounded())
+                        if realKbps > 0 { kbps = realKbps }
+                        rttMs = Int(pd.msRTT.rounded())
+                        // 按累计计数增量算每秒发送丢包率（不依赖 libsrt 的清零行为）。
+                        let sentDelta = max(0, pd.pktSentTotal - self.lastPktSentTotal)
+                        let lossDelta = max(0, Int(pd.pktSndLossTotal - self.lastPktSndLossTotal))
+                        self.lastPktSentTotal = pd.pktSentTotal
+                        self.lastPktSndLossTotal = pd.pktSndLossTotal
+                        lossPerSec = lossDelta
+                        let denom = Double(sentDelta) + Double(lossDelta)
+                        if denom > 0 { lossRate = min(1.0, Double(lossDelta) / denom) }
+                    }
+                    self.onSample?(fps, kbps, rttMs, lossRate, lossPerSec)
+                }
+            }
         }
         timer.resume()
         statsTimer = timer

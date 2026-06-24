@@ -1014,6 +1014,13 @@ final class WebRTCManager: NSObject, ObservableObject {
         return max(100, result)  // 保底 100kbps
     }
 
+    /// SRT 编码器的有效目标码率（kbps）= 档位/清晰度目标码率 × 弱网紧急系数。
+    /// 与 WebRTC 的 applyEffectiveBitrateToWebRTC 同源，区别是写到 HaishinKit 编码器。
+    private func effectiveSRTBitrateKbps() -> Int {
+        let baseMax = max(effectiveMinKbpsForCurrentProfile(), effectiveMaxKbpsForCurrentProfile())
+        return max(100, Int(Double(baseMax) * emergencyBitrateScale))
+    }
+
     private func applyEffectiveBitrateToWebRTC() {
         let baseMin = effectiveMinKbpsForCurrentProfile()
         let baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
@@ -3687,6 +3694,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         // MARK: - SRT (independent)
         frameThrottler?.srtFrameSink = nil
         if srtManager.isPublishing { srtManager.stop() }
+        srtManager.onSample = nil
+        // 复位自适应紧急码率系数，避免状态泄漏到下次推流。
+        emergencyBitrateScale = 1.0
     }
 
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
@@ -3737,6 +3747,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             setAverageOutputFPS(serverFps)
             enableAverageThrottling(true)
         }
+        // ⭐ 启用与 SRS/P2P 同一套自适应（先降帧、到底再降码率，反之回升）。
+        //   SRT 无 WebRTC stats，改由 srtManager.onSample 提供 RTT/丢包驱动 processAdaptiveFps。
+        emergencyBitrateScale = 1.0
+        enableAdaptiveFps(true)
 
         // 方案 A：IP 复用登录返回的 stream_push_ip，端口写死 10080。
         let ip = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""
@@ -3753,18 +3767,32 @@ final class WebRTCManager: NSObject, ObservableObject {
         //   否则 HaishinKit 编码器吃默认值 854x480@640k（详见 SRTManager.encWidth 注释）。
         let initRes = getCaptureResolutionForProfile(currentProfile)
         srtManager.setEncodeParams(width: initRes.width, height: initRes.height,
-                                   fps: initRes.fps, bitrateKbps: targetBitrateKbps)
-        // ⭐ SRT 统计回调：实测 fps + 目标码率 → 写入状态上报字段（PC 顶栏显示）。
-        srtManager.onStats = { [weak self] fps, kbps in
+                                   fps: initRes.fps, bitrateKbps: effectiveSRTBitrateKbps())
+        // ⭐ SRT 每秒采样：真实码率/RTT/丢包 → 上报 PC 顶栏 + 驱动自适应 + 同步编码参数。
+        srtManager.onSample = { [weak self] fps, kbps, rttMs, lossRate, lossPerSec in
             guard let self else { return }
+            // 1) 上报状态（PC 顶栏显示真实推送 fps / 码率 / RTT / 丢包）。
             WebSocketManager.publishingFps = fps
             WebSocketManager.publishingSendFps = fps
             WebSocketManager.publishingKbps = kbps
-            // 档位/清晰度可能在运行中变化，持续把分辨率/帧率/码率同步给 SRTManager
-            // （setEncodeParams 内部仅在参数变化时才真正下发到编码器）。
+            WebSocketManager.rtt = rttMs
+            WebSocketManager.packetLoss = lossRate * 100.0
+            WebSocketManager.networkQuality = (rttMs > 0 && rttMs <= 150 && lossRate < 0.02) ? "good"
+                : (rttMs > 400 || lossRate > 0.1) ? "poor" : "fair"
+            // 2) 用 SRT 链路指标驱动与 SRS/P2P 完全相同的自适应策略
+            //    （先降帧、fps 到底再降 emergencyBitrateScale，反之回升）。
+            if self.isPublishing {
+                self.processAdaptiveFps(instantLossRate: lossRate,
+                                        packetsLostPerSec: lossPerSec,
+                                        rttMs: rttMs,
+                                        bitrateRatio: 1.0)
+            }
+            // 3) 把当前档位分辨率 + 自适应帧率 + 有效码率（含紧急系数）同步给 SRT 编码器
+            //    （setEncodeParams 内部仅在参数变化时才真正下发，避免重复重建编码会话）。
             let res = self.getCaptureResolutionForProfile(self.currentProfile)
+            let sendFps = self.frameThrottler?.targetSendFps ?? res.fps
             self.srtManager.setEncodeParams(width: res.width, height: res.height,
-                                            fps: res.fps, bitrateKbps: self.targetBitrateKbps)
+                                            fps: sendFps, bitrateKbps: self.effectiveSRTBitrateKbps())
         }
         srtManager.start(ip: ip, streamKey: streamKey)
 
