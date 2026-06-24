@@ -23,6 +23,7 @@ import Foundation
 import AVFoundation
 import CoreVideo
 import CoreMedia
+import VideoToolbox
 import HaishinKit
 import SRTHaishinKit
 
@@ -53,6 +54,20 @@ final class SRTManager {
     /// 目标码率（kbps），由 WebRTCManager 注入当前档位/清晰度对应的目标码率。
     /// SRT 链路无 WebRTC stats，故用目标码率作为上报近似（与发送字节统计择优）。
     var targetBitrateKbps: Int = 0
+
+    // MARK: - 编码参数（分辨率/帧率，由 WebRTCManager 按档位注入）
+
+    /// ⭐ 2026-06-24 修复「SRT 分辨率永远 854x480」：
+    ///   HaishinKit 自带 H.264 编码器的默认 VideoCodecSettings 写死 videoSize=854x480、
+    ///   bitRate=640k、scalingMode=.trim，且本链路从未调用 setVideoSettings，
+    ///   所以无论喂入多大的帧，编码器都强制缩放裁剪到 854x480。
+    ///   P2P/SRS 走 WebRTC 自己的编码器（按档位配置），故不受影响 → 三链路看似解耦，
+    ///   实则 SRT 缺了「按档位配置编码器」这一步。
+    ///   解法：WebRTCManager 按 getCaptureResolutionForProfile 注入分辨率/帧率/码率，
+    ///   publish 前应用一次，运行中（档位/清晰度变化）再持续同步。
+    private var encWidth: Int = 1280
+    private var encHeight: Int = 720
+    private var encFps: Int = 30
 
     // MARK: - 统计（fps 实测 + 码率近似）
 
@@ -169,6 +184,10 @@ final class SRTManager {
                 // 需在 connect 之后、publish 之前调用。
                 await self.stream.setExpectedMedias([.video])
 
+                // ⭐ 关键修复（2026-06-24）：publish 前按档位应用编码参数，
+                // 否则编码器吃 HaishinKit 默认值 854x480@640k（见 encWidth 注释）。
+                await self.applyVideoSettingsToStream()
+
                 await self.stream.publish(streamKey)
 
                 await MainActor.run {
@@ -213,6 +232,49 @@ final class SRTManager {
             self?.onStats?(0, 0)   // 通知清零（PC 端码率回到 0）
         }
         print("🛑 [SRT] 已停止推流")
+    }
+
+    // MARK: - 编码参数注入
+
+    /// 设置/更新 SRT 编码参数（分辨率/帧率/码率）。
+    ///
+    /// 可在 publish 前调用（仅记录，随后 publish 时统一应用），也可运行中调用
+    /// （档位/清晰度变化时实时下发到编码器）。参数无变化时不重复下发。
+    ///
+    /// - Parameters:
+    ///   - width/height: 目标编码分辨率（应与喂入帧尺寸一致，避免被 .trim 缩放）。
+    ///   - fps: 期望帧率（仅作编码器功耗优化提示）。
+    ///   - bitrateKbps: 目标码率（kbps）。
+    func setEncodeParams(width: Int, height: Int, fps: Int, bitrateKbps: Int) {
+        let changed = width != encWidth || height != encHeight
+            || fps != encFps || bitrateKbps != targetBitrateKbps
+        encWidth = max(2, width)
+        encHeight = max(2, height)
+        encFps = max(1, fps)
+        targetBitrateKbps = max(1, bitrateKbps)
+        guard changed, isPublishing else { return }
+        Task { [weak self] in
+            await self?.applyVideoSettingsToStream()
+        }
+    }
+
+    /// 把当前 enc* 参数下发到 SRTStream 的编码器。
+    private func applyVideoSettingsToStream() async {
+        var settings = await stream.videoSettings
+        settings.videoSize = CGSize(width: encWidth, height: encHeight)
+        settings.bitRate = targetBitrateKbps * 1000
+        // Baseline + AutoLevel：保留对老 PC 硬解最友好的 Baseline（无 CABAC），
+        // 同时让 level 随分辨率自动抬升（Baseline 3.1 仅支持到 720p，写死会限制高清档）。
+        settings.profileLevel = kVTProfileLevel_H264_Baseline_AutoLevel as String
+        settings.scalingMode = .trim
+        settings.expectedFrameRate = Double(encFps)
+        settings.maxKeyFrameIntervalDuration = 2
+        do {
+            try await stream.setVideoSettings(settings)
+            print("🎚️ [SRT] 编码参数 \(encWidth)x\(encHeight)@\(encFps) \(targetBitrateKbps)kbps")
+        } catch {
+            print("⚠️ [SRT] 应用编码参数失败：\(error.localizedDescription)")
+        }
     }
 
     // MARK: - 统计定时器

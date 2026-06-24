@@ -3749,14 +3749,22 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         // ⭐ 注入目标码率（SRT 无 WebRTC stats，用目标码率作为上报近似）。
         srtManager.targetBitrateKbps = targetBitrateKbps
+        // ⭐ 修复「SRT 分辨率永远 854x480」：按当前档位注入编码分辨率/帧率/码率，
+        //   否则 HaishinKit 编码器吃默认值 854x480@640k（详见 SRTManager.encWidth 注释）。
+        let initRes = getCaptureResolutionForProfile(currentProfile)
+        srtManager.setEncodeParams(width: initRes.width, height: initRes.height,
+                                   fps: initRes.fps, bitrateKbps: targetBitrateKbps)
         // ⭐ SRT 统计回调：实测 fps + 目标码率 → 写入状态上报字段（PC 顶栏显示）。
         srtManager.onStats = { [weak self] fps, kbps in
             guard let self else { return }
             WebSocketManager.publishingFps = fps
             WebSocketManager.publishingSendFps = fps
             WebSocketManager.publishingKbps = kbps
-            // 目标码率可能在运行中被档位/清晰度调整，持续同步给 SRTManager。
-            self.srtManager.targetBitrateKbps = self.targetBitrateKbps
+            // 档位/清晰度可能在运行中变化，持续把分辨率/帧率/码率同步给 SRTManager
+            // （setEncodeParams 内部仅在参数变化时才真正下发到编码器）。
+            let res = self.getCaptureResolutionForProfile(self.currentProfile)
+            self.srtManager.setEncodeParams(width: res.width, height: res.height,
+                                            fps: res.fps, bitrateKbps: self.targetBitrateKbps)
         }
         srtManager.start(ip: ip, streamKey: streamKey)
 
