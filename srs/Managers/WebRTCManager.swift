@@ -3274,15 +3274,22 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
 
         // 8️⃣ 🔥 切换后发送关键帧（解决绿幕问题）
-        // 100ms 后发第一次关键帧
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.forceKeyframe()
-            print("🔑 [档位切换] 100ms 后发送第一次关键帧")
-        }
-        // 200ms 后发第二次关键帧（双重保险）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.forceKeyframe()
-            print("🔑 [档位切换] 200ms 后发送第二次关键帧")
+        //   ⚠️ 仅「同采集分辨率」分支用主线程固定延时发 IDR —— 该分支 setResolutionScale 是同步生效、
+        //   帧不断流，100/200ms 后必有新帧，发 IDR 安全。
+        //   「需要重采集」分支(needRecapture)的 IDR 已改由 recaptureWithResolution 的
+        //   startCapture completion 回调发送（= 后台重配置真正完成、新格式开始产帧之后），
+        //   这里不能再用固定延时发 —— 否则又会在换格式空窗期把 IDR 浪费掉，导致 P2P 切挡位冻住/超高清条纹。
+        if !needRecapture {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.forceKeyframe()
+                print("🔑 [档位切换] 100ms 后发送第一次关键帧（同采集分辨率分支）")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.forceKeyframe()
+                print("🔑 [档位切换] 200ms 后发送第二次关键帧（同采集分辨率分支）")
+            }
+        } else {
+            print("🔑 [档位切换] 重采集分支：IDR 交由 recaptureWithResolution 重配置完成回调发送（避免空窗期浪费 IDR）")
         }
         
         print("🎯 [档位切换] 完成: \(oldProfile) → \(p)")
@@ -4579,11 +4586,44 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         print("   选中格式: \(dims.width)x\(dims.height), maxFps=\(maxFps), 使用=\(useFps)fps")
         
+        // 6️⃣ 预先算好新档位的输出参数（completion 与下方都要用）
+        let preset      = currentLadder[currentProfile]
+        let scaleDown   = preset?.scaleDown ?? 1.0
+        let outputWidth  = preset?.width  ?? Int(dims.width)
+        let outputHeight = preset?.height ?? Int(dims.height)
+
         // 4️⃣ 热切换格式（不 stopCapture，保持相机会话连续，避免绿幕）
         // CustomAVCaptureVideoCapturer.startCapture 内部走 beginConfiguration/commitConfiguration
         // 与玉麒麟 GPUImage 热切换原理一致：帧不断流，编码器不重启
+        //
+        // ⭐⭐ 修复「P2P 切挡位画面冻住 / 切超高清条纹」（2026-06-24）：
+        //   startCapture 内部是 sessionQueue.async（beginConfiguration/removeInput/addInput/
+        //   commitConfiguration/startRunning 全在后台串行执行，完成时刻不确定，16:9 大格式常 >200ms）。
+        //   旧实现把 adaptOutputFormat + forceKeyframe 挂在主线程固定延时(+0.05/+0.15s)，
+        //   极易在「重配置还没完成、新格式还没产帧」的空窗期就把 IDR 发完 → 新格式首帧没有参考 IDR
+        //   → PC webrtcbin 收到无参考的 P 帧 → 画面冻住/超高清条纹，要等下一个周期 IDR 才恢复。
+        //   正解：把 adaptOutputFormat + forceKeyframe 移到 startCapture 的 completion 里
+        //   （= 重配置真正完成、新格式开始产帧之后再发 IDR），无论后台耗时多久都不会再丢首个 IDR。
         print("   🔄 热切换格式（不停流）: \(dims.width)x\(dims.height)@\(useFps)fps")
-        capturer.startCapture(with: device, format: bestFormat, fps: useFps)
+        capturer.startCapture(with: device, format: bestFormat, fps: useFps) { [weak self] in
+            guard let self = self else { return }
+            // completion 已由 CustomAVCaptureVideoCapturer 切回主线程执行。
+            // 通知 WebRTC 新分辨率 → 编码器立即输出 IDR（比码率微调更直接可靠）。
+            self.videoSource?.adaptOutputFormat(
+                toWidth: Int32(outputWidth),
+                height: Int32(outputHeight),
+                fps: Int32(useFps)
+            )
+            self.forceKeyframe()
+            // 兜底：再补两拍关键帧，覆盖「completion 时新格式首帧尚未真正吐出」的极短窗口。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.forceKeyframe()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.forceKeyframe()
+            }
+            print("🔑 [分辨率切换] 重配置完成回调 → adaptOutputFormat + forceKeyframe（IDR 发在新格式产帧之后）")
+        }
 
         // 5️⃣ 更新状态变量
         currentCaptureWidth  = Int(dims.width)
@@ -4591,17 +4631,13 @@ final class WebRTCManager: NSObject, ObservableObject {
         currentCaptureFPS    = useFps
 
         // 6️⃣ 更新 FrameThrottler
-        let preset      = currentLadder[currentProfile]
-        let scaleDown   = preset?.scaleDown ?? 1.0
-        let outputWidth  = preset?.width  ?? Int(dims.width)
-        let outputHeight = preset?.height ?? Int(dims.height)
         frameThrottler?.expectedCaptureWidth  = Int(dims.width)
         frameThrottler?.expectedCaptureHeight = Int(dims.height)
         frameThrottler?.expectedOutputWidth   = outputWidth
         frameThrottler?.expectedOutputHeight  = outputHeight
         frameThrottler?.currentScaleDown      = scaleDown
 
-        print("   ✅ 格式热切换完成: \(dims.width)x\(dims.height)@\(useFps)fps → 输出: \(outputWidth)x\(outputHeight)")
+        print("   ✅ 格式热切换请求已发出: \(dims.width)x\(dims.height)@\(useFps)fps → 输出: \(outputWidth)x\(outputHeight)（IDR 待重配置完成回调发送）")
         print("═══════════════════════════════════════════════════")
 
         // 7️⃣ 延迟应用相机配置（推迟到格式稳定后，避免 ISO 越界 + 减少二次抖动）
@@ -4610,20 +4646,6 @@ final class WebRTCManager: NSObject, ObservableObject {
             self.configureCameraAutoModes(device)
             self.applyMountTransform()
             self.applyPipelineDefaults(source: "recapture-stabilized")
-        }
-
-        // 8️⃣ 用 adaptOutputFormat 通知 WebRTC 新分辨率 → 可靠触发 IDR 帧
-        // 比码率微调更直接，编码器收到信号后立即输出 IDR
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self = self else { return }
-            self.videoSource?.adaptOutputFormat(
-                toWidth: Int32(outputWidth),
-                height: Int32(outputHeight),
-                fps: Int32(useFps)
-            )
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.forceKeyframe()
         }
     }
     
