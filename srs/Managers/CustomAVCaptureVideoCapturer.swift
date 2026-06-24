@@ -509,9 +509,11 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             // 延迟检查白平衡模式是否被系统覆盖
             let checkDevice = device
             sessionQueue.asyncAfter(deadline: .now() + 2.0) {
-                let wbMode = checkDevice.whiteBalanceMode
-                let expMode = checkDevice.exposureMode
-                print("⚪️ [CustomCapture] 2秒后检查: whiteBalanceMode=\(wbMode.rawValue) (0=locked,1=auto,2=continuous), exposureMode=\(expMode.rawValue)")
+                if WebRTCManager.verboseLogEnabled {
+                    let wbMode = checkDevice.whiteBalanceMode
+                    let expMode = checkDevice.exposureMode
+                    print("⚪️ [CustomCapture] 2秒后检查: whiteBalanceMode=\(wbMode.rawValue) (0=locked,1=auto,2=continuous), exposureMode=\(expMode.rawValue)")
+                }
             }
 
             if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {

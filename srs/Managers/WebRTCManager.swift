@@ -857,9 +857,15 @@ struct LadderPreset {
 
 final class WebRTCManager: NSObject, ObservableObject {
     
+    /// ⭐ 统一详细调试日志开关（默认关闭）。
+    /// 控制：自适应/码率计算/SRT 编码参数/采集对焦曝光 等高频刷屏日志。
+    /// 需要排查时改为 true（或运行时 `WebRTCManager.verboseLogEnabled = true`）。
+    static var verboseLogEnabled = false
+
     /// 码率限制 / 自适应 FPS 调试日志统一前缀（控制台过滤: malvshezhing）
     private static let malvshezhingLogPrefix = "malvshezhing"
     private func malvshezhingLog(_ message: String) {
+        guard Self.verboseLogEnabled else { return }
         print("\(Self.malvshezhingLogPrefix) \(message)")
     }
     
@@ -1009,7 +1015,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         let qualityPercent = lastQualityPercent ?? 100
         let result = Int(Double(preset.maxKbps) * Double(qualityPercent) / 100.0)
 
-        print("📊 码率计算: 档位 min=\(preset.minKbps) max=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → \(effectiveMinKbpsForCurrentProfile())-\(max(100, result))kbps")
+        if Self.verboseLogEnabled {
+            print("📊 码率计算: 档位 min=\(preset.minKbps) max=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → \(effectiveMinKbpsForCurrentProfile())-\(max(100, result))kbps")
+        }
 
         return max(100, result)  // 保底 100kbps
     }

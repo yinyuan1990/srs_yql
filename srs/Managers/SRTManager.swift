@@ -288,7 +288,9 @@ final class SRTManager {
         settings.maxKeyFrameIntervalDuration = 2
         do {
             try await stream.setVideoSettings(settings)
-            print("🎚️ [SRT] 编码参数 \(encWidth)x\(encHeight)@\(encFps) \(targetBitrateKbps)kbps")
+            if WebRTCManager.verboseLogEnabled {
+                print("🎚️ [SRT] 编码参数 \(encWidth)x\(encHeight)@\(encFps) \(targetBitrateKbps)kbps")
+            }
         } catch {
             print("⚠️ [SRT] 应用编码参数失败：\(error.localizedDescription)")
         }
