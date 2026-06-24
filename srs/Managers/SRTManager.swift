@@ -268,6 +268,14 @@ final class SRTManager {
     }
 
     /// 把当前 enc* 参数下发到 SRTStream 的编码器。
+    ///
+    /// ⚠️ 分辨率红线（与 P2P/SRS 一致，勿犯 P2P 历史错误 commit be84f5c）：
+    ///   弱网自适应「只降 fps / 降码率，分辨率绝不变」。本方法的 videoSize 只来自
+    ///   档位（WebRTCManager.getCaptureResolutionForProfile），档位切换时才变；
+    ///   自适应过程只改 bitRate / expectedFrameRate（HaishinKit 走 live setOption，
+    ///   不重建编码会话、不改分辨率）。HaishinKit 也无 WebRTC 那种拥塞自动缩分辨率机制，
+    ///   故 SRT 天然不会在弱网时乱缩分辨率。切勿把 emergencyBitrateScale 等自适应量
+    ///   接到 videoSize 上。
     private func applyVideoSettingsToStream() async {
         var settings = await stream.videoSettings
         settings.videoSize = CGSize(width: encWidth, height: encHeight)
