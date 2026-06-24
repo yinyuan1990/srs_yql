@@ -67,7 +67,13 @@ final class SRTManager {
     /// SRT 服务端口（与 SRS srt_server listen 对齐，默认 10080）。
     static let defaultSRTPort: Int = 10080
     /// SRT app（与 SRS default_app / streamid r=<app>/<stream> 对齐）。
-    static let defaultApp: String = "live"
+    /// ⭐ 2026-06-24 修复「SRT 模式 PC/网页内核出不来画面」：
+    ///   方案A 下 PC/网页内核走 WHEP 从 app=`tenantA` 拉流（与 SRS 模式同命名空间），
+    ///   但 SRT 原来落在 app=`live` → app 对不上、SRS 找不到流 → 两个内核都出不来。
+    ///   streamKey 本就与 SRS 一致，只差 app 名。改成 `tenantA` 即与 SRS/PC 完全同命名空间。
+    ///   streamid 显式带 `r=tenantA/<key>`，SRS 按 streamid 的 app 落流（`srt_server default_app live`
+    ///   仅为缺省值，streamid 显式指定时以其为准）→ 桥接成 WebRTC 后正好落在 tenantA/<key>。
+    static let defaultApp: String = "tenantA"
 
     // MARK: - HaishinKit 组件（actor 隔离，统一在 srtTask 串行）
 
@@ -90,7 +96,7 @@ final class SRTManager {
     ///   - ip: 服务器 IP（方案 A 复用登录返回的 `stream_push_ip`）。
     ///   - streamKey: 流名（沿用现有 SRS streamKey 语义）。
     ///   - port: SRT 端口（默认 10080）。
-    ///   - app: app 名（默认 "live"）。
+    ///   - app: app 名（默认 "tenantA"，与 SRS/PC WHEP 同命名空间）。
     func start(ip: String,
                streamKey: String,
                port: Int = SRTManager.defaultSRTPort,
@@ -148,20 +154,13 @@ final class SRTManager {
                 // mixer 输出接到 SRT 流；手动采集模式下我们只喂自定义帧。
                 await self.mixer.addOutput(self.stream)
 
-                // ⚠️ 关键修复（2026-06-23）：必须启动 mixer，否则 append 进来的帧
-                // 没有消费者（MediaMixer.startRunning 内部才建立 videoIO.output → 各 output
-                // 的转发循环），帧到不了 SRTStream → SRS 收不到数据 → SrtTimeout(6002)。
-                // .manual 采集模式下不开摄像头，startRunning 只负责建立帧转发管线。
-                await self.mixer.startRunning()
-
                 try await self.connection.connect(url)
 
                 // ⚠️ 关键修复（2026-06-23）：HaishinKit 2.x 自定义喂帧时，publish 前必须显式声明
                 // 期望的媒体轨道，否则报 "Please set expected media" 且不推视频。
-                // 我们只推视频、不推音频（mixer 未 attachAudio），故只传 [.video]。
-                // 2.2.5 的方法名为 setExpectedMedias(_:)（复数），入参为 Set<AVMediaType>。
+                // 我们只推视频、不推音频（mixer 未 attachAudio），故 audio:false, video:true。
                 // 需在 connect 之后、publish 之前调用。
-                await self.stream.setExpectedMedias([.video])
+                await self.stream.setExpectedMedia(audio: false, video: true)
 
                 await self.stream.publish(streamKey)
 
@@ -193,7 +192,6 @@ final class SRTManager {
             await stream.close()
             try? await connection.close()
             await mixer.removeOutput(stream)
-            await mixer.stopRunning()
         }
         isPublishing = false
         formatDescription = nil
