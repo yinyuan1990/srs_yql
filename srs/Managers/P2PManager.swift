@@ -444,7 +444,13 @@ final class P2PManager: NSObject {
         params.encodings[0].scaleResolutionDownBy = NSNumber(value: ds.p2pScaleDown())
         params.encodings[0].networkPriority = .high
         params.encodings[0].isActive = true
-        params.degradationPreference = NSNumber(value: 1)   // maintainFramerate
+        // ⭐ 2026-06-24 修复「P2P 弱网分辨率乱串」根因：
+        //   原值 1=maintainFramerate → WebRTC 拥塞时为保帧率自动缩分辨率（与产品设计相反）。
+        //   产品设计是弱网「先降 fps → 再降码率，分辨率不动」，由上层 processAdaptiveFps 控制。
+        //   SRS 路径全程用 2=maintainResolution（所以 SRS 不乱串），P2P 这里漏成了 1 → 唯独 P2P 乱串。
+        //   改为 2=maintainResolution，把分辨率锁死，弱网时只降帧/降码率，分辨率始终=档位预设。
+        // RTCDegradationPreference: 0=disabled, 1=maintainFramerate, 2=maintainResolution, 3=balanced
+        params.degradationPreference = NSNumber(value: 2)   // maintainResolution（与 SRS 路径一致）
         sender.parameters = params
     }
 }
