@@ -857,15 +857,9 @@ struct LadderPreset {
 
 final class WebRTCManager: NSObject, ObservableObject {
     
-    /// ⭐ 统一详细调试日志开关（默认关闭）。
-    /// 控制：自适应/码率计算/SRT 编码参数/采集对焦曝光 等高频刷屏日志。
-    /// 需要排查时改为 true（或运行时 `WebRTCManager.verboseLogEnabled = true`）。
-    static var verboseLogEnabled = false
-
     /// 码率限制 / 自适应 FPS 调试日志统一前缀（控制台过滤: malvshezhing）
     private static let malvshezhingLogPrefix = "malvshezhing"
     private func malvshezhingLog(_ message: String) {
-        guard Self.verboseLogEnabled else { return }
         print("\(Self.malvshezhingLogPrefix) \(message)")
     }
     
@@ -1015,18 +1009,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         let qualityPercent = lastQualityPercent ?? 100
         let result = Int(Double(preset.maxKbps) * Double(qualityPercent) / 100.0)
 
-        if Self.verboseLogEnabled {
-            print("📊 码率计算: 档位 min=\(preset.minKbps) max=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → \(effectiveMinKbpsForCurrentProfile())-\(max(100, result))kbps")
-        }
+        print("📊 码率计算: 档位 min=\(preset.minKbps) max=\(preset.maxKbps)kbps × 质量=\(qualityPercent)% → \(effectiveMinKbpsForCurrentProfile())-\(max(100, result))kbps")
 
         return max(100, result)  // 保底 100kbps
-    }
-
-    /// SRT 编码器的有效目标码率（kbps）= 档位/清晰度目标码率 × 弱网紧急系数。
-    /// 与 WebRTC 的 applyEffectiveBitrateToWebRTC 同源，区别是写到 HaishinKit 编码器。
-    private func effectiveSRTBitrateKbps() -> Int {
-        let baseMax = max(effectiveMinKbpsForCurrentProfile(), effectiveMaxKbpsForCurrentProfile())
-        return max(100, Int(Double(baseMax) * emergencyBitrateScale))
     }
 
     private func applyEffectiveBitrateToWebRTC() {
@@ -1042,8 +1027,8 @@ final class WebRTCManager: NSObject, ObservableObject {
         } else {
             malvshezhingLog("[码率] 应用 档位=\(currentProfile) 清晰度=\(pct)% → \(minK)-\(maxK) kbps")
         }
-        // ⭐ P2P：同步码率到所有直连会话
-        if currentConnMode == .p2p { p2pManager.applyEncodingToAllSessions() }
+        // ⭐ P2P：仅同步「码率」到所有直连会话（改法A：与帧率解耦，不再重写 maxFramerate）
+        if currentConnMode == .p2p { p2pManager.applyBitrateToAllSessions() }
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -1072,7 +1057,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         // 🔥 修复：同步更新 WebRTC 编码器的 maxFramerate
         // 否则初始化时设置的 maxFramerate 会变成永久上限，后续 FPS 提升无效
-        if let sender = videoSender {
+        // ⭐ 2026-06-25 改法A配套：P2P 模式 videoSender 恒为 nil，需落到各直连会话（仅改帧率，不碰码率）。
+        if currentConnMode == .p2p {
+            p2pManager.applyFramerateToAllSessions()
+            malvshezhingLog("[setAverageOutputFPS] P2P 各会话 maxFramerate 同步为 \(clamped)fps")
+        } else if let sender = videoSender {
             let params = sender.parameters
             if !params.encodings.isEmpty {
                 let oldMaxFr = params.encodings[0].maxFramerate
@@ -1299,7 +1288,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         
         // 3. 更新WebRTC编码参数
-        if let sender = videoSender {
+        // ⭐ 2026-06-25 改法A配套：P2P 模式下 self.videoSender 恒为 nil，
+        //   自适应 fps 必须落到 P2P 各会话编码器（applyFramerateToAllSessions 只改 maxFramerate，不碰码率），
+        //   否则自适应降帧在编码器层不生效，且会留到「调码率」时才被 applyEncoding 补刷 → 表现为「调码率改了 fps」。
+        if currentConnMode == .p2p {
+            p2pManager.applyFramerateToAllSessions()
+        } else if let sender = videoSender {
             let params = sender.parameters
             if !params.encodings.isEmpty {
                 params.encodings[0].maxFramerate = NSNumber(value: fps)
@@ -1645,7 +1639,14 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         
         // 3. 更新 WebRTC 编码参数
-        if let sender = videoSender {
+        // ⭐ 2026-06-25 改法A配套：P2P 模式 videoSender 恒为 nil，需落到各直连会话（fps/码率仍各自独立）。
+        if currentConnMode == .p2p {
+            p2pManager.applyFramerateToAllSessions()
+            if bitrate > 0 {
+                p2pManager.applyBitrateToAllSessions()
+                malvshezhingLog("[码率] set_fps(P2P) 附带 max=\(bitrate/1000) kbps fps=\(fps)")
+            }
+        } else if let sender = videoSender {
             let params = sender.parameters
             if !params.encodings.isEmpty {
                 params.encodings[0].maxFramerate = NSNumber(value: fps)
@@ -3702,9 +3703,6 @@ final class WebRTCManager: NSObject, ObservableObject {
         // MARK: - SRT (independent)
         frameThrottler?.srtFrameSink = nil
         if srtManager.isPublishing { srtManager.stop() }
-        srtManager.onSample = nil
-        // 复位自适应紧急码率系数，避免状态泄漏到下次推流。
-        emergencyBitrateScale = 1.0
     }
 
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
@@ -3755,10 +3753,6 @@ final class WebRTCManager: NSObject, ObservableObject {
             setAverageOutputFPS(serverFps)
             enableAverageThrottling(true)
         }
-        // ⭐ 启用与 SRS/P2P 同一套自适应（先降帧、到底再降码率，反之回升）。
-        //   SRT 无 WebRTC stats，改由 srtManager.onSample 提供 RTT/丢包驱动 processAdaptiveFps。
-        emergencyBitrateScale = 1.0
-        enableAdaptiveFps(true)
 
         // 方案 A：IP 复用登录返回的 stream_push_ip，端口写死 10080。
         let ip = UserDefaults.standard.string(forKey: "stream_push_ip") ?? ""
@@ -3771,36 +3765,14 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         // ⭐ 注入目标码率（SRT 无 WebRTC stats，用目标码率作为上报近似）。
         srtManager.targetBitrateKbps = targetBitrateKbps
-        // ⭐ 修复「SRT 分辨率永远 854x480」：按当前档位注入编码分辨率/帧率/码率，
-        //   否则 HaishinKit 编码器吃默认值 854x480@640k（详见 SRTManager.encWidth 注释）。
-        let initRes = getCaptureResolutionForProfile(currentProfile)
-        srtManager.setEncodeParams(width: initRes.width, height: initRes.height,
-                                   fps: initRes.fps, bitrateKbps: effectiveSRTBitrateKbps())
-        // ⭐ SRT 每秒采样：真实码率/RTT/丢包 → 上报 PC 顶栏 + 驱动自适应 + 同步编码参数。
-        srtManager.onSample = { [weak self] fps, kbps, rttMs, lossRate, lossPerSec in
+        // ⭐ SRT 统计回调：实测 fps + 目标码率 → 写入状态上报字段（PC 顶栏显示）。
+        srtManager.onStats = { [weak self] fps, kbps in
             guard let self else { return }
-            // 1) 上报状态（PC 顶栏显示真实推送 fps / 码率 / RTT / 丢包）。
             WebSocketManager.publishingFps = fps
             WebSocketManager.publishingSendFps = fps
             WebSocketManager.publishingKbps = kbps
-            WebSocketManager.rtt = rttMs
-            WebSocketManager.packetLoss = lossRate * 100.0
-            WebSocketManager.networkQuality = (rttMs > 0 && rttMs <= 150 && lossRate < 0.02) ? "good"
-                : (rttMs > 400 || lossRate > 0.1) ? "poor" : "fair"
-            // 2) 用 SRT 链路指标驱动与 SRS/P2P 完全相同的自适应策略
-            //    （先降帧、fps 到底再降 emergencyBitrateScale，反之回升）。
-            if self.isPublishing {
-                self.processAdaptiveFps(instantLossRate: lossRate,
-                                        packetsLostPerSec: lossPerSec,
-                                        rttMs: rttMs,
-                                        bitrateRatio: 1.0)
-            }
-            // 3) 把当前档位分辨率 + 自适应帧率 + 有效码率（含紧急系数）同步给 SRT 编码器
-            //    （setEncodeParams 内部仅在参数变化时才真正下发，避免重复重建编码会话）。
-            let res = self.getCaptureResolutionForProfile(self.currentProfile)
-            let sendFps = self.frameThrottler?.targetSendFps ?? res.fps
-            self.srtManager.setEncodeParams(width: res.width, height: res.height,
-                                            fps: sendFps, bitrateKbps: self.effectiveSRTBitrateKbps())
+            // 目标码率可能在运行中被档位/清晰度调整，持续同步给 SRTManager。
+            self.srtManager.targetBitrateKbps = self.targetBitrateKbps
         }
         srtManager.start(ip: ip, streamKey: streamKey)
 

@@ -428,19 +428,38 @@ final class P2PManager: NSObject {
     }
 
     // MARK: - 编码参数（PC 调参时由 WebRTCManager 调用，统一作用到所有会话）
+    //
+    // ⭐ 2026-06-25 改法A：码率与帧率解耦（对齐 SRS「码率和 FPS 完全解耦」设计）。
+    //   旧实现 applyEncoding 把码率+帧率+分辨率一次性全写，导致「调码率会顺带重写 maxFramerate」，
+    //   而上层自适应降帧（applyAdaptiveFps）在 P2P 模式下又没把 fps 落到会话编码器 →
+    //   一拉码率百分比，节流器当前 fps 才被刷进编码器，观感就是「调码率把 fps 也改了」。
+    //   现拆为两路：
+    //     · applyBitrateToAllSessions  —— 只写 min/max 码率（含分辨率锁定与优先级），不碰 maxFramerate
+    //     · applyFramerateToAllSessions —— 只写 maxFramerate
+    //   会话创建时两者都调一次（保证初值），之后码率/帧率各自独立同步，互不牵连。
 
+    /// 仅同步「码率」到所有直连会话（不改 maxFramerate）。
+    func applyBitrateToAllSessions() {
+        for (_, sender) in viewerSenders { applyBitrate(to: sender) }
+    }
+
+    /// 仅同步「帧率」到所有直连会话（不改码率）。
+    func applyFramerateToAllSessions() {
+        for (_, sender) in viewerSenders { applyFramerate(to: sender) }
+    }
+
+    /// 兼容旧调用点：同时同步码率 + 帧率（仅用于会话创建初始化）。
     func applyEncodingToAllSessions() {
         for (_, sender) in viewerSenders { applyEncoding(to: sender) }
     }
 
-    private func applyEncoding(to sender: RTCRtpSender?) {
+    private func applyBitrate(to sender: RTCRtpSender?) {
         guard let sender = sender, let ds = dataSource else { return }
         var params = sender.parameters
         if params.encodings.isEmpty { params.encodings = [RTCRtpEncodingParameters()] }
         let range = ds.p2pBitrateRangeKbps()
         params.encodings[0].minBitrateBps = NSNumber(value: range.min * 1000)
         params.encodings[0].maxBitrateBps = NSNumber(value: range.max * 1000)
-        params.encodings[0].maxFramerate = NSNumber(value: ds.p2pTargetFps())
         params.encodings[0].scaleResolutionDownBy = NSNumber(value: ds.p2pScaleDown())
         params.encodings[0].networkPriority = .high
         params.encodings[0].isActive = true
@@ -452,6 +471,20 @@ final class P2PManager: NSObject {
         // RTCDegradationPreference: 0=disabled, 1=maintainFramerate, 2=maintainResolution, 3=balanced
         params.degradationPreference = NSNumber(value: 2)   // maintainResolution（与 SRS 路径一致）
         sender.parameters = params
+    }
+
+    private func applyFramerate(to sender: RTCRtpSender?) {
+        guard let sender = sender, let ds = dataSource else { return }
+        var params = sender.parameters
+        if params.encodings.isEmpty { params.encodings = [RTCRtpEncodingParameters()] }
+        params.encodings[0].maxFramerate = NSNumber(value: ds.p2pTargetFps())
+        sender.parameters = params
+    }
+
+    /// 会话创建时初始化整组参数（码率 + 帧率），后续走拆分后的独立方法。
+    private func applyEncoding(to sender: RTCRtpSender?) {
+        applyBitrate(to: sender)
+        applyFramerate(to: sender)
     }
 }
 
