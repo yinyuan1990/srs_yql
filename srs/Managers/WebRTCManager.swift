@@ -857,15 +857,16 @@ struct LadderPreset {
 
 final class WebRTCManager: NSObject, ObservableObject {
     
+    /// 全局冗余日志开关（自适应/SRT/采集等模块的高频诊断 print 受此 gate）。
+    /// 默认关闭：每秒刷的自适应/采集诊断 print 在发布/性能场景下会拖慢主路，仅排查时临时改 true。
+    static let verboseLogEnabled = false
+
     /// 码率限制 / 自适应 FPS 调试日志统一前缀（控制台过滤: malvshezhing）
     private static let malvshezhingLogPrefix = "malvshezhing"
     private func malvshezhingLog(_ message: String) {
+        guard WebRTCManager.verboseLogEnabled else { return }
         print("\(Self.malvshezhingLogPrefix) \(message)")
     }
-
-    /// 全局冗余日志开关（SRT/采集等模块的诊断 print 受此 gate）。
-    /// 默认关闭：高频诊断 print 在发布/性能场景下会拖慢主路，仅排查时临时改 true。
-    static let verboseLogEnabled = false
     
     // MARK: - 快门速度上限（静态变量，程序启动时计算）
     /// 综合 16:9 和 4:3 格式的最快快门，取最小值，再和 900 比较取最小

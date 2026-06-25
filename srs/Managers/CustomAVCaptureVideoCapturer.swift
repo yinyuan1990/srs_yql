@@ -4,6 +4,13 @@ import CoreVideo
 import WebRTC
 
 final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
+    /// 冗余诊断日志（白平衡/亮度/对焦/帧率等运行期 print）统一走此 gate，
+    /// 受 WebRTCManager.verboseLogEnabled 控制，默认关闭；错误 print（❌）不走此函数，始终输出。
+    private func vlog(_ message: @autoclosure () -> String) {
+        guard WebRTCManager.verboseLogEnabled else { return }
+        print(message())
+    }
+
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "custom.avcapture.session")
     private let videoQueue = DispatchQueue(label: "custom.avcapture.video", qos: .userInitiated)
@@ -73,7 +80,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             self.outputPixelFormat = pixelFormat
             self.applyVideoOutputPixelFormat()
             let name = pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? "420v" : "420f"
-            print("🧪 [CustomCapture] outputPixelFormat=\(name)")
+            vlog("🧪 [CustomCapture] outputPixelFormat=\(name)")
         }
     }
 
@@ -137,7 +144,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             try device.lockForConfiguration()
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
                 enableContinuousWhiteBalanceLocked(device)
-                print("🎨 [CustomCapture] WB reset → auto")
+                vlog("🎨 [CustomCapture] WB reset → auto")
             }
             device.unlockForConfiguration()
         } catch {
@@ -152,7 +159,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             return
         }
         applyContinuousWhiteBalance()
-        print("🎨 [CustomCapture] WB adjustment ignored, keep continuous auto WB")
+        vlog("🎨 [CustomCapture] WB adjustment ignored, keep continuous auto WB")
     }
 
     func applyShutter(_ shutterSpeed: Int, preserveCurrentISO: Bool) {
@@ -186,7 +193,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 actualShutter = snapped
             }
             let isoText = safeIntText(iso)
-            print("📸 [CustomCapture] shutter=1/\(actualShutter)s snap=\(shutterSpeed)→\(snapped), keepISO=\(isoText)")
+            vlog("📸 [CustomCapture] shutter=1/\(actualShutter)s snap=\(shutterSpeed)→\(snapped), keepISO=\(isoText)")
         } catch {
             print("❌ [CustomCapture] 快门设置失败: \(error.localizedDescription)")
         }
@@ -216,11 +223,11 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                     self?.finishBrightnessApply(generation: generation, ev: ev)
                 }
                 refreshAutoWhiteBalanceAfterLightingChange(reason: "brightness ISO")
-                print("📷 [CustomCapture] brightness request ISO=\(safeIntText(iso)) EV=\(String(format: "%.2f", ev)) mode=custom minISO=\(safeIntText(device.activeFormat.minISO)) maxISO=\(safeIntText(device.activeFormat.maxISO))")
+                vlog("📷 [CustomCapture] brightness request ISO=\(safeIntText(iso)) EV=\(String(format: "%.2f", ev)) mode=custom minISO=\(safeIntText(device.activeFormat.minISO)) maxISO=\(safeIntText(device.activeFormat.maxISO))")
             } else {
                 let clamped = max(device.minExposureTargetBias, min(ev, device.maxExposureTargetBias))
                 device.setExposureTargetBias(clamped, completionHandler: nil)
-                print("📷 [CustomCapture] brightness AE EV=\(String(format: "%.2f", clamped)) mode=\(device.exposureMode.rawValue)")
+                vlog("📷 [CustomCapture] brightness AE EV=\(String(format: "%.2f", clamped)) mode=\(device.exposureMode.rawValue)")
             }
             device.unlockForConfiguration()
         } catch {
@@ -244,7 +251,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             try device.lockForConfiguration()
             guard device.isExposureModeSupported(.custom) else {
                 device.unlockForConfiguration()
-                print("⚠️ [CustomCapture] 增益: 设备不支持 custom 曝光，跳过")
+                vlog("⚠️ [CustomCapture] 增益: 设备不支持 custom 曝光，跳过")
                 return
             }
             let minISO = device.activeFormat.minISO
@@ -257,7 +264,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             device.exposureMode = .custom
             device.setExposureModeCustom(duration: duration, iso: safeISO, completionHandler: nil)
             refreshAutoWhiteBalanceAfterLightingChange(reason: "gain ISO")
-            print("📷 [CustomCapture] 增益 slider=\(s)/100 → ISO=\(safeIntText(safeISO)) (min=\(safeIntText(minISO)) max=\(safeIntText(maxISO)))")
+            vlog("📷 [CustomCapture] 增益 slider=\(s)/100 → ISO=\(safeIntText(safeISO)) (min=\(safeIntText(minISO)) max=\(safeIntText(maxISO)))")
             device.unlockForConfiguration()
         } catch {
             print("❌ [CustomCapture] 增益设置失败: \(error.localizedDescription)")
@@ -275,7 +282,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             let actualEV = self.hardwareEV
             guard abs(actualEV - ev) < 0.001 else { return }
             guard let iso = self.lockedISO else { return }
-            print("📷 [CustomCapture] brightness applied ISO=\(self.safeIntText(iso)) baseISO=\(self.safeIntText(self.baseBrightnessISO ?? iso)) EV=\(String(format: "%.2f", actualEV)) mode=custom")
+            vlog("📷 [CustomCapture] brightness applied ISO=\(self.safeIntText(iso)) baseISO=\(self.safeIntText(self.baseBrightnessISO ?? iso)) EV=\(String(format: "%.2f", actualEV)) mode=custom")
         }
     }
 
@@ -291,7 +298,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 }
             }
             device.unlockForConfiguration()
-            print("🔍 [CustomCapture] focus=\(String(format: "%.2f", clamped))")
+            vlog("🔍 [CustomCapture] focus=\(String(format: "%.2f", clamped))")
         } catch {
             print("❌ [CustomCapture] 对焦设置失败: \(error.localizedDescription)")
         }
@@ -316,7 +323,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             device.setExposureModeCustom(duration: device.exposureDuration, iso: clampedISO, completionHandler: nil)
             refreshAutoWhiteBalanceAfterLightingChange(reason: "auto ISO")
             device.unlockForConfiguration()
-            print("🔄 [CustomCapture] AutoISO EV=\(String(format: "%+.2f", offset)), ISO \(Int(currentISO))→\(Int(clampedISO)), baseISO=\(Int(baseISO ?? clampedISO))")
+            vlog("🔄 [CustomCapture] AutoISO EV=\(String(format: "%+.2f", offset)), ISO \(Int(currentISO))→\(Int(clampedISO)), baseISO=\(Int(baseISO ?? clampedISO))")
         } catch {
             print("❌ [CustomCapture] AutoISO 失败: \(error.localizedDescription)")
         }
@@ -370,7 +377,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         } else {
             applyWhiteBalanceLock()
         }
-        print("⚪️ [CustomCapture] autoWhiteBalance=\(enabled)")
+        vlog("⚪️ [CustomCapture] autoWhiteBalance=\(enabled)")
     }
 
     /// 运用白平衡：开自动WB → 等收敛 → 读gains转色温 → 回调色温值；不锁定，保持连续自动
@@ -398,7 +405,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                     device.unlockForConfiguration()
                     let tempTint = device.temperatureAndTintValues(for: gains)
                     let kelvin = tempTint.temperature
-                    print("⚪️ [CustomCapture] 运用白平衡完成: \(Int(kelvin))K gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain))) mode=continuous")
+                    vlog("⚪️ [CustomCapture] 运用白平衡完成: \(Int(kelvin))K gains=(\(String(format: "%.2f", gains.redGain)),\(String(format: "%.2f", gains.greenGain)),\(String(format: "%.2f", gains.blueGain))) mode=continuous")
                     DispatchQueue.main.async { completion(kelvin) }
                 } catch {
                     print("❌ [CustomCapture] 运用白平衡读取失败: \(error.localizedDescription)")
@@ -409,7 +416,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
 
     func applyColorTemperature(_ kelvin: Float) {
         applyContinuousWhiteBalance()
-        print("⚪️ [CustomCapture] colorTemp request ignored, keep continuous auto WB")
+        vlog("⚪️ [CustomCapture] colorTemp request ignored, keep continuous auto WB")
     }
 
     private func applyColorTemperatureLocked(_ kelvin: Float) {
@@ -422,7 +429,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             try device.lockForConfiguration()
             lockFrameRateLocked(device, fps: fps)
             device.unlockForConfiguration()
-            print("📹 [CustomCapture] fps locked=\(fps)")
+            vlog("📹 [CustomCapture] fps locked=\(fps)")
         } catch {
             print("❌ [CustomCapture] 帧率锁定失败: \(error.localizedDescription)")
         }
@@ -502,7 +509,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
                 enableContinuousWhiteBalanceLocked(device)
                 device.isSubjectAreaChangeMonitoringEnabled = true
-                print("⚪️ [CustomCapture] configureSession → 自动白平衡已开启, exposureMode=\(device.exposureMode.rawValue)")
+                vlog("⚪️ [CustomCapture] configureSession → 自动白平衡已开启, exposureMode=\(device.exposureMode.rawValue)")
             }
             device.unlockForConfiguration()
 
@@ -587,7 +594,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         guard now - lastAutoWhiteBalanceRefreshAt >= autoWhiteBalanceRefreshInterval else { return }
         lastAutoWhiteBalanceRefreshAt = now
         autoWhiteBalanceRefreshInFlight = true
-        print("⚪️ [CustomCapture] \(reason)变化 → 重新触发自动白平衡")
+        vlog("⚪️ [CustomCapture] \(reason)变化 → 重新触发自动白平衡")
         applyWhiteBalanceOnceAndLock { _ in
             self.sessionQueue.async { [weak self] in
                 self?.autoWhiteBalanceRefreshInFlight = false
@@ -611,7 +618,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         if !autoEnabled && device.isVideoHDREnabled != manualEnabled {
             device.isVideoHDREnabled = manualEnabled
         }
-        print("📷 [CustomCapture] videoHDR=\(device.isVideoHDREnabled) autoHDR=\(device.automaticallyAdjustsVideoHDREnabled) supported=\(supported)")
+        vlog("📷 [CustomCapture] videoHDR=\(device.isVideoHDREnabled) autoHDR=\(device.automaticallyAdjustsVideoHDREnabled) supported=\(supported)")
     }
 
     private func enableContinuousWhiteBalanceLocked(_ device: AVCaptureDevice) {
@@ -640,7 +647,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                                     (pixelFormat >> 8) & 0xFF,
                                     pixelFormat & 0xFF)
         let maxFps = Int(format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
-        print("✅ [CustomCapture] \(device.localizedName) \(dims.width)x\(dims.height) fmt=\(pixelFormatStr) max=\(maxFps)fps use=\(fps)fps output=NV12FullRange")
+        vlog("✅ [CustomCapture] \(device.localizedName) \(dims.width)x\(dims.height) fmt=\(pixelFormatStr) max=\(maxFps)fps use=\(fps)fps output=NV12FullRange")
     }
 }
 
