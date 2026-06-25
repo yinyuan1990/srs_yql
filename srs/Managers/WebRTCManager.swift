@@ -1537,6 +1537,14 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 此路用于「RTCP 没回传」的场景，必须可靠本地强制 IDR → 走 forceKeyframe()（码率微调）。
     /// 注意：adaptOutputFormat 传相同分辨率是 no-op，不能用于此处。
     @objc private func onRequestKeyframeCommand(_ notification: Notification) {
+        // ⭐ 2026-06-25 发热优化：PLI/REQUEST_KEYFRAME 走节流，窗口内只补一帧，防观看端狂刷 PLI 打爆编码器
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastForceKeyframeTime)
+        if elapsed < forceKeyframeMinIntervalSec {
+            print("🔑 [request_keyframe] 节流跳过（距上次仅 \(String(format: "%.2f", elapsed))s < \(forceKeyframeMinIntervalSec)s）")
+            return
+        }
+        lastForceKeyframeTime = now
         print("🔑 [request_keyframe] 处理PC关键帧请求 → forceKeyframe")
         forceKeyframe()
     }
@@ -1579,30 +1587,37 @@ final class WebRTCManager: NSObject, ObservableObject {
         adaptiveFps = targetFps
         
         // 🔥 v10.1 防花屏：根据 urgency 决定执行方式 + 降码率 + 插I帧
+        // ⭐ 2026-06-25 发热优化：弱网（critical/high）才【临时】开短 GOP 快恢复，
+        //   用完由 scheduleKeyframeTimerAutoStop 在数秒后自动 stopKeyframeTimer 归位到常态；
+        //   normal/low（网络已恢复/升帧）直接关定时器，回到「默认长 GOP + 按需 PLI」，不再常驻短 GOP。
         switch urgency {
         case "critical":
             // 🚨 紧急：50ms内执行，保码率不降（降FPS已足够，降码率会双重恶化画质）
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
-            setKeyframeInterval(gopExtreme)   // ⭐ 改间隔即重启定时器使其生效
-            malvshezhingLog("[set_fps] critical \(oldFps)→\(targetFps)fps GOP=\(gopExtreme)s 码率=\(bitrate)")
+            setKeyframeInterval(gopExtreme)        // 临时短 GOP（启动定时器）
+            scheduleKeyframeTimerAutoStop()        // ⭐ 数秒后自动关回常态
+            malvshezhingLog("[set_fps] critical \(oldFps)→\(targetFps)fps 临时GOP=\(gopExtreme)s(用完自动归位) 码率=\(bitrate)")
 
         case "high":
             // ⚡ 高优先级：保码率不降，只降FPS + 插I帧
             applyFpsImmediately(targetFps, bitrate: bitrate)
             forceKeyframe()
-            setKeyframeInterval(gopWeak)   // ⭐ 改间隔即重启定时器使其生效
-            malvshezhingLog("[set_fps] high \(oldFps)→\(targetFps)fps GOP=\(gopWeak)s 码率=\(bitrate)")
+            setKeyframeInterval(gopWeak)           // 临时短 GOP（启动定时器）
+            scheduleKeyframeTimerAutoStop()        // ⭐ 数秒后自动关回常态
+            malvshezhingLog("[set_fps] high \(oldFps)→\(targetFps)fps 临时GOP=\(gopWeak)s(用完自动归位) 码率=\(bitrate)")
             
         case "normal":
-            // 正常：可短暂过渡，码率不变
+            // 正常：网络已稳，回到常态长 GOP（关定时器，不再常驻强制 IDR）
             applyFpsImmediately(targetFps, bitrate: bitrate)
-            setKeyframeInterval(gopNormal)  // GOP恢复为1秒（即重启定时器使其生效）
+            stopKeyframeTimer()
+            malvshezhingLog("[set_fps] normal \(oldFps)→\(targetFps)fps 关闭定时强制(回常态长GOP) 码率=\(bitrate)")
             
         case "low":
-            // 低优先级：平滑过渡（升帧时用），码率可能恢复
+            // 低优先级：平滑过渡（升帧时用），网络宽裕→回常态长 GOP
             applyFpsWithTransition(targetFps, bitrate: bitrate, duration: 0.3)
-            setKeyframeInterval(gopNormal)  // GOP恢复为1秒（即重启定时器使其生效）
+            stopKeyframeTimer()
+            malvshezhingLog("[set_fps] low \(oldFps)→\(targetFps)fps 关闭定时强制(回常态长GOP) 码率=\(bitrate)")
             
         default:
             applyFpsImmediately(targetFps, bitrate: bitrate)
@@ -2940,6 +2955,18 @@ final class WebRTCManager: NSObject, ObservableObject {
     // 方案要求：GOP越短，花屏恢复越快。极端弱网必须0.5秒
     private var keyframeTimer: Timer?
     private var keyframeIntervalSec: Double = 0.5  // 🔥 v10.1: 极端弱网推荐0.5秒（可动态调整）
+
+    // ⭐ 2026-06-25 发热优化：短 GOP 定时器的自动归位
+    //   弱网（critical/high）临时启用短 GOP 后，由该 work 在 keyframeTimerAutoStopSec 秒后
+    //   自动 stopKeyframeTimer 回到常态（长 GOP + 按需 PLI），避免短 GOP 常驻持续发热。
+    private var keyframeAutoStopWork: DispatchWorkItem?
+    private let keyframeTimerAutoStopSec: Double = 5.0  // 弱网短 GOP 持续时间，超时自动归位
+
+    // ⭐ 2026-06-25 发热优化：观看端 PLI / REQUEST_KEYFRAME 节流
+    //   P2P 直连时观看端一卡就连发 PLI，每个 PLI → forceKeyframe 重编 IDR，会把编码器打爆。
+    //   这里限制最小间隔，窗口内只响应一次，避免「短时间多个 PLI → 多个 IDR」的发热风暴。
+    private var lastForceKeyframeTime: Date = .distantPast
+    private let forceKeyframeMinIntervalSec: Double = 1.0
     
     // 🔥 v10.1: GOP动态调整（根据网络状况）
     private let gopNormal: Double = 1.0      // 正常网络：1秒
@@ -5163,16 +5190,31 @@ final class WebRTCManager: NSObject, ObservableObject {
     private func stopKeyframeTimer() {
         keyframeTimer?.invalidate()
         keyframeTimer = nil
+        keyframeAutoStopWork?.cancel()
+        keyframeAutoStopWork = nil
     }
     
     /// ⭐ 点2 修复：设置关键帧间隔；若定时器正在运行则立即重启，使新间隔生效。
-    /// 旧实现只改 keyframeIntervalSec 不重启 → 间隔变化要等下次开流才生效。
+    /// ⭐ 2026-06-25 发热优化：常态不再常驻定时器，故此处改为「无论当前是否在跑都启动」，
+    ///   即调用本方法即代表「进入弱网临时短 GOP 模式」（仅 critical/high 分支调用）。
     private func setKeyframeInterval(_ sec: Double) {
-        guard keyframeIntervalSec != sec else { return }
         keyframeIntervalSec = sec
-        if keyframeTimer != nil {   // 仅在运行中才重启
-            startKeyframeTimer()
+        startKeyframeTimer()   // 启动/重启短 GOP 定时器（常态由 stopKeyframeTimer 关闭）
+    }
+
+    /// ⭐ 2026-06-25 发热优化：弱网临时短 GOP 的「安全阀」。
+    ///   critical/high 触发短 GOP 快恢复后，若 keyframeTimerAutoStopSec 秒内没有新的弱网指令，
+    ///   自动 stopKeyframeTimer 归位到常态长 GOP，避免短 GOP 常驻持续发热。
+    ///   每次调用都会重置倒计时（弱网持续期间不断续期，恢复后才真正停）。
+    private func scheduleKeyframeTimerAutoStop() {
+        keyframeAutoStopWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.keyframeTimer != nil else { return }
+            self.stopKeyframeTimer()
+            self.malvshezhingLog("[关键帧] 弱网短 GOP 用完，自动归位常态（关闭定时强制）")
         }
+        keyframeAutoStopWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + keyframeTimerAutoStopSec, execute: work)
     }
     
     /// 🔑 强制关键帧（本地强制路径）。
@@ -5411,9 +5453,13 @@ final class WebRTCManager: NSObject, ObservableObject {
         lastFramesSent = 0; lastPacketsSent = 0
         lastPacketsLost = 0; lastNackCount = 0; lastPliCount = 0
         
-        // 🔥🔥 超低延迟优化：启用关键帧定时器，每秒发送一个关键帧
-        // 配合GStreamer方案：缩短GOP，丢包后最多等1秒就能恢复，减少花屏
-        startKeyframeTimer()
+        // ⭐ 2026-06-25 发热优化：常态【不】启动定时强制关键帧。
+        //   旧实现 startKeyframeTimer() 常驻每 0.5~1s 强制一个 IDR（forceKeyframeViaBitrate 码率抖动），
+        //   每个 I 帧编码算力是 P 帧数倍 → 编码器持续高负载，是 P2P/SRS 发热的主因。
+        //   对齐同类 App 与 SRT 链路：常态信任「WebRTC 默认长 GOP + 按需 PLI」，不主动砸 I 帧。
+        //   弱网快恢复改为「临时短 GOP、用完自动归位」（见 applyRemoteFps 的 critical/high 分支）。
+        // startKeyframeTimer()   // ← 常态不再常驻；仅弱网临时启用
+        stopKeyframeTimer()       // 确保任何残留定时器被关闭，回到常态
         badSeconds = 0; goodSeconds = 0
         kbpsHistory.removeAll()  // ✅ 重置码率历史
         fpsHistory.removeAll()    // ✅ 重置FPS历史
