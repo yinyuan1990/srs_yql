@@ -5218,37 +5218,48 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     /// 🔑 强制关键帧（本地强制路径）。
-    /// ⚠️ 点3 修复：iOS WebRTC 用标准 RTCDefaultVideoEncoderFactory，无直接强制 IDR 的 API。
-    ///    实测 adaptOutputFormat 仅在「输出格式真正变化」时才触发编码器重配出 IDR；
-    ///    传相同分辨率/帧率是 no-op，不会出 I 帧。
-    ///    因此本地强制（定时器 / WebSocket REQUEST_KEYFRAME 兜底 / 档位切换补帧）改回可靠的码率微调；
-    ///    干净的「按需」恢复主路是 P0-1 的 RTCP PLI（PC 发，编码器自动响应出 IDR）。
-    ///    adaptOutputFormat 仅保留给真实分辨率变化处（recapture / 切档已直接调用）。
+    ///
+    /// 【官方做法说明（2026-06 调研）】iOS 上「主动强制 IDR」的官方标准做法并不存在于 Objective-C/Swift SDK：
+    ///  1. 标准官方机制 = 接收侧驱动的 RTCP PLI/FIR：观看端编码器需要关键帧时发 PLI，
+    ///     发送侧 WebRTC 引擎自动产生 IDR。这是设计上的「正道」，无需我们手动干预。
+    ///  2. libwebrtc C++ 层确有主动接口 `RtpSenderInterface::GenerateKeyFrame(rids)`，
+    ///     但官方 iOS SDK 的 `RTCRtpSender`（含 stasel/WebRTC 预编译包）从未把它暴露到 ObjC/Swift——
+    ///     头文件里仅有 senderId / parameters / track，没有 generateKeyFrame。故 iOS 上无法直接调用。
+    ///  3. W3C 的 `RTCRtpSender.generateKeyFrame()` 是 Web/JS（encoded-transform）的 API，原生 iOS 不可用。
+    ///  4. `adaptOutputFormat` 仅在「输出格式真正变化」时才触发编码器重配出 IDR；传相同分辨率/帧率是 no-op。
+    ///
+    /// 结论：iOS 原生 + 标准 RTCDefaultVideoEncoderFactory 下，没有可调用的官方本地强制 IDR API。
+    /// 因此「主动本地强制」沿用社区通行的码率微调（setParameters 触发编码器重配）作为兜底；
+    /// 而干净的「按需」恢复主路仍是 RTCP PLI（PC 发，编码器自动响应）。
     func forceKeyframe() {
         forceKeyframeViaBitrate()
     }
     
     /// 码率微调强制 IDR：临时 +1kbps 再恢复 → 触发编码器重配发 IDR。
-    /// iOS WebRTC 下唯一可靠的本地强制关键帧方式（无自定义编码器时）。
+    /// iOS WebRTC 下唯一可靠的本地强制关键帧方式（无自定义编码器、SDK 未暴露 GenerateKeyFrame 时）。
+    /// ⭐ 2026-06-25 健壮性修复：原实现把「未限制码率」(maxBitrateBps==nil) 误恢复成 3Mbps，
+    ///    等于给码流凭空加了 3M 上限。改为原样保存并恢复 nil，避免篡改码率配置。
     private func forceKeyframeViaBitrate() {
         guard let sender = videoSender else { return }
         
         var params = sender.parameters
         if params.encodings.isEmpty { return }
         
-        let currentMaxBitrate = params.encodings[0].maxBitrateBps?.intValue ?? 3000000
-        let tempBitrate = currentMaxBitrate + 1000  // 微调 +1kbps
+        // 原样保存（可能为 nil = 不限制码率，官方语义不可篡改）
+        let originalMaxBitrate = params.encodings[0].maxBitrateBps
+        let baseBitrate = originalMaxBitrate?.intValue ?? 3_000_000
+        let tempBitrate = baseBitrate + 1000  // 微调 +1kbps，仅用于触发编码器重配
         
         // 第一步：微调码率
         params.encodings[0].maxBitrateBps = NSNumber(value: tempBitrate)
         sender.parameters = params
         
-        // 第二步：立即恢复原码率（在后台队列延迟执行，避免阻塞）
+        // 第二步：立即恢复原码率（在后台队列延迟执行，避免阻塞）。恢复为原始值（含 nil）
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.02) { [weak self] in
             guard let self = self, let sender = self.videoSender else { return }
             var params2 = sender.parameters
             if !params2.encodings.isEmpty {
-                params2.encodings[0].maxBitrateBps = NSNumber(value: currentMaxBitrate)
+                params2.encodings[0].maxBitrateBps = originalMaxBitrate
                 sender.parameters = params2
             }
         }
