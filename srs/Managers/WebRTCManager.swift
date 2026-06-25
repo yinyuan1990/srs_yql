@@ -3796,8 +3796,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         // ⭐ 注入目标码率（SRT 无 WebRTC stats，用目标码率作为上报近似）。
         srtManager.targetBitrateKbps = targetBitrateKbps
-        // ⭐ SRT 统计回调：实测 fps + 目标码率 → 写入状态上报字段（PC 顶栏显示）。
-        srtManager.onStats = { [weak self] fps, kbps in
+        // ⭐ SRT 统计回调：实测 fps + 真实码率 → 写入状态上报字段（PC 顶栏显示）。
+        //   回调签名为 onSample(pushFps, kbps, rttMs, lossRate, lossPerSec)；
+        //   SRT 自适应与 SRS/P2P 一样由后端 set_fps 驱动，这里仅做上报，rtt/loss 暂留待用。
+        srtManager.onSample = { [weak self] fps, kbps, _, _, _ in
             guard let self else { return }
             WebSocketManager.publishingFps = fps
             WebSocketManager.publishingSendFps = fps
@@ -3815,7 +3817,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         isPublishing = true
         WebSocketManager.isPublishingFlag = 1
         // 注意：不调用 startStats()（那是 WebRTC PeerConnection 统计，SRT 模式 pc 为 nil 空转）。
-        // SRT 码率/帧率由 srtManager.onStats 上报。
+        // SRT 码率/帧率由 srtManager.onSample 上报。
         print("✅ [SRT] 就绪：srt://\(ip):10080 streamKey=\(streamKey)")
     }
 
