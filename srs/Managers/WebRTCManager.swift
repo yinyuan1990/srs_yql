@@ -3802,6 +3802,12 @@ final class WebRTCManager: NSObject, ObservableObject {
         applyEffectiveBitrateToWebRTC()
         // ⭐ 注入目标码率（SRT 无 WebRTC stats，mbpsSendRate 拿不到时用目标码率作为上报近似）。
         srtManager.targetBitrateKbps = targetBitrateKbps
+        // ⭐ 修复「SRT 分辨率永远固定（1280x720）」回归：按当前档位注入编码分辨率/帧率/码率。
+        //   历史上 commit 5a89737 已修，但 onStats→onSample 重构时把 setEncodeParams 调用丢了，
+        //   导致 HaishinKit 编码器一直吃 SRTManager 的默认 encWidth/encHeight=1280x720，切档无效。
+        let initRes = getCaptureResolutionForProfile(currentProfile)
+        srtManager.setEncodeParams(width: initRes.width, height: initRes.height,
+                                   fps: initRes.fps, bitrateKbps: targetBitrateKbps)
         // ⭐ SRT 统计回调：实测 fps + 真实码率/RTT/丢包 → 写入状态上报字段（与 SRS/P2P 完全对齐，PC 顶栏显示）。
         //   回调签名为 onSample(pushFps, kbps, rttMs, lossRate, lossPerSec)。
         srtManager.onSample = { [weak self] fps, kbps, rttMs, lossRate, _ in
@@ -3823,8 +3829,12 @@ final class WebRTCManager: NSObject, ObservableObject {
                 quality = "poor"
             }
             WebSocketManager.networkQuality = quality
-            // 目标码率可能在运行中被档位/清晰度调整，持续同步给 SRTManager。
+            // 档位/清晰度可能在运行中变化，持续把分辨率/帧率/码率同步给 SRTManager
+            //（setEncodeParams 内部仅在参数变化时才真正下发到编码器，切档即时生效）。
             self.srtManager.targetBitrateKbps = self.targetBitrateKbps
+            let res = self.getCaptureResolutionForProfile(self.currentProfile)
+            self.srtManager.setEncodeParams(width: res.width, height: res.height,
+                                            fps: res.fps, bitrateKbps: self.targetBitrateKbps)
         }
         srtManager.start(ip: ip, streamKey: streamKey)
 
