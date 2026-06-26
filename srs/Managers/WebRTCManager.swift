@@ -3795,16 +3795,34 @@ final class WebRTCManager: NSObject, ObservableObject {
         srtManager.onStateChange = { publishing in
             print("ℹ️ [SRT] publishing=\(publishing)")
         }
-        // ⭐ 注入目标码率（SRT 无 WebRTC stats，用目标码率作为上报近似）。
+        // ⭐ 先按当前档位/清晰度算出目标码率（与 SRS/P2P 同一套 effectiveMaxKbps 逻辑），
+        //   否则 targetBitrateKbps 停在默认值 2000，SRT 上报码率会失真。
+        //   SRT 模式 pc/videoSender 为 nil，setBitrateRangeKbps 只会更新 targetBitrateKbps（打印一条
+        //   "videoSender 为空" 警告，无副作用），currentConnMode=.srt 也不会触发 P2P 分支。
+        applyEffectiveBitrateToWebRTC()
+        // ⭐ 注入目标码率（SRT 无 WebRTC stats，mbpsSendRate 拿不到时用目标码率作为上报近似）。
         srtManager.targetBitrateKbps = targetBitrateKbps
-        // ⭐ SRT 统计回调：实测 fps + 真实码率 → 写入状态上报字段（PC 顶栏显示）。
-        //   回调签名为 onSample(pushFps, kbps, rttMs, lossRate, lossPerSec)；
-        //   SRT 自适应与 SRS/P2P 一样由后端 set_fps 驱动，这里仅做上报，rtt/loss 暂留待用。
-        srtManager.onSample = { [weak self] fps, kbps, _, _, _ in
+        // ⭐ SRT 统计回调：实测 fps + 真实码率/RTT/丢包 → 写入状态上报字段（与 SRS/P2P 完全对齐，PC 顶栏显示）。
+        //   回调签名为 onSample(pushFps, kbps, rttMs, lossRate, lossPerSec)。
+        srtManager.onSample = { [weak self] fps, kbps, rttMs, lossRate, _ in
             guard let self else { return }
             WebSocketManager.publishingFps = fps
             WebSocketManager.publishingSendFps = fps
             WebSocketManager.publishingKbps = kbps
+            // ⭐ 与 SRS/P2P 同口径上报网络质量/丢包/RTT（阈值与 startStats 完全一致）。
+            WebSocketManager.packetLoss = lossRate
+            WebSocketManager.rtt = rttMs
+            let quality: String
+            if lossRate <= 0.01 && rttMs <= 100 {
+                quality = "excellent"
+            } else if lossRate <= 0.03 && rttMs <= 200 {
+                quality = "good"
+            } else if lossRate <= 0.05 && rttMs <= 400 {
+                quality = "fair"
+            } else {
+                quality = "poor"
+            }
+            WebSocketManager.networkQuality = quality
             // 目标码率可能在运行中被档位/清晰度调整，持续同步给 SRTManager。
             self.srtManager.targetBitrateKbps = self.targetBitrateKbps
         }
