@@ -1034,6 +1034,26 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         // ⭐ P2P：仅同步「码率」到所有直连会话（改法A：与帧率解耦，不再重写 maxFramerate）
         if currentConnMode == .p2p { p2pManager.applyBitrateToAllSessions() }
+        // ⭐ SRT：把最新目标码率（连同当前推送帧率/分辨率）即时同步给 HaishinKit 编码器，
+        //   与 P2P/SRS 的即时性对齐（修复「SRT 后端下发码率不起作用」）。
+        if currentConnMode == .srt { syncSRTEncodeParamsFromCurrentState() }
+    }
+
+    /// ⭐ SRT 编码参数同步（修复「SRT 后端下发码率/fps 不起作用」）。
+    ///
+    /// 把「当前档位分辨率 + 当前推送帧率 + 当前目标码率」下发给 SRTManager 的编码器：
+    ///   - fps 取「实际推送目标」frameThrottler.targetSendFps（后端下发 fps 的落地值），
+    ///     而不是档位采集 fps，否则编码器 expectedFrameRate 永远停在采集帧率、后端调 fps 无感。
+    ///   - 码率直接交给 setEncodeParams 比对：调用前【绝不能】预写 srtManager.targetBitrateKbps，
+    ///     否则 setEncodeParams 的「变更检测」会把新码率误判为「无变化」而跳过下发——
+    ///     这正是本次「后端下发码率不起作用」的根因（commit 949acc2 引入）。
+    /// 仅 SRT 模式且正在推流时生效；其它模式为零开销空操作。
+    private func syncSRTEncodeParamsFromCurrentState() {
+        guard currentConnMode == .srt, srtManager.isPublishing else { return }
+        let res = getCaptureResolutionForProfile(currentProfile)
+        let pushFps = frameThrottler?.targetSendFps ?? res.fps
+        srtManager.setEncodeParams(width: res.width, height: res.height,
+                                   fps: pushFps, bitrateKbps: targetBitrateKbps)
     }
     
     /// 设置平均推送的目标 FPS（采集保持不变，码率按比例调整）
@@ -1106,6 +1126,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         } else {
             print("🎯 [FPS同步] 推流:\(clamped)fps → 采集:未知（capturer未就绪，将在启动后同步）")
         }
+        // ⭐ SRT：把后端下发的推送 fps（连同当前码率/分辨率）即时同步给 HaishinKit 编码器，
+        //   与 P2P/SRS 即时性对齐（修复「SRT 后端下发 fps 不起作用」）。实际喂帧由 frameThrottler
+        //   节流，这里同步编码器 expectedFrameRate 使其与推送帧率一致。
+        syncSRTEncodeParamsFromCurrentState()
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3800,14 +3824,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         //   SRT 模式 pc/videoSender 为 nil，setBitrateRangeKbps 只会更新 targetBitrateKbps（打印一条
         //   "videoSender 为空" 警告，无副作用），currentConnMode=.srt 也不会触发 P2P 分支。
         applyEffectiveBitrateToWebRTC()
-        // ⭐ 注入目标码率（SRT 无 WebRTC stats，mbpsSendRate 拿不到时用目标码率作为上报近似）。
-        srtManager.targetBitrateKbps = targetBitrateKbps
-        // ⭐ 修复「SRT 分辨率永远固定（1280x720）」回归：按当前档位注入编码分辨率/帧率/码率。
-        //   历史上 commit 5a89737 已修，但 onStats→onSample 重构时把 setEncodeParams 调用丢了，
-        //   导致 HaishinKit 编码器一直吃 SRTManager 的默认 encWidth/encHeight=1280x720，切档无效。
+        // ⭐ 初始注入编码参数（分辨率/推送帧率/目标码率）。publish 前 isPublishing=false，
+        //   setEncodeParams 仅记录、随后在 SRTManager.publish 内统一 applyVideoSettingsToStream 应用。
+        //   ⚠️ 不要在此预写 srtManager.targetBitrateKbps：那会让运行中 setEncodeParams 的变更检测
+        //      恒判「无变化」而跳过下发，导致后端下发码率不生效（本次 bug 根因）。
+        //   fps 用「实际推送目标」而非档位采集 fps，使编码器 expectedFrameRate 跟随后端下发。
         let initRes = getCaptureResolutionForProfile(currentProfile)
+        let initPushFps = frameThrottler?.targetSendFps ?? initRes.fps
         srtManager.setEncodeParams(width: initRes.width, height: initRes.height,
-                                   fps: initRes.fps, bitrateKbps: targetBitrateKbps)
+                                   fps: initPushFps, bitrateKbps: targetBitrateKbps)
         // ⭐ SRT 统计回调：实测 fps + 真实码率/RTT/丢包 → 写入状态上报字段（与 SRS/P2P 完全对齐，PC 顶栏显示）。
         //   回调签名为 onSample(pushFps, kbps, rttMs, lossRate, lossPerSec)。
         srtManager.onSample = { [weak self] fps, kbps, rttMs, lossRate, _ in
@@ -3829,12 +3854,10 @@ final class WebRTCManager: NSObject, ObservableObject {
                 quality = "poor"
             }
             WebSocketManager.networkQuality = quality
-            // 档位/清晰度可能在运行中变化，持续把分辨率/帧率/码率同步给 SRTManager
-            //（setEncodeParams 内部仅在参数变化时才真正下发到编码器，切档即时生效）。
-            self.srtManager.targetBitrateKbps = self.targetBitrateKbps
-            let res = self.getCaptureResolutionForProfile(self.currentProfile)
-            self.srtManager.setEncodeParams(width: res.width, height: res.height,
-                                            fps: res.fps, bitrateKbps: self.targetBitrateKbps)
+            // 周期性安全网：把当前「码率 + 推送帧率 + 分辨率」同步给 SRT 编码器
+            //（即时同步已在 setAverageOutputFPS / applyEffectiveBitrateToWebRTC 内完成；
+            //  此处兜底切档/漏发。setEncodeParams 内部仅在参数变化时才下发，无变化为空操作）。
+            self.syncSRTEncodeParamsFromCurrentState()
         }
         srtManager.start(ip: ip, streamKey: streamKey)
 
