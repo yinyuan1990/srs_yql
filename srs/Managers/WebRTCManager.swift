@@ -961,7 +961,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
         // ⭐ 除 640x480(low) 外，其他档位最大码率再 +1000kbps
         // ⭐ minKbps 约为 max 的 60%，码率可向下波动
-        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0)
+        // 🔥 2026-07-02: high 档码率上调 5500→7000（min 60%）。原与 ultra(1280x720) 同区间 3300-5500，
+        //   但 high 像素多 68%（1440x1080≈1.55M vs 0.92M px），同码率必然先糊先卡（编码器 underbitrate）。
+        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 7000, minKbps: 4200, maxPushFps: 60, scaleDown: 1.0)
         let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 4500, minKbps: 2700, maxPushFps: 60, scaleDown: 1.0)
         let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2500, minKbps: 1500, maxPushFps: 60, scaleDown: 1.0)  // 低清：max不变，1500~2500
 
@@ -978,7 +980,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("📐 后置摄像头 - 档位配置：")
             print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
             print("   超高帧(ultra) = 1280x720  @240fps → 3300-5500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 3300-5500kbps (采集1920x1440缩放)")
+            print("   超清(high)    = 1440x1080 @60fps  → 4200-7000kbps (采集1920x1440缩放)")
             print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
             print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
         } else {
@@ -992,7 +994,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("📐 前置摄像头 - 档位配置：")
             print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
             print("   超高帧(ultra) = 1280x720  @120fps → 3300-5500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 3300-5500kbps (采集1920x1440缩放)")
+            print("   超清(high)    = 1440x1080 @60fps  → 4200-7000kbps (采集1920x1440缩放)")
             print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
             print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
         }
@@ -2768,12 +2770,11 @@ final class WebRTCManager: NSObject, ObservableObject {
    
     
     
-    // 🔧 [临时测试] 强制 H.264 Profile 降档（仅影响 SRS/WebRTC 推流编码与 SDP）
-    // 背景：老 PC（Intel Sandy Bridge 核显 / Todesk 远程会话）对 High Profile 硬解失败，PC 端 GStreamer
-    //      报 "Internal data stream error"（src=nicesrc0/queue0），画面出不来。这里把 profile-level-id
-    //      从 High（640c34 / 640028）降到 Constrained Baseline 3.1（42e01f，正是 PC offer 请求的档）验证能否出画面。
-    //      验证 OK 后请改回 High（编码器 640c34、SDP 640028），或按机型/档位二方协商下发。想试 Main 4.0 用 "4d0028"。
-    private static let forcedH264ProfileLevelId = "42e01f"
+    // 🔥 2026-07-02: 恢复 High Profile（640c34）。42e01f 是给老 PC（Sandy Bridge 核显）验证用的
+    //   临时降档，一直没改回——Baseline 无 8x8 变换/CABAC，同码率画质/压缩效率明显差，弱网下更容易
+    //   underbitrate 出块效应。竞品（webrtc-preview）明确开 WebRtcUseH264HighProfile。
+    //   若个别老 PC High 硬解失败（GStreamer "Internal data stream error"），临时改回 "42e01f" 或按机型协商。
+    private static let forcedH264ProfileLevelId = "640c34"
 
     private let factory: RTCPeerConnectionFactory = {
             RTCInitializeSSL()
@@ -2794,13 +2795,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 let compatibleH264 = RTCVideoCodecInfo(
                                 name: h264.name,
                                 parameters: [
-                                   "profile-level-id": WebRTCManager.forcedH264ProfileLevelId,  // 🔧 临时降档测试（原 "640c34" High 5.2）
+                                   "profile-level-id": WebRTCManager.forcedH264ProfileLevelId,  // High 5.2（含义见常量定义处注释）
                                    "level-asymmetry-allowed": "1",
                                    "packetization-mode": "1"
                                ]
                 )
                 enc.preferredCodec = compatibleH264
-                print("🎯 [临时降档测试] H.264 preferredCodec profile-level-id=\(WebRTCManager.forcedH264ProfileLevelId)（原 640c34 High）")
+                print("🎯 H.264 preferredCodec profile-level-id=\(WebRTCManager.forcedH264ProfileLevelId)（High 5.2；老 PC 不兼容时改 42e01f）")
             }
             
             return RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
@@ -2939,7 +2940,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
-    private let fpsLadder: [Int] = [60, 30, 20, 15]
+    /// 🔥 2026-07-02 加密阶梯：原 [60,30,20,15] 一步从 60 跳 30（掉一半），弱网抖动时反复大跳
+    ///   观感就是「一顿一顿」。加密为逐级降，每步降幅 ≤1/3，弱网过渡平滑。
+    private let fpsLadder: [Int] = [60, 45, 30, 24, 20, 15]
 
     /// 丢包率阈值（基于3秒移动平均）
     private let lossRateDownThreshold: Double = 0.025   // 3秒均值>2.5%，降级
@@ -4972,7 +4975,14 @@ final class WebRTCManager: NSObject, ObservableObject {
             videoSender = pc?.senders.first(where: { $0.track?.kind == kRTCMediaStreamTrackKindVideo })
         }
         guard let sender = videoSender else {
-            print("⚠️ videoSender 为空，无法设置码率")
+            if currentConnMode == .p2p {
+                // 🔥 2026-07-02: P2P 无 videoSender 属正常（sender 在 P2PManager.viewerSenders，
+                //   码率由 applyEffectiveBitrateToWebRTC → applyBitrateToAllSessions 落地）。
+                //   这里补启动周期纠偏定时器——原来因提前 return，P2P 的 3s 纠偏从未运行。
+                startBitrateEnforcement()
+            } else {
+                print("⚠️ videoSender 为空，无法设置码率")
+            }
             return
         }
         
@@ -5128,6 +5138,15 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     // 🔥 立即强制码率（用于分辨率切换时立即生效）
     private func enforceBitrateImmediately() {
+        // 🔥 2026-07-02 P2P 断链修复：P2P 模式 videoSender 恒 nil → 原实现直接 return，
+        //   紧急降码率(emergencyBitrateScale)/切档码率落不到 P2P 编码器。
+        //   走 P2PManager 落到各直连会话（applyBitrate 内部按 p2pBitrateRangeKbps 已含紧急系数）。
+        if currentConnMode == .p2p {
+            p2pManager.applyBitrateToAllSessions()
+            p2pManager.applyFramerateToAllSessions()
+            malvshezhingLog("[码率] 立即强制(P2P) → 已同步全部直连会话 目标=\(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
+            return
+        }
         guard let sender = videoSender else { return }
         
         var params = sender.parameters
@@ -5201,7 +5220,14 @@ final class WebRTCManager: NSObject, ObservableObject {
     private func startBitrateEnforcement() {
         bitrateEnforceTimer?.invalidate()
         bitrateEnforceTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self, let sender = self.videoSender else { return }
+            guard let self = self else { return }
+            // 🔥 2026-07-02 P2P 断链修复：P2P 无 videoSender，周期纠偏落到直连会话
+            //   （enforceBitrateIfDrifted 仅在被 WebRTC 内部改动时回写，无谓 reconfigure 为零）。
+            if self.currentConnMode == .p2p {
+                self.p2pManager.enforceBitrateIfDrifted()
+                return
+            }
+            guard let sender = self.videoSender else { return }
             
             var params = sender.parameters
             if params.encodings.isEmpty { return }
@@ -5290,6 +5316,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 因此「主动本地强制」沿用社区通行的码率微调（setParameters 触发编码器重配）作为兜底；
     /// 而干净的「按需」恢复主路仍是 RTCP PLI（PC 发，编码器自动响应）。
     func forceKeyframe() {
+        // 🔥 2026-07-02 P2P 断链修复：P2P 模式 sender 在 P2PManager.viewerSenders（videoSender 恒 nil），
+        //   原实现直接空操作 → PLI 响应 / PC request_keyframe / 切档 IDR 在 P2P 全部失效，
+        //   弱网花屏恢复只能赌 libwebrtc 内部机制。现按连接模式路由。
+        if currentConnMode == .p2p {
+            p2pManager.forceKeyframeAllSessions()
+            return
+        }
         forceKeyframeViaBitrate()
     }
     

@@ -453,6 +453,49 @@ final class P2PManager: NSObject {
         for (_, sender) in viewerSenders { applyEncoding(to: sender) }
     }
 
+    /// 🔥 2026-07-02: P2P 本地强制关键帧（作用于所有直连会话）。
+    /// 背景：WebRTCManager.forceKeyframe 只写 videoSender（SRS 专用），P2P 模式恒为 nil →
+    ///   PLI 响应 / PC request_keyframe / 切档 IDR 在 P2P 路径全部空操作，弱网花屏只能干等。
+    /// 实现：与 forceKeyframeViaBitrate 相同的码率微调 trick（iOS SDK 未暴露 GenerateKeyFrame），
+    ///   +1kbps 触发编码器重配出 IDR，20ms 后原样恢复（含 nil，不篡改码率配置）。
+    func forceKeyframeAllSessions() {
+        guard !viewerSenders.isEmpty else { return }
+        for (pcId, sender) in viewerSenders {
+            var params = sender.parameters
+            guard !params.encodings.isEmpty else { continue }
+            let originalMax = params.encodings[0].maxBitrateBps
+            let base = originalMax?.intValue ?? 3_000_000
+            params.encodings[0].maxBitrateBps = NSNumber(value: base + 1000)
+            sender.parameters = params
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self = self, let s = self.viewerSenders[pcId] else { return }
+                var p2 = s.parameters
+                if !p2.encodings.isEmpty {
+                    p2.encodings[0].maxBitrateBps = originalMax
+                    s.parameters = p2
+                }
+            }
+        }
+        print("🔑 [P2P] forceKeyframe → \(viewerSenders.count) 个直连会话")
+    }
+
+    /// 🔥 2026-07-02: P2P 周期码率纠偏（对标 SRS 的 startBitrateEnforcement）。
+    /// 仅当编码器内的码率区间被 WebRTC 内部改动（drift）时才回写，避免每 3s 无谓 reconfigure。
+    func enforceBitrateIfDrifted() {
+        guard let ds = dataSource, !viewerSenders.isEmpty else { return }
+        let range = ds.p2pBitrateRangeKbps()
+        for (pcId, sender) in viewerSenders {
+            let params = sender.parameters
+            guard !params.encodings.isEmpty else { continue }
+            let curMin = params.encodings[0].minBitrateBps?.intValue ?? 0
+            let curMax = params.encodings[0].maxBitrateBps?.intValue ?? 0
+            if curMin != range.min * 1000 || curMax != range.max * 1000 {
+                applyBitrate(to: sender)
+                print("🔒 [P2P] 周期纠偏 \(pcId): \(curMin/1000)-\(curMax/1000) → \(range.min)-\(range.max) kbps")
+            }
+        }
+    }
+
     private func applyBitrate(to sender: RTCRtpSender?) {
         guard let sender = sender, let ds = dataSource else { return }
         var params = sender.parameters
