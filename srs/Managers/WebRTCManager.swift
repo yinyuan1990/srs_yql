@@ -859,7 +859,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     /// 全局冗余日志开关（自适应/SRT/采集等模块的高频诊断 print 受此 gate）。
     /// 默认关闭：每秒刷的自适应/采集诊断 print 在发布/性能场景下会拖慢主路，仅排查时临时改 true。
-    static let verboseLogEnabled = false
+    /// ⚠️ 2026-07-02 临时开启：定性「P2P 弱网 fps 不自动升降」——跑一次 P2P 弱网→好网，
+    ///   控制台过滤 malvshezhing 看 [自适应] 行的 RTT/丢包是否恒 0。拿到日志后改回 false。
+    static let verboseLogEnabled = true
 
     /// 码率限制 / 自适应 FPS 调试日志统一前缀（控制台过滤: malvshezhing）
     private static let malvshezhingLogPrefix = "malvshezhing"
