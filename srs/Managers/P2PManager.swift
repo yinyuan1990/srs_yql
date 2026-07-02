@@ -60,6 +60,20 @@ final class P2PManager: NSObject {
             $0.iceConnectionState == .connected || $0.iceConnectionState == .completed
         }
     }
+
+    /// ⭐ 2026-07-02 统计主源（稳定版）：按 pcId 排序取第一个已连接会话。
+    /// 背景：Swift Dictionary 无序，`connectedViewerPeerConnections.first` 在多观看端时每次调用
+    /// 可能取到不同会话 → statsTimer 的累计值基线(bytes/packetsLost/pliCount)在两路会话间来回跳 →
+    /// 增量全部错乱（假 PLI 风暴/假丢包/kbps 乱跳），曾导致「网络极好也周期性 forceKeyframe → 攒帧卡顿」。
+    var primaryStatsPeerConnection: RTCPeerConnection? {
+        for pcId in viewerSessions.keys.sorted() {
+            if let s = viewerSessions[pcId],
+               s.iceConnectionState == .connected || s.iceConnectionState == .completed {
+                return s
+            }
+        }
+        return nil
+    }
     private var viewerSenders: [String: RTCRtpSender] = [:]
     private var pendingRemoteIce: [String: [RTCIceCandidate]] = [:]
     private var pendingIceRestart: Set<String> = []

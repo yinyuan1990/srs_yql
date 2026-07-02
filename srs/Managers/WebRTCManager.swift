@@ -5574,9 +5574,12 @@ final class WebRTCManager: NSObject, ObservableObject {
                 // 🔥 关键修复：P2P 模式下 PeerConnection 在 P2PManager.viewerSessions，self.pc 恒为 nil，
                 //   旧代码 `guard let pc = self.pc` 直接 return，导致 stats 空转、上报 kbps/sendFps/networkQuality 恒为 0。
                 //   按模式选取统计用的 PeerConnection：SRS 用 self.pc，P2P 用已连接的观看会话（取一路，代表本机发送码率）。
+                // ⭐ 2026-07-02：改用 primaryStatsPeerConnection（按 pcId 排序取首个）。
+                //   原 `.first` 在 Swift Dictionary 无序性下多观看端会来回换会话 → 累计值基线错乱 →
+                //   假 PLI/假丢包/kbps 乱跳（曾引发网络极好也周期性强制 IDR → 攒帧卡顿）。
                 let statsPC: RTCPeerConnection?
                 if self.currentConnMode == .p2p {
-                    statsPC = self.p2pManager.connectedViewerPeerConnections.first
+                    statsPC = self.p2pManager.primaryStatsPeerConnection
                 } else {
                     statsPC = self.pc
                 }
@@ -5779,13 +5782,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                             pliPerSec = safeDeltaPerSec(pliCount, self.lastPliCount)
                         }
                         
-                        // 🔥🔥 v10.1 PLI响应：收到PLI立即插I帧（50ms内响应）
-                        // PLI (Picture Loss Indication) 是PC端检测到花屏/丢帧后发出的请求
+                        // ⭐ 2026-07-02 P2P 攒帧卡顿修复：删除「收到 PLI 再手动 forceKeyframe」。
+                        //   libwebrtc 收到 RTCP PLI 会【自动】让编码器出 IDR（标准路径，无需干预）；
+                        //   这里再手动码率抖动强制一发 = 每个 PLI 双倍 IDR + 2 次 sender.parameters 写入（编码器重配）。
+                        //   与 Android 40bf7ef 摘除的周期 IDR 同机理：大 IDR 突发打满上行 → 后续帧攒批 →
+                        //   PC 端「堆一坨帧」卡顿 → 观看端又发 PLI/request_keyframe → 自激振荡，网络再好也周期性卡。
+                        //   兜底通道保留：PC WS request_keyframe（onRequestKeyframeCommand，1s 节流）。
                         if pliPerSec > 0 {
-                            DispatchQueue.main.async { [weak self] in
-                                self?.forceKeyframe()
-                                print("🔑 [PLI响应] 收到\(pliPerSec)个PLI请求，立即插入I帧")
-                            }
+                            print("🔑 [PLI] 收到\(pliPerSec)个PLI（libwebrtc 自动响应出 IDR，不再手动强制）")
                         }
                         
                         // 🔥 如果有丢包或重传，打印警告（减少打印频率）
