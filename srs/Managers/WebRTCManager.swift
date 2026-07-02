@@ -541,6 +541,11 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     
     // 🔥 首帧标记（用于唤醒检测）
     var hasReceivedFrame: Bool = false
+
+    // 🚑 2026-07-02 切档卡死修复：最近一次采集帧到达时刻（CFAbsoluteTime），
+    //    供 WebRTCManager 采集看门狗判断「推流中相机是否已停止吐帧」。
+    //    采集线程每帧写、看门狗定时器读；Double 在 arm64 上对齐读写，无需加锁。
+    private(set) var lastCaptureFrameAt: CFAbsoluteTime = 0
     
     // ═══════════════════════════════════════════════════════════════════════════
     // 🔥 诊断计数器（原子操作，不阻塞采集线程）
@@ -649,6 +654,7 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
 
     func capturer(_ capturer: RTCVideoCapturer, didCapture videoFrame: RTCVideoFrame) {
         let nowSec = CFAbsoluteTimeGetCurrent()
+        lastCaptureFrameAt = nowSec  // 🚑 采集看门狗心跳
         
         // 采集计数
         captureCounter += 1
@@ -2985,6 +2991,16 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 🔥 后端消息设置FPS后，暂停自适应1秒（避免冲突）
     private var lastRemoteFpsTime: Date = Date.distantPast
     
+    // 🚑 2026-07-02 切档卡死修复：采集看门狗。
+    //   切档 = 相机会话整拆重建，偶发失败（AVCaptureDeviceInput 抛错 / canAddInput=false /
+    //   runtime error）后原代码无任何恢复路径 → 推流中画面永久卡死。
+    //   看门狗每 2s 检查一次：推流中（非休眠）连续 ≥3s 无采集帧 → 让 capturer 用最近一次
+    //   配置整体重建会话，恢复后补一拍 IDR。恢复动作 10s 节流，防重建风暴。
+    private var captureWatchdogTimer: Timer?
+    private var lastCaptureRecoveryTime: CFAbsoluteTime = 0
+    private let captureWatchdogGapSec: Double = 3.0
+    private let captureRecoveryMinIntervalSec: Double = 10.0
+
     // 🔥🔥 关键帧定时器（v10.1防花屏：极端弱网GOP=0.5秒）
     // 方案要求：GOP越短，花屏恢复越快。极端弱网必须0.5秒
     private var keyframeTimer: Timer?
@@ -3740,6 +3756,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         statsTimer?.invalidate(); statsTimer = nil
         stopBitrateEnforcement()  // ✅ 停止码率强制定时器
         stopKeyframeTimer()       // ✅ 停止关键帧定时器
+        stopCaptureWatchdog()     // 🚑 停止采集看门狗
         frameThrottler?.stop()    // ✅ 停止帧定时器
         badSeconds = 0; goodSeconds = 0
         kbpsHistory.removeAll()  // ✅ 清空码率历史
@@ -3789,6 +3806,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         p2pManager.dataSource = self
         p2pManager.start()
         startStats()
+        startCaptureWatchdog()  // 🚑 切档卡死兜底
         print("✅ [P2P] 就绪，等待 PC 发起 WEBRTC_REQUEST")
     }
 
@@ -3873,6 +3891,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         isPublishing = true
         WebSocketManager.isPublishingFlag = 1
+        startCaptureWatchdog()  // 🚑 切档卡死兜底
         // 注意：不调用 startStats()（那是 WebRTC PeerConnection 统计，SRT 模式 pc 为 nil 空转）。
         // SRT 码率/帧率由 srtManager.onSample 上报。
         print("✅ [SRT] 就绪：srt://\(ip):10080 streamKey=\(streamKey)")
@@ -5259,6 +5278,39 @@ final class WebRTCManager: NSObject, ObservableObject {
         bitrateEnforceTimer = nil
     }
     
+    // MARK: - 🚑 采集看门狗（2026-07-02 切档概率卡死修复）
+
+    private func startCaptureWatchdog() {
+        stopCaptureWatchdog()
+        captureWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.captureWatchdogTick()
+        }
+        print("🚑 [采集看门狗] 已启动（推流中连续\(Int(captureWatchdogGapSec))s无采集帧→自动重建相机会话）")
+    }
+
+    private func stopCaptureWatchdog() {
+        captureWatchdogTimer?.invalidate()
+        captureWatchdogTimer = nil
+    }
+
+    private func captureWatchdogTick() {
+        guard isPublishing, !isCameraSleeping else { return }
+        guard let throttler = frameThrottler, throttler.hasReceivedFrame else { return }  // 从未出过帧=还在启动，不误判
+        let last = throttler.lastCaptureFrameAt
+        guard last > 0 else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        let gap = now - last
+        guard gap >= captureWatchdogGapSec else { return }
+        guard now - lastCaptureRecoveryTime >= captureRecoveryMinIntervalSec else { return }
+        lastCaptureRecoveryTime = now
+        print("🚑 [采集看门狗] 推流中已 \(String(format: "%.1f", gap))s 无采集帧（档位=\(currentProfile)）→ 重建相机会话恢复")
+        capturer?.restartSessionFromLastConfig()
+        // 会话恢复出帧后补 IDR，观看端立即出画面（forceKeyframe 已按 SRS/P2P 模式路由）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.forceKeyframe()
+        }
+    }
+
     // MARK: - 关键帧控制（减少卡顿恢复时间）
     
     /// 启动关键帧定时器：每隔 keyframeIntervalSec 秒强制发送一个关键帧
@@ -5990,6 +6042,7 @@ extension WebRTCManager: SRSManagerDataSource {
         WebSocketManager.isPublishingFlag = 1
         print("🟢 [publishStatus] 1 ← SRS 推流连接成功")
         startStats()
+        startCaptureWatchdog()  // 🚑 切档卡死兜底
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self else { return }
             let correctScale = self.currentLadder[self.currentProfile]?.scaleDown ?? 1.0

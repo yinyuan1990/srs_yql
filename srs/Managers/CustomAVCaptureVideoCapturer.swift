@@ -30,6 +30,14 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     private var autoWhiteBalanceRefreshInFlight = false
     private let autoWhiteBalanceRefreshInterval: TimeInterval = 2.0
     private var outputPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+    // 🚑 2026-07-02「切档概率卡死」修复：记录最近一次会话配置，供
+    //    ① configureSession 失败自动重试 ② AVCaptureSessionRuntimeError 自动重建
+    //    ③ WebRTCManager 采集看门狗兜底重建 使用。全部在 sessionQueue 上读写。
+    private var lastConfigDevice: AVCaptureDevice?
+    private var lastConfigFormat: AVCaptureDevice.Format?
+    private var lastConfigFps: Int = 30
+    private var configureRetryCount = 0
+    private let maxConfigureRetries = 3
     private var wbTemperature: Float = 0
     private var wbTint: Float = 0
     private var wbRed: Float = 0
@@ -55,6 +63,87 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         videoOutput.alwaysDiscardsLateVideoFrames = true
         applyVideoOutputPixelFormat()
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
+        // 🚑 会话级错误/中断恢复：切档重配置期间偶发 runtime error（-11819 媒体服务重置、
+        //    相机被抢占等）会让 session 永久停止吐帧＝画面卡死；原代码完全没监听，无法自愈。
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(sessionRuntimeError(_:)),
+                                               name: .AVCaptureSessionRuntimeError,
+                                               object: captureSession)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(sessionInterruptionEnded(_:)),
+                                               name: .AVCaptureSessionInterruptionEnded,
+                                               object: captureSession)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - 🚑 会话错误恢复（2026-07-02 切档概率卡死修复）
+
+    @objc private func sessionRuntimeError(_ notification: Notification) {
+        let err = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        print("❌ [CustomCapture] 会话运行时错误: \(err?.localizedDescription ?? "unknown") code=\(err.map { String($0.code) } ?? "?") → 0.3s 后自动重建")
+        sessionQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            self.configureRetryCount = 0
+            self.rebuildSessionFromLastConfig(reason: "runtimeError")
+        }
+    }
+
+    @objc private func sessionInterruptionEnded(_ notification: Notification) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if !self.captureSession.isRunning {
+                print("🚑 [CustomCapture] 会话中断结束 → startRunning 恢复")
+                self.captureSession.startRunning()
+            }
+        }
+    }
+
+    /// 🚑 用最近一次配置整体重建会话。必须在 sessionQueue 上调用。
+    private func rebuildSessionFromLastConfig(reason: String) {
+        guard let device = lastConfigDevice, let format = lastConfigFormat else {
+            print("⚠️ [CustomCapture] 无历史配置可重建(\(reason))")
+            return
+        }
+        print("🚑 [CustomCapture] 重建采集会话(\(reason)): \(device.localizedName) fps=\(lastConfigFps)")
+        let ok = configureSession(device: device, format: format, fps: lastConfigFps)
+        if !captureSession.isRunning { captureSession.startRunning() }
+        if !ok { scheduleConfigureRetry(reason: reason) }
+    }
+
+    /// 🚑 配置失败重试（0.4s 间隔，最多 maxConfigureRetries 次）。
+    ///    典型失败场景：切档瞬间相机被 HAL 短暂占用 → AVCaptureDeviceInput 创建抛错 /
+    ///    canAddInput=false，原代码只 print 就 commit 了一个「没有输入」的会话 → 永久无帧。
+    private func scheduleConfigureRetry(reason: String) {
+        guard configureRetryCount < maxConfigureRetries else {
+            print("❌ [CustomCapture] 配置重试 \(maxConfigureRetries) 次仍失败(\(reason))，等待采集看门狗兜底")
+            return
+        }
+        configureRetryCount += 1
+        let attempt = configureRetryCount
+        print("🚑 [CustomCapture] 配置失败(\(reason)) → 0.4s 后重试 第\(attempt)/\(maxConfigureRetries)次")
+        sessionQueue.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, let device = self.lastConfigDevice, let format = self.lastConfigFormat else { return }
+            let ok = self.configureSession(device: device, format: format, fps: self.lastConfigFps)
+            if !self.captureSession.isRunning { self.captureSession.startRunning() }
+            if ok {
+                self.configureRetryCount = 0
+                print("✅ [CustomCapture] 配置重试成功(第\(attempt)次)")
+            } else {
+                self.scheduleConfigureRetry(reason: reason)
+            }
+        }
+    }
+
+    /// 🚑 采集看门狗兜底入口：推流中长时间无帧时由 WebRTCManager 调用，整体重建会话。
+    func restartSessionFromLastConfig() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.configureRetryCount = 0
+            self.rebuildSessionFromLastConfig(reason: "watchdog")
+        }
     }
 
     static func captureDevices() -> [AVCaptureDevice] {
@@ -172,7 +261,14 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
 
         do {
             try device.lockForConfiguration()
-            let safeDuration = clamp(desired, min: device.activeFormat.minExposureDuration, max: device.activeFormat.maxExposureDuration)
+            // 🚑 2026-07-02：曝光时长上限再叠加当前帧间隔（activeVideoMaxFrameDuration），
+            //    防止「慢快门 + 高帧率档位」组合超出帧间隔导致 HAL 概率性停摆（与 configureSession 同理）。
+            var upperBound = device.activeFormat.maxExposureDuration
+            let frameDur = device.activeVideoMaxFrameDuration
+            if frameDur.isValid, frameDur.seconds > 0 {
+                upperBound = min(upperBound, frameDur)
+            }
+            let safeDuration = clamp(desired, min: device.activeFormat.minExposureDuration, max: upperBound)
             let iso = lockedISO ?? AVCaptureDevice.currentISO
             lockedDuration = safeDuration
             if baseISO == nil { baseISO = iso / Float(pow(2.0, Double(hardwareEV))) }
@@ -443,10 +539,15 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     func startCapture(with device: AVCaptureDevice, format: AVCaptureDevice.Format, fps: Int, completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.configureSession(device: device, format: format, fps: fps)
+            self.lastConfigDevice = device
+            self.lastConfigFormat = format
+            self.lastConfigFps = fps
+            self.configureRetryCount = 0
+            let ok = self.configureSession(device: device, format: format, fps: fps)
             if !self.captureSession.isRunning {
                 self.captureSession.startRunning()
             }
+            if !ok { self.scheduleConfigureRetry(reason: "startCapture") }
             DispatchQueue.main.async { completion?() }
         }
     }
@@ -454,10 +555,15 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     func switchCapture(to device: AVCaptureDevice, format: AVCaptureDevice.Format, fps: Int, completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.configureSession(device: device, format: format, fps: fps)
+            self.lastConfigDevice = device
+            self.lastConfigFormat = format
+            self.lastConfigFps = fps
+            self.configureRetryCount = 0
+            let ok = self.configureSession(device: device, format: format, fps: fps)
             if !self.captureSession.isRunning {
                 self.captureSession.startRunning()
             }
+            if !ok { self.scheduleConfigureRetry(reason: "switchCapture") }
             DispatchQueue.main.async { completion?() }
         }
     }
@@ -472,7 +578,9 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         }
     }
 
-    private func configureSession(device: AVCaptureDevice, format: AVCaptureDevice.Format, fps: Int) {
+    @discardableResult
+    private func configureSession(device: AVCaptureDevice, format: AVCaptureDevice.Format, fps: Int) -> Bool {
+        var success = false
         captureSession.beginConfiguration()
         captureSession.sessionPreset = .inputPriority
 
@@ -485,12 +593,17 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
+            var inputAdded = false
             if captureSession.canAddInput(input) {
                 captureSession.addInput(input)
+                inputAdded = true
+            } else {
+                print("❌ [CustomCapture] canAddInput=false（相机被占用/会话状态异常）")
             }
             if captureSession.canAddOutput(videoOutput) {
                 captureSession.addOutput(videoOutput)
             }
+            let outputAdded = captureSession.outputs.contains(videoOutput)
 
             try device.lockForConfiguration()
             device.activeFormat = format
@@ -498,13 +611,18 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             device.activeVideoMinFrameDuration = frameDuration
             device.activeVideoMaxFrameDuration = frameDuration
             if let duration = lockedDuration, device.isExposureModeSupported(.custom) {
-                let safeDuration = clamp(duration, min: device.activeFormat.minExposureDuration, max: device.activeFormat.maxExposureDuration)
+                // 🚑 2026-07-02：自定义曝光时长除按格式上下限 clamp 外，还必须 ≤ 帧间隔（1/fps）。
+                //    否则「快门 1/50s(20ms) + 60fps 档位(16.7ms)」这类组合会让 HAL 帧间隔矛盾，
+                //    部分机型概率性采集停摆/帧率异常 —— 切档卡死嫌疑之一。
+                let maxSafe = min(device.activeFormat.maxExposureDuration, frameDuration)
+                let safeDuration = clamp(duration, min: device.activeFormat.minExposureDuration, max: maxSafe)
                 let iso = isoForCurrentEV(device)
                 lockedDuration = safeDuration
                 lockedISO = iso
                 device.exposureMode = .custom
                 device.setExposureModeCustom(duration: safeDuration, iso: iso, completionHandler: nil)
             }
+            success = inputAdded && outputAdded
             applyHDRStateLocked(device)
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
                 enableContinuousWhiteBalanceLocked(device)
@@ -538,9 +656,11 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
             logFormat(device: device, format: format, fps: fps)
         } catch {
             print("❌ [CustomCapture] 配置失败: \(error.localizedDescription)")
+            success = false
         }
 
         captureSession.commitConfiguration()
+        return success
     }
 
     private func snapToAntiFlicker(_ shutterSpeed: Int) -> Int {
