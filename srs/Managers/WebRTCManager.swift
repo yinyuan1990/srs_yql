@@ -1238,21 +1238,62 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         var fpsChanged = false
         let oldFps = adaptiveFps
-        
+
+        // ⭐ §25.5-2：RTT 判差但丢包持续干净（<0.5%）= RTT 读数可疑（GStreamer RR 污染实测签名）
+        let rttOnlySuspect = isRttBad && avgLossRate < 0.005
+        if rttOnlySuspect { rttOnlyBadSeconds += 1 } else { rttOnlyBadSeconds = 0; rttOnlyEpisodeDropped = false }
+
         if isNetworkBad {
             // 🔴 网络差：累积计数，达到阈值降帧（档位切换：直接减半）
             highLossCounter += 1
             lowLossCounter = 0
 
-            if highLossCounter >= downgradeHoldSec {
+            if rttOnlySuspect && rttOnlyBadSeconds >= rttOnlyProbeSec {
+                // 🧪 试探回升：RTT 恒高但丢包干净已持续 15s+ → 反向逐级恢复。
+                //   真拥塞会立刻出丢包 → rttOnlySuspect 变 false → 下一秒回到正常压制分支。
+                rttOnlyBadSeconds = max(0, rttOnlyProbeSec - rttOnlyProbeIntervalSec)
+                if emergencyBitrateScale < 0.999 {
+                    let oldScale = emergencyBitrateScale
+                    emergencyBitrateScale = min(1.0, emergencyBitrateScale + emergencyBitrateStepUp)
+                    lastFpsChangeTime = now
+                    lastFpsDirection = .up
+                    applyEffectiveBitrateToWebRTC()
+                    enforceBitrateImmediately()
+                    malvshezhingLog("[自适应] 🧪试探回升(RTT=\(rttMs)ms高但丢包=0) 码率系数\(String(format: "%.2f", oldScale))→\(String(format: "%.2f", emergencyBitrateScale))")
+                } else {
+                    let newFps = min(maxFps, fpsLadder.last(where: { $0 > adaptiveFps }) ?? adaptiveFps)
+                    if newFps != adaptiveFps {
+                        adaptiveFps = newFps
+                        fpsChanged = true
+                        lastFpsChangeTime = now
+                        lastFpsDirection = .up
+                        malvshezhingLog("[自适应] 🧪试探升帧(RTT=\(rttMs)ms高但丢包=0) \(oldFps)→\(adaptiveFps)fps")
+                    }
+                }
+                highLossCounter = 0
+            } else if highLossCounter >= downgradeHoldSec {
                 let newFps = fpsLadder.first(where: { $0 < adaptiveFps }) ?? fpsLadder.last ?? minAdaptiveFps
-                if newFps != adaptiveFps {
-                    // 还能降帧 → 先降帧
+                if newFps != adaptiveFps && !(rttOnlySuspect && rttOnlyEpisodeDropped) {
+                    // 还能降帧 → 先降帧（RTT-only 可疑期最多降一档，防止被脏读数拖到底）
                     adaptiveFps = newFps
                     fpsChanged = true
                     lastFpsChangeTime = now
                     lastFpsDirection = .down
+                    if rttOnlySuspect { rttOnlyEpisodeDropped = true }
                     malvshezhingLog("[自适应] ⬇️降帧 \(oldFps)→\(adaptiveFps)fps 网络差 RTT=\(rttMs)ms 丢包=\(String(format: "%.1f", avgLossRate * 100))%")
+                } else if rttOnlySuspect {
+                    // RTT-only 且已降过一档 → 码率最多压到 0.7（一步），等待试探回升介入
+                    if emergencyBitrateScale > rttOnlyEmergencyFloor {
+                        let oldScale = emergencyBitrateScale
+                        emergencyBitrateScale = max(rttOnlyEmergencyFloor, emergencyBitrateScale * emergencyBitrateStepDown)
+                        lastFpsChangeTime = now
+                        lastFpsDirection = .down
+                        applyEffectiveBitrateToWebRTC()
+                        enforceBitrateImmediately()
+                        malvshezhingLog("[码率] ⚠️RTT可疑限压 系数\(String(format: "%.2f", oldScale))→\(String(format: "%.2f", emergencyBitrateScale))(下限\(rttOnlyEmergencyFloor)) RTT=\(rttMs)ms 丢包=0")
+                    } else {
+                        malvshezhingLog("[码率] ⏸️RTT可疑保持 系数=\(String(format: "%.2f", emergencyBitrateScale)) fps=\(adaptiveFps) RTT=\(rttMs)ms 丢包=0 等待试探回升(\(rttOnlyBadSeconds)/\(rttOnlyProbeSec)s)")
+                    }
                 } else if emergencyBitrateScale > emergencyBitrateMinScale {
                     // 🚨 fps 已到最低档仍网络差 → 紧急逐级降码率，缓解队列堆积
                     let oldScale = emergencyBitrateScale
@@ -2945,6 +2986,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     private let emergencyBitrateMinScale: Double = 0.2   // 最低压到基准的 20%（如 low 档 1500→300kbps）
     private let emergencyBitrateStepDown: Double = 0.7   // 每次下压 ×0.7
     private let emergencyBitrateStepUp: Double = 0.15    // 恢复每次 +0.15
+
+    /// ⭐ 2026-07-03 §25.5-1：P2P 选中路径走 TURN 中继时的码率钳制。
+    ///   中继实测（2026-07-03 三端日志）：p4k 档 7.5Mbps 灌 TURN → 缓冲堆积 20s → RTT 5.6s → ICE 断链 10s。
+    ///   服务器侧 coturn 已加 max-bps≈4Mbps 兜底（超限丢包倒逼），客户端在编码器层主动钳到 relayMaxKbps 更平滑。
+    ///   由 stats 的 candidate-pair/local-candidate 判定，路径切换（直连↔中继）时自动重算并下发。
+    var p2pPathIsRelay: Bool = false
+    private let relayMaxKbps: Int = 3000   // 中继单路码率上限（< coturn max-bps 4Mbps，留余量）
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
@@ -2984,6 +3032,16 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     /// 🔥 v2.1 上次自适应逻辑执行时间（确保每秒只执行一次）
     private var lastAdaptiveProcessTime: Date = Date.distantPast
+
+    /// ⭐ 2026-07-03 §25.5-2：「RTT 单因素判差但丢包干净」防锁死保护。
+    ///   实测（GStreamer 拉流端）：RR 反馈被污染成恒定 450ms → 旧逻辑降帧到底 + 码率压到 0.2 后
+    ///   永远等不到「网络好」，15fps/300kbps 锁死直到断开。真拥塞必然伴随丢包（UDP 路径），
+    ///   丢包持续干净时 RTT 读数按「可疑」处理：压制减半深度 + 周期试探回升，真拥塞出丢包会立即回压。
+    private var rttOnlyBadSeconds: Int = 0            // RTT差但丢包干净的连续秒数
+    private var rttOnlyEpisodeDropped: Bool = false   // 本轮 RTT-only 期间已降过一档 fps
+    private let rttOnlyProbeSec: Int = 15             // 丢包干净持续 N 秒后开始试探回升
+    private let rttOnlyProbeIntervalSec: Int = 10     // 之后每 N 秒试探一次
+    private let rttOnlyEmergencyFloor: Double = 0.7   // RTT-only 时紧急码率系数最低只压一步（vs 常规 0.2）
     
     /// 上次通知PC端的FPS（避免重复发送）
     private var lastNotifiedFps: Int = 0
@@ -5660,6 +5718,16 @@ final class WebRTCManager: NSObject, ObservableObject {
                     var pliCount: UInt64 = 0       // PLI 请求次数（请求关键帧）
                     var retransmittedPacketsSent: UInt64 = 0  // 重传包数量
 
+                    // ⭐ 2026-07-03 §25.5：ICE 层 RTT + 选中路径 relay 检测
+                    //   RTT 主源改 candidate-pair.currentRoundTripTime（STUN 探测自带，不依赖对端 RTCP RR）。
+                    //   背景：GStreamer 拉流端 RR 时序脏会把 remote-inbound 的 roundTripTime 污染成恒定 450ms，
+                    //   自适应据此把码率压到 0.2 并永久锁死（实测 15fps/300kbps 直到断开）。
+                    var selectedPairId: String? = nil               // transport.selectedCandidatePairId
+                    var pairRttSec: [String: Double] = [:]          // pairId → currentRoundTripTime(秒)
+                    var pairLocalCandId: [String: String] = [:]     // pairId → localCandidateId
+                    var nominatedPairIds: [String] = []             // 兜底：nominated+succeeded 的 pair
+                    var localCandType: [String: String] = [:]       // candidateId → host/srflx/prflx/relay
+
                     for s in report.statistics.values {
 
                            #if DEBUG
@@ -5733,8 +5801,32 @@ final class WebRTCManager: NSObject, ObservableObject {
                             }
                         } else if type == "track" && isVideo {
                             if let r = s.values["qualityLimitationReason"] as? String { qlr = r }
+                        } else if type == "transport" {
+                            if let v = s.values["selectedCandidatePairId"] as? String { selectedPairId = v }
+                        } else if type == "candidate-pair" {
+                            let pairId = s.id
+                            if let v = s.values["currentRoundTripTime"] {
+                                if let num = v as? NSNumber { pairRttSec[pairId] = num.doubleValue }
+                                else if let d = v as? Double { pairRttSec[pairId] = d }
+                            }
+                            if let lc = s.values["localCandidateId"] as? String { pairLocalCandId[pairId] = lc }
+                            let nominated = (s.values["nominated"] as? NSNumber)?.boolValue ?? false
+                            let succeeded = (s.values["state"] as? String) == "succeeded"
+                            if nominated && succeeded { nominatedPairIds.append(pairId) }
+                        } else if type == "local-candidate" {
+                            if let ct = s.values["candidateType"] as? String { localCandType[s.id] = ct }
                         }
                     }
+
+                    // ⭐ 选中候选对：优先 transport.selectedCandidatePairId，否则取 nominated+succeeded 的第一个
+                    let activePairId = selectedPairId ?? nominatedPairIds.first
+                    // ICE 层 RTT（秒）：仅在选中候选对上有读数时采用
+                    var iceRttSec: Double = 0.0
+                    if let pid = activePairId, let r = pairRttSec[pid], r > 0 { iceRttSec = r }
+                    // 选中路径是否走 TURN 中继
+                    var pathIsRelay = false
+                    if let pid = activePairId, let lcId = pairLocalCandId[pid],
+                       let ct = localCandType[lcId] { pathIsRelay = (ct == "relay") }
                     DispatchQueue.main.async {
                         let now = CFAbsoluteTimeGetCurrent()
                         defer {
@@ -5866,7 +5958,23 @@ final class WebRTCManager: NSObject, ObservableObject {
                         
                         // ✅ 计算网络质量
                         let packetLossRate = packetsSent > 0 ? Double(packetsLost) / Double(packetsSent + packetsLost) : 0.0
-                        let rttMs = Int(roundTripTime * 1000.0)  // 转换为毫秒
+                        // ⭐ 2026-07-03 §25.5：RTT 主源 = ICE candidate-pair.currentRoundTripTime，
+                        //   remote-inbound-rtp.roundTripTime 仅在 ICE 层无读数时兜底。
+                        //   两源差异过大时打日志（GStreamer RR 污染的现场证据）。
+                        let rrRttMs = Int(roundTripTime * 1000.0)
+                        let iceRttMs = Int(iceRttSec * 1000.0)
+                        let rttMs = iceRttMs > 0 ? iceRttMs : rrRttMs
+                        if iceRttMs > 0 && rrRttMs > 0 && abs(iceRttMs - rrRttMs) > 200 {
+                            self.malvshezhingLog("[RTT] ⚠️两源偏差 ice=\(iceRttMs)ms rr=\(rrRttMs)ms → 采用 ice（RR 疑被拉流端污染）")
+                        }
+                        // ⭐ 选中路径 relay 状态同步（首次/变化时触发中继码率钳制）
+                        if activePairId != nil && pathIsRelay != self.p2pPathIsRelay {
+                            self.p2pPathIsRelay = pathIsRelay
+                            self.malvshezhingLog("[线路] 选中路径=\(pathIsRelay ? "中继(relay)" : "直连") → 码率区间重算")
+                            if self.currentConnMode == .p2p {
+                                self.p2pManager.applyBitrateToAllSessions()
+                            }
+                        }
                         
                         // 综合评估网络质量等级
                         let quality: String
@@ -6071,8 +6179,14 @@ extension WebRTCManager: P2PManagerDataSource {
     var p2pFactory: RTCPeerConnectionFactory { factory }
     var p2pLocalVideoTrack: RTCVideoTrack? { localVideoTrack }
     func p2pBitrateRangeKbps() -> (min: Int, max: Int) {
-        let baseMin = effectiveMinKbpsForCurrentProfile()
-        let baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
+        var baseMin = effectiveMinKbpsForCurrentProfile()
+        var baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
+        // ⭐ 2026-07-03 §25.5-1：选中路径=TURN 中继时整体钳到 relayMaxKbps，
+        //   防止高档位把中继灌崩（min 也一起钳，否则 libwebrtc 被下限焊死无法退让）。
+        if p2pPathIsRelay && baseMax > relayMaxKbps {
+            baseMax = relayMaxKbps
+            baseMin = min(baseMin, relayMaxKbps * 6 / 10)   // 下限同步压到上限的 60%
+        }
         let minK = max(100, Int(Double(baseMin) * emergencyBitrateScale))
         let maxK = max(minK, Int(Double(baseMax) * emergencyBitrateScale))
         return (minK, maxK)
