@@ -3441,6 +3441,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         WebSocketManager.publishingStreamKey = streamKey  // 🔥 更新到WebSocket，供设备状态推送使用
         
+        // ⭐ P2P诊断日志上报（总后台开关控制）：按推流ID分流，tee stdout 过滤 P2P 相关 print 行
+        P2PLogReporter.shared.start(streamId: streamKey)
+        
         //print("📊 前置条件检查：")
         //print("   - streamKey: \(streamKey)")
         //print("   - isPublishing: \(isPublishing ? "⚠️是（不应该）" : "✅否")")
@@ -3767,6 +3770,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebSocketManager.publishingFps = 0
         WebSocketManager.publishingSendFps = 0
         WebSocketManager.publishingStreamKey = ""  // 清空流名
+        P2PLogReporter.shared.stop()  // ⭐ P2P诊断日志上报：停流即冲刷剩余并停止
         WebSocketManager.networkQuality = "unknown"
         WebSocketManager.packetLoss = 0.0
         WebSocketManager.rtt = 0
