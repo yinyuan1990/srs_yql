@@ -80,6 +80,10 @@ final class P2PManager: NSObject {
     private var iceRetryCount: [String: Int] = [:]
     private let maxICERetries = 2
     private var forceRelayPeerIds: Set<String> = []     // ICE 失败黑名单 → 重建时强制 relay
+    /// ⭐ §25.7b：链路择优的 relay 钉住集合。与 forceRelayPeerIds 的区别：**跨会话拆建存活**
+    ///（removeViewerSession 不清除，仅 closeAllViewerSessions/stop 清），因为硬切中继 =
+    /// 拆会话让 PC 重新 REQUEST，重建时必须还记得「这个 PC 要走 relay」。
+    private var qualityRelayPeerIds: Set<String> = []
     private var peerNetworkType: [String: String] = [:] // pcDeviceId → "cellular"/"wifi"/...
 
     private var signalingObserver: NSObjectProtocol?
@@ -219,6 +223,7 @@ final class P2PManager: NSObject {
     private func effectiveForceRelay(for pcId: String) -> Bool {
         if forceRelay { return true }
         return isOnCellular || peerNetworkType[pcId] == "cellular" || forceRelayPeerIds.contains(pcId)
+            || qualityRelayPeerIds.contains(pcId)
     }
 
     private func loadIceServers() -> [IceServer] {
@@ -405,6 +410,7 @@ final class P2PManager: NSObject {
         pendingIceRestart.removeAll()
         iceRetryCount.removeAll()
         forceRelayPeerIds.removeAll()
+        qualityRelayPeerIds.removeAll()   // §25.7b：整体停止才清 relay 钉住（单会话拆建不清）
         peerNetworkType.removeAll()
     }
 
@@ -444,9 +450,15 @@ final class P2PManager: NSObject {
     // MARK: - 链路择优（§25.7：直连质量差 → 主动切中继）
 
     /// 直连路径质量持续差（由 WebRTCManager stats 判定）时，把所有会话切到 TURN 中继。
-    /// 做法：setConfiguration(.relay) + ICE Restart（不整拆会话，旧路径出画面直到新路径 nominated，
-    /// 比 remove+create 重建平滑得多）。pcId 进 forceRelayPeerIds，后续网络切换/重建也保持 relay，
-    /// 会话拆除时随 removeViewerSession 自动清除。
+    /// 两级策略（§25.7b，2026-07-03 实测日志定型）：
+    /// - **第一次触发 = 软切**：setConfiguration(.relay) + ICE Restart（不整拆会话，旧路径出画面
+    ///   直到新路径 nominated）。Chromium 内核（网页内核）走这条即可完成切换。
+    /// - **第二次触发（10s 后路径仍是直连）= 硬切**：实测 GStreamer webrtcbin 收到新 ufrag 的
+    ///   Offer 不重启 libnice、不重新收集候选（回了 Answer 但零新增 [本地候选]），软切必然失效。
+    ///   升级为：pcId 钉进 qualityRelayPeerIds（跨会话存活）→ 拆会话 → 发
+    ///   WEBRTC_HANGUP(network_switch_reconnect)（PC 已有处理：不拆 pipeline，自动重发
+    ///   WEBRTC_REQUEST）→ 重建的会话 effectiveForceRelay=true，从建会话起就只走 TURN。
+    ///   网页内核第一次软切就生效、到不了第二次，不受硬切 HANGUP（网页内核收 HANGUP 停播不重连）影响。
     func switchAllSessionsToRelay(reason: String) {
         // 无 TURN 服务器时强制 relay = 零候选必死，直接放弃
         let hasTurn = loadIceServers().contains { s in
@@ -457,7 +469,17 @@ final class P2PManager: NSObject {
             return
         }
         for (pcId, pc) in viewerSessions {
-            guard !forceRelayPeerIds.contains(pcId) else { continue }
+            if forceRelayPeerIds.contains(pcId) {
+                // 已软切过仍被再次触发 = 路径还是直连，对端不支持 ICE Restart（GStreamer）→ 硬切
+                guard !qualityRelayPeerIds.contains(pcId) else { continue }   // 硬切也做过 = 等重建，别重复拆
+                qualityRelayPeerIds.insert(pcId)
+                print("🔨 [P2P] 软切中继未生效(路径仍直连，对端不支持 ICE Restart) → 硬切重建 \(pcId) reason=\(reason)")
+                removeViewerSession(pcId, notifyPC: false)
+                WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
+                                                            reason: "network_switch_reconnect",
+                                                            toDevice: pcId)
+                continue
+            }
             forceRelayPeerIds.insert(pcId)
             let cfg = pc.configuration
             cfg.iceTransportPolicy = .relay
