@@ -96,7 +96,11 @@ final class P2PLogReporter {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let newEnabled = (obj["enabled"] as? Bool) ?? false
             self.timerQueue.async {
-                guard self.active, newEnabled != self.enabled else { return }
+                guard self.active else { return }
+                // ⭐ 幂等自愈（修「第一次能上报、重新推流后不上报」，与 Android 端同款 bug）：
+                //   单例 stop() 停掉 stdout tee 后 enabled 仍是 true；第二次 start() 时开关值
+                //   无变化，旧逻辑只在「值变化」时才 startTee → tee 永远没人重启。
+                //   现改为：只要开关=开就确保 tee 在跑（startTee 自带 pipe==nil 幂等保护）。
                 self.enabled = newEnabled
                 if newEnabled {
                     self.startTee()
