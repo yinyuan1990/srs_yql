@@ -2993,6 +2993,17 @@ final class WebRTCManager: NSObject, ObservableObject {
     ///   由 stats 的 candidate-pair/local-candidate 判定，路径切换（直连↔中继）时自动重算并下发。
     var p2pPathIsRelay: Bool = false
     private let relayMaxKbps: Int = 3000   // 中继单路码率上限（< coturn max-bps 4Mbps，留余量）
+
+    /// ⭐ 2026-07-03 §25.7：直连质量差 → 主动切中继（链路择优）。
+    ///   实测（ios-直连 三端日志）：同一烂 WiFi 下中继 RTT=93ms、直连 RTT=533ms（WiFi 链路层重传+
+    ///   缓冲膨胀，丢包恒 0%），但 ICE 只按候选类型优先级选路（srflx > relay）不看质量 → 卡到没法用。
+    ///   规则：P2P 选中路径=直连 且 ICE 层 RTT 持续 > directBadRttMs 达 directBadHoldSec 秒 →
+    ///   通知 P2PManager 对全部会话 setConfiguration(.relay) + ICE Restart 切到中继。
+    ///   单向操作：会话期内不切回直连（pcId 进 forceRelayPeerIds），会话拆除时自动重置。
+    ///   只用 ICE candidate-pair RTT 判定（STUN 探测、不受拉流端 RR 污染，见 §25.5-2）。
+    private var directBadSince: CFAbsoluteTime? = nil
+    private let directBadRttMs: Int = 300       // 直连 ICE RTT 阈值（中继实测 ~93ms，留足余量）
+    private let directBadHoldSec: Double = 10   // 持续秒数（防瞬时抖动误切）
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
@@ -5974,6 +5985,23 @@ final class WebRTCManager: NSObject, ObservableObject {
                             if self.currentConnMode == .p2p {
                                 self.p2pManager.applyBitrateToAllSessions()
                             }
+                        }
+
+                        // ⭐ §25.7 链路择优：直连 ICE RTT 持续差 → 主动切中继
+                        //   仅用 ICE 层 RTT（iceRttMs），不用可能被 RR 污染的 rrRttMs。
+                        if self.currentConnMode == .p2p, activePairId != nil, !pathIsRelay,
+                           iceRttMs > self.directBadRttMs {
+                            if let since = self.directBadSince {
+                                if now - since >= self.directBadHoldSec {
+                                    self.directBadSince = nil
+                                    self.malvshezhingLog("[线路] 🔀直连质量差(ICE RTT=\(iceRttMs)ms>\(self.directBadRttMs)ms 持续\(Int(self.directBadHoldSec))s) → 主动切中继")
+                                    self.p2pManager.switchAllSessionsToRelay(reason: "direct_rtt_\(iceRttMs)ms")
+                                }
+                            } else {
+                                self.directBadSince = now
+                            }
+                        } else {
+                            self.directBadSince = nil
                         }
                         
                         // 综合评估网络质量等级

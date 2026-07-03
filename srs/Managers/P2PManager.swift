@@ -441,6 +441,45 @@ final class P2PManager: NSObject {
         }
     }
 
+    // MARK: - 链路择优（§25.7：直连质量差 → 主动切中继）
+
+    /// 直连路径质量持续差（由 WebRTCManager stats 判定）时，把所有会话切到 TURN 中继。
+    /// 做法：setConfiguration(.relay) + ICE Restart（不整拆会话，旧路径出画面直到新路径 nominated，
+    /// 比 remove+create 重建平滑得多）。pcId 进 forceRelayPeerIds，后续网络切换/重建也保持 relay，
+    /// 会话拆除时随 removeViewerSession 自动清除。
+    func switchAllSessionsToRelay(reason: String) {
+        // 无 TURN 服务器时强制 relay = 零候选必死，直接放弃
+        let hasTurn = loadIceServers().contains { s in
+            s.urls.contains { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
+        }
+        guard hasTurn else {
+            print("⚠️ [P2P] 切中继请求被忽略（无 TURN 服务器配置）reason=\(reason)")
+            return
+        }
+        for (pcId, pc) in viewerSessions {
+            guard !forceRelayPeerIds.contains(pcId) else { continue }
+            forceRelayPeerIds.insert(pcId)
+            let cfg = pc.configuration
+            cfg.iceTransportPolicy = .relay
+            pc.setConfiguration(cfg)
+            let cons = RTCMediaConstraints(
+                mandatoryConstraints: ["IceRestart": "true",
+                                       "OfferToReceiveAudio": "false",
+                                       "OfferToReceiveVideo": "false"],
+                optionalConstraints: nil)
+            pendingIceRestart.insert(pcId)
+            pc.offer(for: cons) { [weak pc] sdp, err in
+                guard let pc = pc, let sdp = sdp else {
+                    print("❌ [P2P] 切中继 Offer 创建失败 \(pcId): \(err?.localizedDescription ?? "")")
+                    return
+                }
+                pc.setLocalDescription(sdp) { _ in }
+                WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
+                print("🔀 [P2P] 已切中继并发送 ICE Restart Offer → \(pcId) reason=\(reason)")
+            }
+        }
+    }
+
     // MARK: - 编码参数（PC 调参时由 WebRTCManager 调用，统一作用到所有会话）
     //
     // ⭐ 2026-06-25 改法A：码率与帧率解耦（对齐 SRS「码率和 FPS 完全解耦」设计）。
