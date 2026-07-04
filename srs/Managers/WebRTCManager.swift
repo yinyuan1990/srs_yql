@@ -2994,16 +2994,16 @@ final class WebRTCManager: NSObject, ObservableObject {
     var p2pPathIsRelay: Bool = false
     private let relayMaxKbps: Int = 3000   // 中继单路码率上限（< coturn max-bps 4Mbps，留余量）
 
-    /// ⭐ 2026-07-03 §25.7：直连质量差 → 主动切中继（链路择优）。
-    ///   实测（ios-直连 三端日志）：同一烂 WiFi 下中继 RTT=93ms、直连 RTT=533ms（WiFi 链路层重传+
-    ///   缓冲膨胀，丢包恒 0%），但 ICE 只按候选类型优先级选路（srflx > relay）不看质量 → 卡到没法用。
-    ///   规则：P2P 选中路径=直连 且 ICE 层 RTT 持续 > directBadRttMs 达 directBadHoldSec 秒 →
-    ///   通知 P2PManager 对全部会话 setConfiguration(.relay) + ICE Restart 切到中继。
+    /// ⭐ 2026-07-04 §25.7（简化）：链路择优——只认「同 WiFi 直连」，其余一律中继。
+    ///   旧版靠 ICE RTT>300ms 持续 10s 才切中继，探测窗口内用户已经卡了 10 秒；且跨网直连
+    ///   （srflx 打洞）质量随公网波动，探测阈值难调。现改为拓扑判定，一次到位：
+    ///   选中 ICE 候选对 host↔host（两端候选类型都是 host）= 局域网直连 = 同 WiFi → 保持直连；
+    ///   选中路径含 srflx/prflx（跨 NAT/公网）→ 立即 switchAllSessionsToRelay，不看 RTT、不等待。
     ///   单向操作：会话期内不切回直连（pcId 进 forceRelayPeerIds），会话拆除时自动重置。
-    ///   只用 ICE candidate-pair RTT 判定（STUN 探测、不受拉流端 RR 污染，见 §25.5-2）。
-    private var directBadSince: CFAbsoluteTime? = nil
-    private let directBadRttMs: Int = 300       // 直连 ICE RTT 阈值（中继实测 ~93ms，留足余量）
-    private let directBadHoldSec: Double = 10   // 持续秒数（防瞬时抖动误切）
+    ///   relaySwitchGapSec：两次触发的最小间隔。软切(ICE Restart)生效要几秒，期间路径仍显示直连，
+    ///   若每秒重触发会被 P2PManager 误判「软切无效」而提前硬切拆会话。
+    private var lastRelaySwitchAt: CFAbsoluteTime = 0
+    private let relaySwitchGapSec: Double = 8
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
@@ -5681,6 +5681,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         lastBytesSent = 0; lastTs = 0
         lastFramesSent = 0; lastPacketsSent = 0
         lastPacketsLost = 0; lastNackCount = 0; lastPliCount = 0
+        lastRelaySwitchAt = 0
         
         // ⭐ 2026-06-25 发热优化：常态【不】启动定时强制关键帧。
         //   旧实现 startKeyframeTimer() 常驻每 0.5~1s 强制一个 IDR（forceKeyframeViaBitrate 码率抖动），
@@ -5736,6 +5737,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                     var selectedPairId: String? = nil               // transport.selectedCandidatePairId
                     var pairRttSec: [String: Double] = [:]          // pairId → currentRoundTripTime(秒)
                     var pairLocalCandId: [String: String] = [:]     // pairId → localCandidateId
+                    var pairRemoteCandId: [String: String] = [:]    // pairId → remoteCandidateId
+                    var remoteCandType: [String: String] = [:]      // candidateId → host/srflx/prflx/relay
                     var nominatedPairIds: [String] = []             // 兜底：nominated+succeeded 的 pair
                     var localCandType: [String: String] = [:]       // candidateId → host/srflx/prflx/relay
 
@@ -5821,11 +5824,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                                 else if let d = v as? Double { pairRttSec[pairId] = d }
                             }
                             if let lc = s.values["localCandidateId"] as? String { pairLocalCandId[pairId] = lc }
+                            if let rc = s.values["remoteCandidateId"] as? String { pairRemoteCandId[pairId] = rc }
                             let nominated = (s.values["nominated"] as? NSNumber)?.boolValue ?? false
                             let succeeded = (s.values["state"] as? String) == "succeeded"
                             if nominated && succeeded { nominatedPairIds.append(pairId) }
                         } else if type == "local-candidate" {
                             if let ct = s.values["candidateType"] as? String { localCandType[s.id] = ct }
+                        } else if type == "remote-candidate" {
+                            if let ct = s.values["candidateType"] as? String { remoteCandType[s.id] = ct }
                         }
                     }
 
@@ -5834,10 +5840,17 @@ final class WebRTCManager: NSObject, ObservableObject {
                     // ICE 层 RTT（秒）：仅在选中候选对上有读数时采用
                     var iceRttSec: Double = 0.0
                     if let pid = activePairId, let r = pairRttSec[pid], r > 0 { iceRttSec = r }
+                    // 选中路径的本端/远端候选类型（host/srflx/prflx/relay）
+                    var localPathType: String? = nil
+                    var remotePathType: String? = nil
+                    if let pid = activePairId {
+                        if let lcId = pairLocalCandId[pid] { localPathType = localCandType[lcId] }
+                        if let rcId = pairRemoteCandId[pid] { remotePathType = remoteCandType[rcId] }
+                    }
                     // 选中路径是否走 TURN 中继
-                    var pathIsRelay = false
-                    if let pid = activePairId, let lcId = pairLocalCandId[pid],
-                       let ct = localCandType[lcId] { pathIsRelay = (ct == "relay") }
+                    let pathIsRelay = (localPathType == "relay")
+                    // ⭐ §25.7：同 WiFi 判定 = 选中候选对 host↔host（两侧类型都拿到才判定，防 stats 未就绪误判）
+                    let pathIsLan = (localPathType == "host" && remotePathType == "host")
                     DispatchQueue.main.async {
                         let now = CFAbsoluteTimeGetCurrent()
                         defer {
@@ -5987,21 +6000,16 @@ final class WebRTCManager: NSObject, ObservableObject {
                             }
                         }
 
-                        // ⭐ §25.7 链路择优：直连 ICE RTT 持续差 → 主动切中继
-                        //   仅用 ICE 层 RTT（iceRttMs），不用可能被 RR 污染的 rrRttMs。
+                        // ⭐ §25.7 链路择优（简化版）：非同 WiFi（选中路径不是 host↔host）→ 立即切中继。
+                        //   两侧候选类型都已知才判定；relaySwitchGapSec 限频，给软切(ICE Restart)生效时间，
+                        //   仍未生效才由 P2PManager 升级硬切。
                         if self.currentConnMode == .p2p, activePairId != nil, !pathIsRelay,
-                           iceRttMs > self.directBadRttMs {
-                            if let since = self.directBadSince {
-                                if now - since >= self.directBadHoldSec {
-                                    self.directBadSince = nil
-                                    self.malvshezhingLog("[线路] 🔀直连质量差(ICE RTT=\(iceRttMs)ms>\(self.directBadRttMs)ms 持续\(Int(self.directBadHoldSec))s) → 主动切中继")
-                                    self.p2pManager.switchAllSessionsToRelay(reason: "direct_rtt_\(iceRttMs)ms")
-                                }
-                            } else {
-                                self.directBadSince = now
+                           let lt = localPathType, let rt = remotePathType, !pathIsLan {
+                            if now - self.lastRelaySwitchAt >= self.relaySwitchGapSec {
+                                self.lastRelaySwitchAt = now
+                                self.malvshezhingLog("[线路] 🔀非同WiFi直连(本端=\(lt) 远端=\(rt)) → 立即切中继")
+                                self.p2pManager.switchAllSessionsToRelay(reason: "non_lan_\(lt)_\(rt)")
                             }
-                        } else {
-                            self.directBadSince = nil
                         }
                         
                         // 综合评估网络质量等级
