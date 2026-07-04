@@ -226,6 +226,63 @@ final class P2PManager: NSObject {
             || qualityRelayPeerIds.contains(pcId)
     }
 
+    // MARK: - §25.7e 线路预判定（建会话前经 WebSocket 信令定直连/中继）
+
+    /// 本机全部 IPv4（WiFi en0 / 热点 bridge100 / 有线等，排除回环与链路本地 169.254.*）
+    private func localIPv4Addresses() -> [String] {
+        var results: [String] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return results }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            let ifa = p.pointee
+            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                let flags = Int32(ifa.ifa_flags)
+                if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 {
+                    var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                        let ip = String(cString: buf)
+                        if !ip.hasPrefix("169.254.") { results.append(ip) }
+                    }
+                }
+            }
+            ptr = p.pointee.ifa_next
+        }
+        return results
+    }
+
+    /// 同网段判定（/24）：双方任意一对 IPv4 前三段相同 = 同一局域网（同 WiFi）
+    private func sharesSubnet(with peerIps: [String]) -> Bool {
+        func prefix24(_ ip: String) -> String? {
+            let parts = ip.split(separator: ".")
+            guard parts.count == 4 else { return nil }
+            return parts[0...2].joined(separator: ".")
+        }
+        let myPrefixes = Set(localIPv4Addresses().compactMap(prefix24))
+        return peerIps.contains { ip in prefix24(ip).map(myPrefixes.contains) ?? false }
+    }
+
+    /// ⭐ §25.7e：建会话前预判线路。PC 的 WEBRTC_REQUEST 带 localIps（逗号分隔的局域网 IPv4），
+    ///   与本机比网段：非同网段 = 非同 WiFi → pcId 钉进 qualityRelayPeerIds → 会话从创建起
+    ///   relay-only，一次 ICE 定终身，不再有「直连先通→ICE 换车→软切/硬切」的中途折腾。
+    ///   同网段/字段缺失（旧版 PC）→ 保持直连优先，host↔host stats 判定兜底。
+    ///   只进不出：不因后续 REQUEST 判同网段而摘除钉住（防两个不同网络恰好同网段号 → 死循环回直连）。
+    private func applyLanPrecheck(for pcId: String, message: [String: Any]) {
+        guard let ipsStr = message["localIps"] as? String, !ipsStr.isEmpty else {
+            print("🛣 [P2P线路预判] \(pcId) REQUEST 未带 localIps（旧版PC）→ 直连优先+stats兜底")
+            return
+        }
+        let peerIps = ipsStr.split(separator: ",").map(String.init)
+        if sharesSubnet(with: peerIps) {
+            print("🛣 [P2P线路预判] \(pcId) 同网段(同WiFi) → 直连优先 peer=\(peerIps)")
+        } else {
+            qualityRelayPeerIds.insert(pcId)
+            print("🛣 [P2P线路预判] \(pcId) 非同网段(非同WiFi) → 建会话即中继 peer=\(peerIps) 本机=\(localIPv4Addresses())")
+        }
+    }
+
     private func loadIceServers() -> [IceServer] {
         guard let data = UserDefaults.standard.data(forKey: "iceServers"),
               let servers = try? JSONDecoder().decode([IceServer].self, from: data) else { return [] }
@@ -245,6 +302,7 @@ final class P2PManager: NSObject {
             print("🔌 [P2P] PC \(fromDevice) 断开")
         case "WEBRTC_REQUEST":
             peerNetworkType[fromDevice] = (message["networkType"] as? String) ?? "unknown"
+            applyLanPrecheck(for: fromDevice, message: message)   // §25.7e：建会话前定直连/中继
             guard isReadyForViewers else {
                 WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_REJECT", reason: "not_ready", toDevice: fromDevice)
                 return
