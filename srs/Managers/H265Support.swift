@@ -205,6 +205,9 @@ final class H265Support: ObservableObject {
 
     // MARK: 钩子 4：CONFIG_STATE 上报（PC 据此预建解码管线）
 
+    /// 当前会话是否 H265（P2PManager 判断用）
+    func isH265Session() -> Bool { effectiveCodec == .h265 }
+
     /// CONFIG_STATE.state.videoCodec 字段值（"h264" / "h265"）
     var effectiveCodecString: String { effectiveCodec.rawValue }
 
