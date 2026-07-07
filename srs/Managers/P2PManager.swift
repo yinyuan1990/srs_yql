@@ -435,6 +435,16 @@ final class P2PManager: NSObject {
                 return
             }
             newPC.setLocalDescription(sdp) { _ in }
+            // ⭐ H265：用实际 Offer SDP 校准生效编码——若声称 H265 但 SDP 无 H265（本机不能编码 H265），
+            //   如实降级 h264，CONFIG_STATE 随之报 h264，PC 建 H264 管线，画面退化为 H264 而非黑屏。
+            if H265Support.shared.isH265Session() {
+                let s = sdp.sdp
+                let hasH265 = s.range(of: "H265", options: .caseInsensitive) != nil || s.range(of: "HEVC", options: .caseInsensitive) != nil
+                let hasH264 = s.range(of: "H264", options: .caseInsensitive) != nil
+                let hasBundle = s.range(of: "a=group:BUNDLE", options: .caseInsensitive) != nil
+                H265Support.shared.h265Log("[Offer] 发给 \(pcId): 含H265=\(hasH265) 含H264兜底=\(hasH264) 含BUNDLE=\(hasBundle)")
+                H265Support.shared.reconcileFromOfferSdp(s)
+            }
             WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
             print("📤 [P2P] 已发送 Offer 给 \(pcId)")
         }

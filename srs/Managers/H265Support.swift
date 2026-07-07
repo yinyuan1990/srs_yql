@@ -132,6 +132,23 @@ final class H265Support: ObservableObject {
         }
     }
 
+    // MARK: 钩子 6：用「实际生成的 Offer SDP」校准生效编码（防止 claim H265 但 SDP 里根本没有）
+
+    /// P2P 创建 Offer 后调用：核对 Offer 里是否真含 H265。
+    ///   - 若声称 H265 但 SDP 无 H265（本机 SDK/设备实际不能编码 H265）→ 如实降级 h264，
+    ///     使 CONFIG_STATE 上报 h264、PC 建 H264 管线，画面退化为 H264 而不是黑屏死循环。
+    ///   - 返回 Offer 里是否真的含 H265。
+    @discardableResult
+    func reconcileFromOfferSdp(_ sdp: String) -> Bool {
+        let hasH265 = sdp.range(of: "H265", options: .caseInsensitive) != nil
+                   || sdp.range(of: "HEVC", options: .caseInsensitive) != nil
+        if effectiveCodec == .h265 && !hasH265 {
+            h265Log("⚠️ 声称 H265 但 Offer SDP 里无 H265 → 本机实际不能编码 H265，如实降级为 H264（PC 将建 H264 管线，画面正常）")
+            setEffective(.h264)
+        }
+        return hasH265
+    }
+
     // MARK: 钩子 4：CONFIG_STATE 上报（PC 据此预建解码管线）
 
     /// CONFIG_STATE.state.videoCodec 字段值（"h264" / "h265"）
