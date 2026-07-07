@@ -170,6 +170,8 @@ class WebSocketManager: ObservableObject {
             // ⭐ 自动协商：连接方式 + P2P 状态，PC 跟随 connectstype 切换
             "connectstype": connectstype,
             "connectMode": connectMode,
+            // ⭐ H265：P2P 实际生效编码（"h264"/"h265"），PC 据此选择 H264/H265 解码管线
+            "videoCodec": H265Support.shared.effectiveCodecString,
             "p2pViewerCount": p2pViewerCount,
             "kbps": kbps,
             "fps": fps,

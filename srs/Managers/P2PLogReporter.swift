@@ -27,7 +27,8 @@ final class P2PLogReporter {
     private let captureKeywords = [
         "P2P", "p2p", "malvshezhing", "[自适应]", "ICE", "candidate",
         "Offer", "Answer", "offer", "answer", "关键帧", "PLI", "IDR",
-        "推流", "码率", "fps", "FPS", "WEBRTC", "🔑", "🚑", "热点", "relay", "TURN"
+        "推流", "码率", "fps", "FPS", "WEBRTC", "🔑", "🚑", "热点", "relay", "TURN",
+        "H265", "h265", "HEVC"   // ⭐ H265 专属诊断行（H265Support.swift 的 h265Log）
     ]
 
     private var timerQueue = DispatchQueue(label: "p2plog.reporter")
@@ -193,8 +194,10 @@ final class P2PLogReporter {
         req.httpMethod = "POST"
         req.timeoutInterval = 15
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // ⭐ H265：H265 会话日志与 H264 分开（前缀 ios-p2p → ios-p2p-h265，总后台分文件下载）
+        let effectivePrefix = H265Support.shared.logUploadPrefix(base: prefix)
         let body: [String: Any] = [
-            "prefix": prefix,
+            "prefix": effectivePrefix,
             "streamId": streamId.isEmpty ? "unknown" : streamId,
             "content": content
         ]

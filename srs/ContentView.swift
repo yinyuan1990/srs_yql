@@ -555,6 +555,7 @@ struct BrightnessSliderView: View {
 // MARK: - 主视图
 struct ContentView: View {
     @StateObject var rtc = WebRTCManager()
+    @ObservedObject var h265 = H265Support.shared   // ⭐ H265：左上角编码显示（H264/H265）
     @EnvironmentObject var appState: AppState
     @Environment(\.scenePhase) private var scenePhase  // ✅ App 生命周期
 
@@ -750,6 +751,15 @@ struct ContentView: View {
                             Text("白平衡:\(rtc.whiteBalanceStatusText)")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(rtc.whiteBalanceIsAuto ? .cyan : .orange)
+                        }
+                        // ⭐ H265：当前推流编码（H265 橙色醒目 / H264 灰色；实现在 H265Support.swift）
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(h265.effectiveCodec == .h265 ? Color.orange : Color.gray)
+                                .frame(width: 7, height: 7)
+                            Text("编码:\(h265.effectiveCodec.title)")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(h265.effectiveCodec == .h265 ? .orange : .gray)
                         }
                     }
                     .padding(.horizontal, 7)

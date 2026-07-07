@@ -2851,6 +2851,9 @@ final class WebRTCManager: NSObject, ObservableObject {
                 )
                 enc.preferredCodec = compatibleH264
                 print("🎯 H.264 preferredCodec profile-level-id=\(WebRTCManager.forcedH264ProfileLevelId)（High 5.2；老 PC 不兼容时改 42e01f）")
+                // ⭐ H265 支持（全部逻辑在 H265Support.swift，此处仅注册钩子）：
+                //   记下 factory + H264 preferred，P2P 推流时按登录页「P2P编码」选项切换。
+                H265Support.shared.registerFactory(encoder: enc, h264Preferred: compatibleH264)
             }
             
             return RTCPeerConnectionFactory(encoderFactory: enc, decoderFactory: dec)
@@ -3532,10 +3535,14 @@ final class WebRTCManager: NSObject, ObservableObject {
         if mode == .p2p {
             currentConnMode = .p2p
             WebRTCManager.effectiveConnectstype = 1
+            // ⭐ H265：仅 P2P 链路按登录页「P2P编码」选项切 preferredCodec（H265Support.swift 内聚全部逻辑）
+            H265Support.shared.applySelectionForP2P()
             startP2PPublish(initialProfile: initialProfile)
             startModeEvalTimer()
             return
         }
+        // ⭐ H265：非 P2P（SRS/SRT）永远 H264，恢复默认 preferred
+        H265Support.shared.forceH264ForNonP2P()
         // MARK: - SRT (independent)
         // 三种连接方式互斥，本次会话只走一条。选 SRT 即只推 SRT，不建立 WebRTC/SRS。
         if mode == .srt {

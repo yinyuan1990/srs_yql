@@ -37,6 +37,7 @@ struct MonitorLoginView: View {
     @State private var isPasswordVisible: Bool = false
     @State private var rememberPassword: Bool = false
     @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected  // 连接方式（默认上次选择）
+    @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected  // ⭐ P2P编码二级选项（H264/H265，仅 P2P 显示，实现在 H265Support.swift）
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -255,6 +256,14 @@ struct MonitorLoginView: View {
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 12)
+
+                        // ⭐ P2P 二级选项：编码 H264/H265（仅 P2P 选中时显示；UI 组件在 H265Support.swift）
+                        if selectedConnectMode == .p2p {
+                            Divider()
+                                .background(Color(hex: "F0F0F0"))
+                                .padding(.leading, 50)
+                            CodecOptionChips(selected: $selectedCodec)
+                        }
                     }
                     .background(Color.white)
                     .cornerRadius(16, corners: [.topLeft, .topRight])
