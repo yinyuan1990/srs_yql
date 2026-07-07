@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import VideoToolbox
 import WebRTC
 
 // ============================================================================
@@ -20,8 +21,8 @@ import WebRTC
 //        其它情况 → 恢复 H264 preferred
 //   → CONFIG_STATE 上报 videoCodec 字段（PC 据此预建 H265 解码管线）
 //
-// ⚠️ 依赖：stasel/WebRTC SPM ≥ 146.0.0 才带 H265 编解码（M140 无）。
-//   已在 project.pbxproj 把 minimumVersion 提到 146.0.0，Mac 上需 Resolve Packages。
+// ⚠️ 依赖：webrtc-sdk（LiveKit fork）144.7559.10 二进制，经 Packages/WebRTC 本地包引入（swift-tools-version:6.2）。
+//   stasel/WebRTC 146 无 ObjC H265 编码器；本包与 github.com/webrtc-sdk/Specs 同 xcframework。
 // ============================================================================
 
 // MARK: - 编码选项（登录页二级选项）
@@ -75,13 +76,66 @@ final class H265Support: ObservableObject {
         self.h264Preferred = h264Preferred
 
         let codecs = RTCDefaultVideoEncoderFactory.supportedCodecs()
-        h265Info = codecs.first(where: {
-            $0.name.caseInsensitiveCompare("H265") == .orderedSame ||
-            $0.name.lowercased().contains("h265") ||
-            $0.name.lowercased().contains("hevc")
-        })
+        let listedH265 = codecs.first(where: Self.isH265CodecName)
+        let sdkHasClass = Self.sdkHasH265EncoderClass()
+        let hwEnc = Self.deviceSupportsHEVCEncode()
+
+        // webrtc-sdk 144+ 有 RTCVideoEncoderH265，但 supportedCodecs() 仅在硬件可用时才列入 H265。
+        // 不能只靠列表探测——需结合 SDK 类 + VideoToolbox 硬编能力，再手动构造 preferredCodec。
+        if let listed = listedH265 {
+            h265Info = listed
+        } else if sdkHasClass, hwEnc {
+            h265Info = Self.buildH265CodecInfo()
+        } else {
+            h265Info = nil
+        }
         sdkSupportsH265 = (h265Info != nil)
-        h265Log("SDK能力探测: H265编码=\(sdkSupportsH265 ? "支持✅" : "不支持❌(需 stasel/WebRTC ≥146)") 全部codec=\(codecs.map { $0.name })")
+
+        let status = sdkSupportsH265 ? "支持✅" : "不支持❌"
+        let reason: String
+        if sdkSupportsH265 {
+            reason = listedH265 != nil ? "listed" : "manual(\(kRTCVideoCodecH265Name))"
+        } else if !sdkHasClass {
+            reason = "无 RTCVideoEncoderH265（需 Packages/WebRTC webrtc-sdk 144+，非 stasel）"
+        } else if !hwEnc {
+            reason = "设备 VideoToolbox 无 HEVC 硬编"
+        } else {
+            reason = "未知"
+        }
+        h265Log("SDK能力探测: H265编码=\(status) 来源=\(reason) sdkClass=\(sdkHasClass) hwEnc=\(hwEnc) 全部codec=\(codecs.map { $0.name })")
+    }
+
+    // MARK: H265 能力探测（webrtc-sdk supportedCodecs 不一定含 H265）
+
+    private static func isH265CodecName(_ info: RTCVideoCodecInfo) -> Bool {
+        info.name.caseInsensitiveCompare("H265") == .orderedSame ||
+        info.name.caseInsensitiveCompare("HEVC") == .orderedSame ||
+        info.name.lowercased().contains("h265") ||
+        info.name.lowercased().contains("hevc")
+    }
+
+    /// webrtc-sdk 二进制带 ObjC H265 编码器；stasel/Google 预编译包无此类。
+    private static func sdkHasH265EncoderClass() -> Bool {
+        NSClassFromString("RTCVideoEncoderH265") != nil
+    }
+
+    /// VideoToolbox 是否支持 HEVC 硬件编码（与 WebRTC 内部探测一致）。
+    private static func deviceSupportsHEVCEncode() -> Bool {
+        var props: CFDictionary?
+        let status = VTCopySupportedPropertyDictionaryForEncoder(
+            width: 1920,
+            height: 1080,
+            codecType: kCMVideoCodecType_HEVC,
+            encoderSpecification: nil,
+            encoderIDOut: nil,
+            supportedPropertiesOut: &props
+        )
+        return status == noErr
+    }
+
+    /// 手动构造 H265 codec info（supportedCodecs 未列出时仍可通过 factory.createEncoder 走 H265）。
+    private static func buildH265CodecInfo() -> RTCVideoCodecInfo {
+        RTCVideoCodecInfo(name: kRTCVideoCodecH265Name)
     }
 
     // MARK: 钩子 2：startPublish P2P 分支调（每次推流定案）
@@ -107,7 +161,7 @@ final class H265Support: ObservableObject {
             }
             setEffective(.h264)
             if selected == .h265 {
-                h265Log("⚠️ 选了 H265 但 SDK 不支持（WebRTC <146?），回落 H264")
+                h265Log("⚠️ 选了 H265 但不可用（需 webrtc-sdk 144+ 且设备支持 HEVC 硬编），回落 H264")
             }
             return .h264
         }
