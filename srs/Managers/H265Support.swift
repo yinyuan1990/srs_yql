@@ -48,6 +48,30 @@ enum VideoCodecOption: String, CaseIterable {
     }
 }
 
+// MARK: - H265-enabled 编码器工厂
+//
+// 关键：webrtc-sdk 的 RTCDefaultVideoEncoderFactory.supportedCodecs() 默认「不列出」H265
+// （即使 RTCVideoEncoderH265 类存在、设备支持 HEVC 硬编）。而 preferredCodec 只能对
+// 「已在 supportedCodecs 里的编码」排序——H265 不在列表里 → preferredCodec=H265 被忽略 →
+// Offer 里永远没有 H265。
+//
+// 解决：子类重写 supportedCodecs()，在设备支持 HEVC 硬编时把 H265 追加进列表。
+// 这样 libwebrtc 建 Offer 时会真正列出 H265，并用 createEncoder(H265) → RTCVideoEncoderH265 编码。
+// SRS/非 P2P 会话由 preferredCodec=H264 保证 H264 优先，H265 仅作为额外可选项，不影响现网。
+final class H265DefaultVideoEncoderFactory: RTCDefaultVideoEncoderFactory {
+    override func supportedCodecs() -> [RTCVideoCodecInfo] {
+        var codecs = super.supportedCodecs()
+        let hasH265 = codecs.contains {
+            $0.name.caseInsensitiveCompare("H265") == .orderedSame ||
+            $0.name.caseInsensitiveCompare("HEVC") == .orderedSame
+        }
+        if !hasH265 && H265Support.deviceCanEncodeHEVC() {
+            codecs.append(RTCVideoCodecInfo(name: kRTCVideoCodecH265Name))
+        }
+        return codecs
+    }
+}
+
 // MARK: - H265 支持核心
 
 final class H265Support: ObservableObject {
@@ -117,6 +141,16 @@ final class H265Support: ObservableObject {
     /// webrtc-sdk 二进制带 ObjC H265 编码器；stasel/Google 预编译包无此类。
     private static func sdkHasH265EncoderClass() -> Bool {
         NSClassFromString("RTCVideoEncoderH265") != nil
+    }
+
+    /// 供 H265DefaultVideoEncoderFactory 判断是否追加 H265：SDK 有 H265 编码器类 且 设备能 HEVC 硬编。
+    static func deviceCanEncodeHEVC() -> Bool {
+        sdkHasH265EncoderClass() && deviceSupportsHEVCEncode()
+    }
+
+    /// 创建编码器工厂（H265-enabled 子类）。WebRTCManager 建 factory 时用它替代 RTCDefaultVideoEncoderFactory()。
+    static func makeEncoderFactory() -> RTCDefaultVideoEncoderFactory {
+        H265DefaultVideoEncoderFactory()
     }
 
     /// VideoToolbox 是否支持 HEVC 硬件编码（与 WebRTC 内部探测一致）。

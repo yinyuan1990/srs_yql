@@ -2828,7 +2828,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     private let factory: RTCPeerConnectionFactory = {
             RTCInitializeSSL()
             
-            let enc = RTCDefaultVideoEncoderFactory()
+            // ⭐ H265：用 H265-enabled 工厂（重写 supportedCodecs 追加 H265，否则 preferredCodec 塞不进 Offer）
+            let enc = H265Support.makeEncoderFactory()
             let dec = RTCDefaultVideoDecoderFactory()
             
             // 🔥🔥 画质优化：改用 High Profile（提升远处细节/红牌清晰度）
