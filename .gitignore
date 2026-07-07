@@ -19,7 +19,9 @@ xcuserdata/
 # Swift Package Manager
 .swiftpm/
 .build/
-Packages/
+Packages/*
+!Packages/WebRTC/
+Packages/WebRTC/.swiftpm/
 Package.pins
 Package.resolved
 *.xcodeproj/project.xcworkspace/xcuserdata/

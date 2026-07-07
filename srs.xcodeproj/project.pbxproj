@@ -294,7 +294,7 @@
 			mainGroup = 2C596C4B2E58E22500C94789;
 			packageReferences = (
 				2CB8FA512E73FAFC00F90666 /* XCRemoteSwiftPackageReference "SwiftStomp" */,
-				2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "Specs" */,
+				2C5B004E2E90D20800755FBF /* XCLocalSwiftPackageReference "WebRTC" */,
 				2C5867CC2FE959F000624BF2 /* XCRemoteSwiftPackageReference "HaishinKit" */,
 			);
 			productRefGroup = 2C596C552E58E22500C94789 /* Products */;
@@ -599,13 +599,9 @@
 				minimumVersion = 2.0.0;
 			};
 		};
-		2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "Specs" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/webrtc-sdk/Specs.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 144.7559.10;
-			};
+		2C5B004E2E90D20800755FBF /* XCLocalSwiftPackageReference "WebRTC" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/WebRTC;
 		};
 		2CB8FA512E73FAFC00F90666 /* XCRemoteSwiftPackageReference "SwiftStomp" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -630,7 +626,7 @@
 		};
 		2C5B004F2E90D20800755FBF /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 2C5B004E2E90D20800755FBF /* XCRemoteSwiftPackageReference "Specs" */;
+			package = 2C5B004E2E90D20800755FBF /* XCLocalSwiftPackageReference "WebRTC" */;
 			productName = WebRTC;
 		};
 		2CB8FA522E73FAFC00F90666 /* SwiftStomp */ = {
