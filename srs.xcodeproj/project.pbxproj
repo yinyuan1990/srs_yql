@@ -50,6 +50,7 @@
 		2C9A00012FC6000000000001 /* CustomAVCaptureVideoCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */; };
 		2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000A001 /* P2PManager.swift */; };
 		2CAAAAAA2E0000000000C002 /* H265Support.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000C001 /* H265Support.swift */; };
+		2CAAAAAA2E0000000000D002 /* P2PLogReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAAAAA2E0000000000D001 /* P2PLogReporter.swift */; };
 		2CB8FA4E2E73C59A00F90666 /* ImagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */; };
 		2CB8FA502E73D38100F90666 /* WebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CB8FA4F2E73D38100F90666 /* WebView.swift */; };
 		2CB8FA532E73FAFC00F90666 /* SwiftStomp in Frameworks */ = {isa = PBXBuildFile; productRef = 2CB8FA522E73FAFC00F90666 /* SwiftStomp */; };
@@ -103,6 +104,7 @@
 		2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomAVCaptureVideoCapturer.swift; sourceTree = "<group>"; };
 		2CAAAAAA2E0000000000A001 /* P2PManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PManager.swift; sourceTree = "<group>"; };
 		2CAAAAAA2E0000000000C001 /* H265Support.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = H265Support.swift; sourceTree = "<group>"; };
+		2CAAAAAA2E0000000000D001 /* P2PLogReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PLogReporter.swift; sourceTree = "<group>"; };
 		2CB8FA4D2E73C59A00F90666 /* ImagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePicker.swift; sourceTree = "<group>"; };
 		2CB8FA4F2E73D38100F90666 /* WebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebView.swift; sourceTree = "<group>"; };
 		2CBBBBBB2E0000000000B001 /* SRSManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRSManager.swift; sourceTree = "<group>"; };
@@ -158,6 +160,7 @@
 				2C25E12A2E5FCF6000EA9245 /* WebSocketManager.swift */,
 				2CAAAAAA2E0000000000A001 /* P2PManager.swift */,
 				2CAAAAAA2E0000000000C001 /* H265Support.swift */,
+				2CAAAAAA2E0000000000D001 /* P2PLogReporter.swift */,
 				2CBBBBBB2E0000000000B001 /* SRSManager.swift */,
 				2C9A00002FC6000000000001 /* CustomAVCaptureVideoCapturer.swift */,
 				2C5B00512E90DC5100755FBF /* WebRTCManager.swift */,
@@ -361,6 +364,7 @@
 				2C25E12B2E5FCF6000EA9245 /* WebSocketManager.swift in Sources */,
 				2CAAAAAA2E0000000000A002 /* P2PManager.swift in Sources */,
 				2CAAAAAA2E0000000000C002 /* H265Support.swift in Sources */,
+				2CAAAAAA2E0000000000D002 /* P2PLogReporter.swift in Sources */,
 				2CBBBBBB2E0000000000B002 /* SRSManager.swift in Sources */,
 				2CFE49342E5E2FCF00FCC88C /* HomeView.swift in Sources */,
 				2CB8FA502E73D38100F90666 /* WebView.swift in Sources */,
