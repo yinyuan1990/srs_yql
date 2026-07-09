@@ -961,11 +961,12 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         // 🔥 超高清档位：iPhone 15+ 直接采集1920x1080 (16:9)，scaleDown=1.0
         //              iPhone 13/14 采集1920x1440 (4:3) → 原始输出1920x1440，scaleDown=1.0
+        // ⭐ 2026-07-09 用户要求：全档位码率上限统一下调 500（min 不动）
         let p4kPreset: LadderPreset
         if needP4kSeparateCapture {
-            p4kPreset = LadderPreset(width: 1920, height: 1080, fps: 60, maxKbps: 7500, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
+            p4kPreset = LadderPreset(width: 1920, height: 1080, fps: 60, maxKbps: 7000, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
         } else {
-            p4kPreset = LadderPreset(width: 1920, height: 1440, fps: 60, maxKbps: 7500, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
+            p4kPreset = LadderPreset(width: 1920, height: 1440, fps: 60, maxKbps: 7000, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
         }
 
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
@@ -973,40 +974,40 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ minKbps 约为 max 的 60%，码率可向下波动
         // 🔥 2026-07-02: high 档码率上调 5500→7000（min 60%）。原与 ultra(1280x720) 同区间 3300-5500，
         //   但 high 像素多 68%（1440x1080≈1.55M vs 0.92M px），同码率必然先糊先卡（编码器 underbitrate）。
-        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 7000, minKbps: 4200, maxPushFps: 60, scaleDown: 1.0)
-        let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 4500, minKbps: 2700, maxPushFps: 60, scaleDown: 1.0)
-        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2500, minKbps: 1500, maxPushFps: 60, scaleDown: 1.0)  // 低清：max不变，1500~2500
+        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 6500, minKbps: 4200, maxPushFps: 60, scaleDown: 1.0)
+        let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 4000, minKbps: 2700, maxPushFps: 60, scaleDown: 1.0)
+        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2000, minKbps: 1500, maxPushFps: 60, scaleDown: 1.0)  // 低清 1500~2000
 
         let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
         
         if device.position == .back {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 240, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
+                .ultra:    LadderPreset(width: 1280, height: 720, fps: 240, maxKbps: 5000, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 后置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @240fps → 3300-5500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 4200-7000kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
+            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7000kbps [\(p4kInfo)]")
+            print("   超高帧(ultra) = 1280x720  @240fps → 3300-5000kbps (16:9单独采集)")
+            print("   超清(high)    = 1440x1080 @60fps  → 4200-6500kbps (采集1920x1440缩放)")
+            print("   高清(standard)= 1024x768  @60fps  → 2700-4000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 1500-2000kbps (采集1920x1440缩放)")
         } else {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 120, maxKbps: 5500, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
+                .ultra:    LadderPreset(width: 1280, height: 720, fps: 120, maxKbps: 5000, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 前置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7500kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @120fps → 3300-5500kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 4200-7000kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 1024x768  @60fps  → 2700-4500kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 1500-2500kbps (采集1920x1440缩放)")
+            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7000kbps [\(p4kInfo)]")
+            print("   超高帧(ultra) = 1280x720  @120fps → 3300-5000kbps (16:9单独采集)")
+            print("   超清(high)    = 1440x1080 @60fps  → 4200-6500kbps (采集1920x1440缩放)")
+            print("   高清(standard)= 1024x768  @60fps  → 2700-4000kbps (采集1920x1440缩放)")
+            print("   低清(low)     = 640x480   @60fps  → 1500-2000kbps (采集1920x1440缩放)")
         }
     }
     
