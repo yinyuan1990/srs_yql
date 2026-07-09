@@ -744,6 +744,17 @@ struct ContentView: View {
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(rtc.viewerConnected ? .green : .red)
                         }
+                        // ⭐ 切网重连中（P2P）：过程可视化，PC 心跳恢复后自动消失
+                        if rtc.p2pReconnecting && !rtc.viewerConnected {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(Color.yellow)
+                                    .frame(width: 7, height: 7)
+                                Text("网络切换重连中…")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.yellow)
+                            }
+                        }
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(rtc.whiteBalanceIsAuto ? Color.cyan : Color.orange)

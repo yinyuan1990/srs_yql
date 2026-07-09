@@ -883,6 +883,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     // MARK: - 对外状态
     @Published var isPublishing = false
     @Published var viewerConnected: Bool = false
+    /// ⭐ 切网重连中（P2P）：拆会话+HANGUP 后等 PC 重连，左上角显示"网络切换重连中…"；PC 心跳恢复即清除
+    @Published var p2pReconnecting: Bool = false
     private var lastViewerHeartbeatTime: Date = Date.distantPast
     private var viewerHeartbeatChecker: Timer?
     var currentKbps: Int = 0       // 🔥 去掉@Published，纯统计不触发UI刷新
@@ -1397,6 +1399,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let fps = (notification.userInfo?["fps"] as? Int) ?? 0
             print("📺 [VIEWER] PC 已连接，接收 \(fps)fps")
         }
+        if p2pReconnecting { p2pReconnecting = false }   // ⭐ PC 心跳恢复 = 切网重连完成，清除"重连中"
         // ⭐ 维护观看者注册表（用于 P2P/SRS 自动协商计数）
         if let pcId = notification.userInfo?["fromDevice"] as? String, !pcId.isEmpty {
             let net = (notification.userInfo?["networkType"] as? String) ?? "unknown"
@@ -3265,6 +3268,14 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 回调保留为空，仅 P2PManager 内部自有的 ICE Restart/relay 兜底仍生效。
         p2pManager.onLocalNetworkChange = { /* no-op：静态连接方式，不自动切换 */ }
         p2pManager.onViewerPermanentlyFailed = { _ in /* no-op：P2P 模式下不回落 SRS */ }
+        // ⭐ 切网重连：置"重连中"（左上角显示），PC 重连成功后由 viewerConnected 心跳清除
+        p2pManager.onNetworkSwitchReconnect = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.p2pReconnecting = true
+                self.viewerConnected = false
+            }
+        }
     }
 
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受

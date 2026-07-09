@@ -43,6 +43,8 @@ final class P2PManager: NSObject {
     var onLocalNetworkChange: (() -> Void)?
     /// 某 PC 的 P2P 彻底失败（ICE 重试耗尽）→ 上层应回落 SRS
     var onViewerPermanentlyFailed: ((String) -> Void)?
+    /// ⭐ 切网触发重连（拆会话+HANGUP，等 PC 重发 REQUEST）→ 上层置"重连中"给左上角 UI
+    var onNetworkSwitchReconnect: (() -> Void)?
 
     private(set) var isActive = false
     /// 是否就绪接收观看请求（采集/视频轨已就绪）
@@ -196,26 +198,26 @@ final class P2PManager: NSObject {
     }
 
     /// 网络切换：重新评估每个会话的传输策略（蜂窝→relay）并重连
+    ///
+    /// ⭐ 2026-07-09 修「切网后必须手动重登 PC 才出画面」根因：
+    ///   观看端恒为 PC GStreamer，其 webrtcbin **不支持在旧实例上 ICE Restart**（收新 ufrag 的
+    ///   re-offer 不会重启 libnice/重新收集候选 → 新 ICE 永远配不通、卡死 25s）。
+    ///   因此切网【不再尝试 ICE Restart】，一律拆会话 + HANGUP(network_switch_reconnect)，
+    ///   由 PC 整体重建 pipeline + 重发 WEBRTC_REQUEST，手机再回全新 Offer（干净重连，与手动重登等效但全自动）。
     private func restartAllIceForNetworkSwitch() {
         let sessions = viewerSessions
         if sessions.isEmpty { return }
-        print("📶 [P2P] 网络切换，处理 \(sessions.count) 个会话")
-        for (pcId, pc) in sessions {
-            // 切网是“新一次”重连，重置该会话的 ICE 重试计数，避免多次切网快速耗尽 maxICERetries 后彻底放弃
+        print("📶 [P2P] 网络切换，拆除并让 PC 重连 \(sessions.count) 个会话（PC 恒 GStreamer，不做 ICE Restart）")
+        for (pcId, _) in sessions {
             iceRetryCount[pcId] = 0
-            let state = pc.connectionState
-            if state == .closed || state == .failed {
-                // 无法 ICE Restart：拆掉并让 PC 重新发起（PC 收到 network_switch_reconnect 会自动重发观看请求）
-                removeViewerSession(pcId, notifyPC: false)
-                WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
-                                                            reason: "network_switch_reconnect",
-                                                            toDevice: pcId)
-            } else {
-                // 切到蜂窝且当前不是 relay 黑名单 → 加入黑名单，下次重建走 relay；本次先 ICE Restart
-                if isOnCellular { forceRelayPeerIds.insert(pcId) }
-                retryICEConnection(for: pcId, peerConnection: pc)
-            }
+            // 切到蜂窝：拉黑该 peer，PC 重建后手机回的新 Offer 走 TURN relay
+            if isOnCellular { forceRelayPeerIds.insert(pcId) }
+            removeViewerSession(pcId, notifyPC: false)
+            WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
+                                                        reason: "network_switch_reconnect",
+                                                        toDevice: pcId)
         }
+        onNetworkSwitchReconnect?()   // 通知上层置"重连中"（左上角显示，PC 重连成功后清除）
     }
 
     // MARK: - 传输策略
