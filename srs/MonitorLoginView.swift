@@ -8,9 +8,10 @@ enum ConnectModeOption: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .srs: return "SRS"
+        // ⭐ 2026-07-11：SRS=多人线路、P2P=单人线路（仅改显示名，rawValue 仍是 srs/p2p）
+        case .srs: return "多人线路"
         case .srt: return "SRT"
-        case .p2p: return "P2P"
+        case .p2p: return "单人线路"
         }
     }
 

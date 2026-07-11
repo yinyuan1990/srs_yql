@@ -41,10 +41,10 @@ enum VideoCodecOption: String, CaseIterable {
     /// 本地记忆 key（与 connect_mode 同风格）
     static let storageKey = "p2p_video_codec"
 
-    /// 读取上次选择（无则默认 H264，与现网行为一致）
+    /// 读取上次选择（⭐ 2026-07-11 默认改 H265；设备/协商不支持时 applySelectionForP2P 自动回退 H264）
     static var lastSelected: VideoCodecOption {
         let raw = UserDefaults.standard.string(forKey: storageKey) ?? ""
-        return VideoCodecOption(rawValue: raw) ?? .h264
+        return VideoCodecOption(rawValue: raw) ?? .h265
     }
 }
 
