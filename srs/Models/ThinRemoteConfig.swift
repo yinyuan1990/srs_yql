@@ -52,6 +52,11 @@ struct ThinRemoteConfig: Codable {
     var wbWhite: Float?         // 白 -1~1
     var wbAmber: Float?         // 黄/琥珀 -1~1
 
+    // ⭐ 2026-07-14：低功率采集模式开关（PC「相机设定」面板新增，还原按钮旁）。
+    //   仅影响「采集」帧率（钉死30fps）；PC 下发的推送(push)fps 逻辑完全不变，两者本就解耦。
+    //   由 WebRTCManager.getCaptureResolutionForProfile 统一收口应用（详见该函数注释）。
+    var lowPowerCapture: Bool?
+
     let lastUpdated: String?
     let updatedBy: String?
 
@@ -94,6 +99,7 @@ struct ThinRemoteConfig: Codable {
         case wbBlack = "black"
         case wbWhite = "white"
         case wbAmber = "amber"
+        case lowPowerCapture
         case lastUpdated = "last_updated"
         case updatedBy = "updated_by"
     }
@@ -163,6 +169,7 @@ struct ThinRemoteConfig: Codable {
         wbBlack = try container.decodeIfPresent(Float.self, forKey: .wbBlack)
         wbWhite = try container.decodeIfPresent(Float.self, forKey: .wbWhite)
         wbAmber = try container.decodeIfPresent(Float.self, forKey: .wbAmber)
+        lowPowerCapture = try container.decodeIfPresent(Bool.self, forKey: .lowPowerCapture)
         lastUpdated = try container.decodeIfPresent(String.self, forKey: .lastUpdated)
         updatedBy = try container.decodeIfPresent(String.self, forKey: .updatedBy)
     }
@@ -209,6 +216,7 @@ struct ThinRemoteConfig: Codable {
         self.wbBlack = nil
         self.wbWhite = nil
         self.wbAmber = nil
+        self.lowPowerCapture = nil
         self.lastUpdated = nil
         self.updatedBy = nil
     }

@@ -1126,9 +1126,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         
         // 同步相机采集帧率（服务器下发fps时）
+        // ⭐ 2026-07-14：套 effectiveCaptureFps —— 低功率开关开着时，这里也不能让推送fps把采集fps顶回60。
         if let input = capturer?.currentVideoInput {
             let dev = input.device
-            let captureFps = max(clamped, minCaptureFps)
+            let captureFps = effectiveCaptureFps(max(clamped, minCaptureFps))
             if currentCaptureFPS != captureFps {
                 capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
@@ -1356,9 +1357,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fps
         
         // 2. 同步相机采集帧率（避免 ISP 全速空跑）
+        // ⭐ 2026-07-14：套 effectiveCaptureFps，低功率开关下自适应也不能把采集fps顶回30以上。
         if let input = capturer?.currentVideoInput {
             let dev = input.device
-            let captureFps = max(fps, minCaptureFps)
+            let captureFps = effectiveCaptureFps(max(fps, minCaptureFps))
             if currentCaptureFPS != captureFps {
                 capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
@@ -1725,9 +1727,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         frameThrottler?.targetSendFps = fps
         
         // 2. 同步相机采集帧率（避免相机 ISP 全速采集浪费功耗）
+        // ⭐ 2026-07-14：套 effectiveCaptureFps，低功率开关下 PC 的 set_fps 指令也不能把采集fps顶回30以上。
         if let input = capturer?.currentVideoInput {
             let dev = input.device
-            let captureFps = max(fps, minCaptureFps)
+            let captureFps = effectiveCaptureFps(max(fps, minCaptureFps))
             if currentCaptureFPS != captureFps {
                 capturer?.lockFrameRate(captureFps)
                 currentCaptureFPS = captureFps
@@ -2011,6 +2014,18 @@ final class WebRTCManager: NSObject, ObservableObject {
                 applyFilterMode(enabled)
             }
 
+        case "lowPowerCapture":
+            // ⭐ 2026-07-14：PC「相机设定」面板低功率/高功率开关。只调采集fps（lockFrameRate 轻量
+            //   重锁帧间隔，不触发完整会话重配置/不换格式），推送fps不受影响。
+            if let enabled = cfg.lowPowerCapture {
+                lowPowerCaptureEnabled = enabled
+                let newFps = getCaptureResolutionForProfile(currentProfile).fps
+                capturer?.lockFrameRate(newFps)
+                currentCaptureFPS = newFps
+                malvshezhingLog("[低功率] PC下发 enabled=\(enabled) → 采集fps钉\(newFps) (档位=\(currentProfile))")
+                print("🔋 [低功率采集] enabled=\(enabled) → 采集fps=\(newFps)")
+            }
+
         case "videoHDR":
             if let enabled = cfg.videoHDR {
                 capturer?.applyVideoHDR(enabled)
@@ -2092,6 +2107,10 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     func applyThinRemoteConfigInit(_ cfg: ThinRemoteConfig) {
+            // 0) 🔥 2026-07-14 低功率采集模式：必须在「1) 档位」之前设置，
+            //    这样下面 applyProfileBitrateOnly 触发的首次采集就直接按正确fps启动，不用再等一次 lockFrameRate。
+            lowPowerCaptureEnabled = cfg.lowPowerCapture ?? false
+
             // 1) 档位：5档固定配置 - low/standard/high/ultra/p4k
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
@@ -3106,6 +3125,27 @@ final class WebRTCManager: NSObject, ObservableObject {
     // 3. 初始化：startPreviewIfNeeded/startPublish 的 initialProfile 参数
     private var autoAdaptEnabled = false  // 固定为false，不可修改
     
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - 🔥 2026-07-14 低功率采集模式（PC「相机设定」面板新增，还原按钮旁的开关）
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 背景：目前所有档位（low/standard/high/p4k）採集恒定 60fps（ultra 更高达120/240fps），
+    //   耗电/发热主要来源之一就是采集侧。PC 新增「低功率/高功率」开关，iOS 收到后自行判断：
+    //   低功率 = 采集帧率钉死 30fps（不管当前档位）；高功率 = 按档位原有 fps 不变（现网行为）。
+    //   ⚠️ 只影响「采集」fps，PC 下发的「推送(push)」fps 逻辑完全不动——两者本就解耦
+    //   （LadderPreset.fps=采集、maxPushFps/推送侧走 targetOutputFPS，互不牵连）。
+    //
+    // 🔥 采集 fps 决策口径统一收口：全项目所有实际调用 capturer.startCapture/switchCapture/
+    //   lockFrameRate 的地方，理论上都必须经过 getCaptureResolutionForProfile(_:).fps 或
+    //   effectiveCaptureFps(_:) 换算，不允许再直接读 preset.fps——否则低功率开关会在那个分支失效。
+    //   （审计发现 applyProfileBitrateOnly 里有一处历史遗留直接用 preset.fps，已改用换算后的值。）
+    @Published var lowPowerCaptureEnabled: Bool = false
+    private let lowPowerCaptureFpsCap: Int = 30
+
+    /// 采集 fps 唯一换算口径：低功率开启时钉 30（或更低的原始值，取小），否则原样返回。
+    func effectiveCaptureFps(_ rawFps: Int) -> Int {
+        return lowPowerCaptureEnabled ? min(rawFps, lowPowerCaptureFpsCap) : rawFps
+    }
+
     // 温和自适应：只改码率不上下采集档位，避免重启采集闪烁
    var gentleAdaptMode = true
    private var lastAdaptAt: TimeInterval = 0
@@ -3430,8 +3470,11 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         if needRecapture {
             // 🔥 需要重采集（采集分辨率发生变化）
+            // ⭐ 2026-07-14 修复：这里原来直接用 preset.fps（绕开 getCaptureResolutionForProfile
+            //   的低功率换算），改用 newCaptureRes.fps（= effectiveCaptureFps(preset.fps)），
+            //   否则低功率开关在「切档触发重采集」这条路径上会失效，只有初始启动/切摄像头生效。
             print("   🔄 需要重采集: \(oldCaptureRes.width)x\(oldCaptureRes.height) → \(newCaptureRes.width)x\(newCaptureRes.height)")
-            recaptureWithResolution(width: newCaptureRes.width, height: newCaptureRes.height, fps: preset.fps)
+            recaptureWithResolution(width: newCaptureRes.width, height: newCaptureRes.height, fps: newCaptureRes.fps)
         } else {
             // 🔥 同采集分辨率，只需改 scaleResolutionDownBy
             print("   ✅ 同采集分辨率切换，只改缩放比例: \(oldPreset?.scaleDown ?? 1.0) → \(preset.scaleDown)")
@@ -5208,29 +5251,33 @@ final class WebRTCManager: NSObject, ObservableObject {
         return currentLadder[profile]?.scaleDown ?? 1.0
     }
     
-    /// 🔥 获取档位的实际采集分辨率
+    /// 🔥 获取档位的实际采集分辨率 + 采集fps（⭐ 全项目采集fps的唯一收口点）
     /// - ultra: 采集 1280x720 (16:9)
     /// - p4k iPhone 15+: 直接采集 1920x1080 (16:9)
     /// - 其他: 采集 1920x1440 (4:3)，通过 scaleDown 缩放输出
+    /// - 返回的 fps 已经过 effectiveCaptureFps 换算（低功率开关钉30fps，与档位原始fps无关）——
+    ///   所有需要「档位对应的采集fps」的调用方都应该走这个函数（或至少走 effectiveCaptureFps），
+    ///   不要再直接读 currentLadder[profile]?.fps，否则低功率开关在那个分支会失效。
     /// - Returns: (width, height, fps)
     func getCaptureResolutionForProfile(_ profile: LadderProfile) -> (width: Int, height: Int, fps: Int) {
         guard let preset = currentLadder[profile] else {
-            return (1920, 1440, 60)  // 默认 4:3
+            return (1920, 1440, effectiveCaptureFps(60))  // 默认 4:3
         }
+        let fps = effectiveCaptureFps(preset.fps)
 
         switch profile {
         case .ultra:
-            return (1280, 720, preset.fps)
+            return (1280, 720, fps)
         case .p4k:
-            return isIPhone15OrNewer() ? (1920, 1080, preset.fps) : (1920, 1440, preset.fps)
+            return isIPhone15OrNewer() ? (1920, 1080, fps) : (1920, 1440, fps)
         case .high:
-            return (1440, 1080, preset.fps)   // 直接采集 1440×1080，无缩放
+            return (1440, 1080, fps)   // 直接采集 1440×1080，无缩放
         case .low:
-            return (640, 480, preset.fps)     // 直接采集 640×480，无缩放
+            return (640, 480, fps)     // 直接采集 640×480，无缩放
         case .standard:
-            return (1024, 768, preset.fps)    // 直接采集 1024×768，无缩放
+            return (1024, 768, fps)    // 直接采集 1024×768，无缩放
         default:
-            return (1920, 1440, preset.fps)
+            return (1920, 1440, fps)
         }
     }
     
