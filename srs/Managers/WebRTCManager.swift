@@ -2926,6 +2926,9 @@ final class WebRTCManager: NSObject, ObservableObject {
                 frameThrottler?.captureFps = currentCaptureFPS
                 print("📊 [采集FPS变化] \(oldValue) → \(currentCaptureFPS)fps")
             }
+            // ⭐ 2026-07-14：同步回报给 PC（走 CONFIG_STATE 心跳）——之前 PC 完全看不到实际采集fps，
+            //   现在不管是低功率开关、切档、自适应、set_fps 哪条路径改的，这里唯一收口都会同步。
+            WebSocketManager.publishingCaptureFps = currentCaptureFPS
         }
     }
     
@@ -3138,7 +3141,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     //   lockFrameRate 的地方，理论上都必须经过 getCaptureResolutionForProfile(_:).fps 或
     //   effectiveCaptureFps(_:) 换算，不允许再直接读 preset.fps——否则低功率开关会在那个分支失效。
     //   （审计发现 applyProfileBitrateOnly 里有一处历史遗留直接用 preset.fps，已改用换算后的值。）
-    @Published var lowPowerCaptureEnabled: Bool = false
+    @Published var lowPowerCaptureEnabled: Bool = false {
+        didSet {
+            // ⭐ 2026-07-14：状态变化即回报给 PC（走 CONFIG_STATE 心跳，几秒内到达；
+            //   之前只下发不回报，PC 端完全看不到有没有生效）
+            WebSocketManager.publishingLowPowerCapture = lowPowerCaptureEnabled
+        }
+    }
     private let lowPowerCaptureFpsCap: Int = 30
 
     /// 采集 fps 唯一换算口径：低功率开启时钉 30（或更低的原始值，取小），否则原样返回。

@@ -12,6 +12,10 @@ class WebSocketManager: ObservableObject {
     static var publishingKbps: Int = 0
     static var publishingFps: Int = 0
     static var publishingSendFps: Int = 0  // WebRTC实际推送FPS
+    // ⭐ 2026-07-14：低功率采集回报（WebRTCManager 每次改动时同步写入）——
+    //   之前 PC 点开关是纯下发、iOS 不回报，PC 端完全看不到有没有生效/当前实际采集多少fps。
+    static var publishingCaptureFps: Int = 0        // 当前实际采集fps（已套用低功率钳制后的值）
+    static var publishingLowPowerCapture: Bool = false  // 当前是否处于低功率采集模式
     static var publishingStreamKey: String = ""  // 当前推流使用的唯一streamKey
     static var networkQuality: String = "unknown"  // 网络质量: excellent/good/fair/poor/unknown
     static var packetLoss: Double = 0.0  // 丢包率 0.0~1.0
@@ -176,6 +180,9 @@ class WebSocketManager: ObservableObject {
             "kbps": kbps,
             "fps": fps,
             "sendFps": sendFps,  // WebRTC实际推送FPS
+            // ⭐ 低功率采集回报：PC 相机设定面板据此显示"是否已生效 + 当前实际采集fps"
+            "captureFps": WebSocketManager.publishingCaptureFps,
+            "lowPowerCapture": WebSocketManager.publishingLowPowerCapture,
             "networkQuality": quality,  // 网络质量等级
             "packetLoss": loss,  // 丢包率
             "rtt": rtt,  // RTT时延(ms)
