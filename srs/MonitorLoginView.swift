@@ -53,6 +53,10 @@ struct MonitorLoginView: View {
     @State private var showPrivacyPolicy = false
     @State private var showAlreadyBoundAlert = false  // 已绑定账号提示
     @State private var showDeviceIdPage = false       // 🔥 设备ID查看页面
+    // ⭐ 强制更新（总后台「App更新配置」下发最低版本+下载地址，本地版本低则弹不可绕过弹窗）
+    @State private var showForceUpdate = false
+    @State private var forceUpdateMessage = ""
+    @State private var forceUpdateUrl = ""
         
     enum LoginStep {
         case idle
@@ -385,6 +389,7 @@ struct MonitorLoginView: View {
             loadLocalAccountInfo()
             selectedConnectMode = ConnectModeOption.lastSelected  // 同步上次选择
             setupWebSocketNotificationListener()
+            checkForceUpdate()   // ⭐ 强制更新检查（总后台「App更新配置」，公共接口）
         }
         .onDisappear {
             NotificationCenter.default.removeObserver(self, name: .webSocketConnectionStateChanged, object: nil)
@@ -407,6 +412,17 @@ struct MonitorLoginView: View {
         } message: {
             Text(alertMessage)
         }
+        // ⭐ 强制更新：只有「立即更新」一个按钮，点完 0.5s 后重新弹出——不可绕过
+        .alert("发现新版本", isPresented: $showForceUpdate) {
+            Button("立即更新") {
+                if let url = URL(string: forceUpdateUrl) {
+                    UIApplication.shared.open(url)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showForceUpdate = true }
+            }
+        } message: {
+            Text(forceUpdateMessage)
+        }
         .alert("提示", isPresented: $showAlreadyBoundAlert) {
             Button("确定", role: .cancel) { }
         } message: {
@@ -420,6 +436,57 @@ struct MonitorLoginView: View {
         }
     }
     
+    // MARK: - ⭐ App 强制更新（与 Android AppUpdateManager 同一接口同一语义）
+    // 公共接口 GET /api/config/app-update（无需登录），返回 {config:"{\"ios\":{enabled,minVersion,downloadUrl},...}"}。
+    // 本地 CFBundleShortVersionString < minVersion 且 enabled → 弹不可绕过的强更弹窗跳 downloadUrl。
+    // 网络/解析失败一律放行（不能因接口抖动把用户锁在门外）。
+    private func checkForceUpdate() {
+        guard let url = URL(string: APIConfig.shared.baseURL + "/api/config/app-update") else { return }
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            guard let data = data,
+                  let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cfgStr = outer["config"] as? String,
+                  let cfgData = cfgStr.data(using: .utf8),
+                  let cfg = try? JSONSerialization.jsonObject(with: cfgData) as? [String: Any],
+                  let iosCfg = cfg["ios"] as? [String: Any] else {
+                print("📦 [强更] 检查失败(放行)")
+                return
+            }
+            let enabled = (iosCfg["enabled"] as? Bool) ?? false
+            let minVersion = (iosCfg["minVersion"] as? String) ?? ""
+            let downloadUrl = (iosCfg["downloadUrl"] as? String) ?? ""
+            guard enabled, !minVersion.isEmpty, !downloadUrl.isEmpty else {
+                print("📦 [强更] 未开启或未配置 → 放行")
+                return
+            }
+            let local = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            if MonitorLoginView.compareVersion(local, minVersion) < 0 {
+                print("📦 [强更] 本地=\(local) < 最低=\(minVersion) → 强制更新 \(downloadUrl)")
+                DispatchQueue.main.async {
+                    forceUpdateUrl = downloadUrl
+                    forceUpdateMessage = "当前版本 \(local) 已停止支持，请更新到 \(minVersion) 及以上版本后继续使用。"
+                    showForceUpdate = true
+                }
+            } else {
+                print("📦 [强更] 本地=\(local) ≥ 最低=\(minVersion) → 放行")
+            }
+        }.resume()
+    }
+
+    /// 语义化版本比较（"2.4" vs "2.4.1" 逐段数字比），返回 <0 / 0 / >0
+    private static func compareVersion(_ a: String, _ b: String) -> Int {
+        let pa = a.split(separator: ".").map { Int($0.filter { $0.isNumber }) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0.filter { $0.isNumber }) ?? 0 }
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x < y ? -1 : 1 }
+        }
+        return 0
+    }
+
     // 设置WebSocket通知监听
     private func setupWebSocketNotificationListener() {
         NotificationCenter.default.addObserver(
