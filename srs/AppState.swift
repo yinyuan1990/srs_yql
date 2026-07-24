@@ -22,6 +22,8 @@ class AppState: ObservableObject {
     @Published var currentView: AppView = .splash  // 🔥 启动时显示 Splash 页面
     @Published var isLoggedIn: Bool = false
     @Published var permanentToken: String = ""
+    // ⭐ 登录页 toast（扫码绑定成功后回登录页时提示「请重新登录」；MonitorLoginView 显示后自动清空）
+    @Published var loginToast: String = ""
     
     init() {
         checkLoginStatus()

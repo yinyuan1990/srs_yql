@@ -242,6 +242,13 @@ struct RegisterView: View {
                                     .padding(.vertical, 16)
                                     
                                     Divider().background(Color(hex: "F0F0F0"))
+
+                                    // ⭐ 提示：绑定码=绑定电脑用的独立密码，可与登录密码一致（加大加粗醒目提示）
+                                    Text("💡 绑定电脑使用的独立密码，可以和登录密码一致")
+                                        .font(.system(size: 15, weight: .bold))
+                                        .foregroundColor(Color(hex: "FF7A00"))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.top, 12)
                                 }
                                 .padding(.horizontal, 22)
                                 

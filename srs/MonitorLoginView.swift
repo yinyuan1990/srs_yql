@@ -444,6 +444,25 @@ struct MonitorLoginView: View {
         .fullScreenCover(isPresented: $showPrivacyPolicy) {
             LocalWebView(fileName: "privacy_policy", title: "隐私政策")
         }
+        // ⭐ 登录页 toast（扫码绑定成功回登录页时提示「请重新登录」，2.5s 自动消失）
+        .overlay(alignment: .bottom) {
+            if !appState.loginToast.isEmpty {
+                Text(appState.loginToast)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.75))
+                    .cornerRadius(22)
+                    .padding(.bottom, 80)
+                    .transition(.opacity)
+                    .onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                            appState.loginToast = ""
+                        }
+                    }
+            }
+        }
     }
     
     // MARK: - ⭐ App 强制更新（与 Android AppUpdateManager 同一接口同一语义）

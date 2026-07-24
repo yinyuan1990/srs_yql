@@ -372,8 +372,10 @@ struct RootView: View {
                 DeviceBindingQRScannerView(
                     deviceUsername: UserDefaults.standard.string(forKey: "username") ?? "",
                     onBindingSuccess: { _ in
-                        // 绑定成功后跳转到推流页面
-                        appState.navigateToContent()
+                        // ⭐ 绑定成功后回登录页重新登录（绑定改变了账号状态，重登拉取最新绑定/权限），
+                        //   登录页以 toast 提示「请重新登录」（loginToast 由 MonitorLoginView 展示后自动清空）
+                        appState.loginToast = "绑定成功，请重新登录"
+                        appState.navigateToMonitorLogin()
                     }
                 )
             }
