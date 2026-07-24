@@ -200,9 +200,12 @@ final class SRSManager: NSObject {
         } catch {
             print("⚠️ [SRS] 获取推流Token失败: \(error.localizedDescription)，使用无Token推流")
         }
-        let url = URL(string: "http://\(srsIP):1985\(apiPath)")!
+        // ⭐ H265（第四十九章）：SRS 6.0 的 RTC H265 协商由 API 请求参数 codec=hevc 开启
+        //   （srs_app_rtc_api.cpp: r->query_get("codec")；不带则走 H264 分支，H265 Offer 会被 400 拒）
+        let path = H265Support.shared.isH265Session() ? "\(apiPath)?codec=hevc" : apiPath
+        let url = URL(string: "http://\(srsIP):1985\(path)")!
         let body: [String: Any] = [
-            "api": "http://\(srsIP):1985\(apiPath)",
+            "api": "http://\(srsIP):1985\(path)",
             "streamurl": finalStreamUrl,
             "sdp": offer
         ]
