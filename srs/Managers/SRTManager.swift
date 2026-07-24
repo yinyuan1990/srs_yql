@@ -280,9 +280,15 @@ final class SRTManager {
         var settings = await stream.videoSettings
         settings.videoSize = CGSize(width: encWidth, height: encHeight)
         settings.bitRate = targetBitrateKbps * 1000
-        // Baseline + AutoLevel：保留对老 PC 硬解最友好的 Baseline（无 CABAC），
-        // 同时让 level 随分辨率自动抬升（Baseline 3.1 仅支持到 720p，写死会限制高清档）。
-        settings.profileLevel = kVTProfileLevel_H264_Baseline_AutoLevel as String
+        // ⭐ H265（第四十九章）：SRT 按登录页「SRT编码」选择切 HEVC/H264。
+        //   H264：Baseline + AutoLevel（对老 PC 硬解最友好，无 CABAC，level 随分辨率自动抬升）。
+        //   H265：HEVC Main + AutoLevel（HaishinKit → VideoToolbox HEVC；PC 走 SRT→SRS→WHEP 拉 H265）。
+        if H265Support.shared.srtWantsH265() {
+            settings.profileLevel = kVTProfileLevel_HEVC_Main_AutoLevel as String
+            if WebRTCManager.verboseLogEnabled { print("🎬 [SRT] 编码=HEVC(Main)") }
+        } else {
+            settings.profileLevel = kVTProfileLevel_H264_Baseline_AutoLevel as String
+        }
         settings.scalingMode = .trim
         settings.expectedFrameRate = Double(encFps)
         settings.maxKeyFrameIntervalDuration = 2

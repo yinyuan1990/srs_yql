@@ -3606,18 +3606,20 @@ final class WebRTCManager: NSObject, ObservableObject {
             startModeEvalTimer()
             return
         }
-        // ⭐ H265：非 P2P（SRS/SRT）永远 H264，恢复默认 preferred
-        H265Support.shared.forceH264ForNonP2P()
         // MARK: - SRT (independent)
         // 三种连接方式互斥，本次会话只走一条。选 SRT 即只推 SRT，不建立 WebRTC/SRS。
         if mode == .srt {
             currentConnMode = .srt
             WebRTCManager.effectiveConnectstype = 2   // 2=SRT；方案 A 下 SRS 桥接成 WebRTC，PC 仍 WebRTC 拉
+            // ⭐ H265（第四十九章）：SRT 也可选 H265，SRTManager 读 srtWantsH265() 设 HEVC profileLevel
+            H265Support.shared.applySelectionForSrt()
             startSRTPublish(initialProfile: initialProfile)
             return
         }
         currentConnMode = .srs
         WebRTCManager.effectiveConnectstype = 0
+        // ⭐ H265（第四十九章）：SRS 也按登录页「多人编码」选项切 preferredCodec（默认 h264，SRS 6.0.184 支持 H265）
+        H265Support.shared.applySelectionForSrs()
         startModeEvalTimer()
         
         // 🔥 检查摄像头预览是否准备好（只有在预览模式下才需要检查）

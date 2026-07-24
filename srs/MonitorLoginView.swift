@@ -38,7 +38,10 @@ struct MonitorLoginView: View {
     @State private var isPasswordVisible: Bool = false
     @State private var rememberPassword: Bool = false
     @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected  // 连接方式（默认上次选择）
-    @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected  // ⭐ P2P编码二级选项（H264/H265，仅 P2P 显示，实现在 H265Support.swift）
+    @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected  // ⭐ P2P编码二级选项（H264/H265，实现在 H265Support.swift）
+    // ⭐ 第四十九章：SRS/SRT 也可选编码，与 P2P 独立记忆、默认 h264
+    @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h264)
+    @State private var selectedCodecSrt: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264)
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -262,12 +265,19 @@ struct MonitorLoginView: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 12)
 
-                        // ⭐ P2P 二级选项：编码 H264/H265（仅 P2P 选中时显示；UI 组件在 H265Support.swift）
+                        // ⭐ 编码二级选项 H264/H265（第四十九章：P2P/SRS/SRT 都显示，各自独立记忆；UI 组件在 H265Support.swift）
                         if selectedConnectMode == .p2p {
-                            Divider()
-                                .background(Color(hex: "F0F0F0"))
-                                .padding(.leading, 50)
-                            CodecOptionChips(selected: $selectedCodec)
+                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
+                            CodecOptionChips(selected: $selectedCodec,
+                                             storageKey: VideoCodecOption.storageKey, title: "单人编码")
+                        } else if selectedConnectMode == .srs {
+                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
+                            CodecOptionChips(selected: $selectedCodecSrs,
+                                             storageKey: VideoCodecOption.srsStorageKey, title: "多人编码")
+                        } else if selectedConnectMode == .srt {
+                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
+                            CodecOptionChips(selected: $selectedCodecSrt,
+                                             storageKey: VideoCodecOption.srtStorageKey, title: "SRT编码")
                         }
                     }
                     .background(Color.white)

@@ -38,13 +38,23 @@ enum VideoCodecOption: String, CaseIterable {
         }
     }
 
-    /// 本地记忆 key（与 connect_mode 同风格）
+    /// 本地记忆 key（P2P，与 connect_mode 同风格）
     static let storageKey = "p2p_video_codec"
+    /// SRS 编码记忆 key（第四十九章新增，默认 h264；与 P2P 独立）
+    static let srsStorageKey = "srs_video_codec"
+    /// SRT 编码记忆 key（第四十九章新增，默认 h264；与 P2P 独立）
+    static let srtStorageKey = "srt_video_codec"
 
     /// 读取上次选择（⭐ 2026-07-11 默认改 H265；设备/协商不支持时 applySelectionForP2P 自动回退 H264）
     static var lastSelected: VideoCodecOption {
         let raw = UserDefaults.standard.string(forKey: storageKey) ?? ""
         return VideoCodecOption(rawValue: raw) ?? .h265
+    }
+
+    /// 按 key 读取（SRS/SRT 用，默认由调用方给——SRS/SRT 默认 h264）
+    static func lastSelected(key: String, defaultCodec: VideoCodecOption) -> VideoCodecOption {
+        let raw = UserDefaults.standard.string(forKey: key) ?? ""
+        return VideoCodecOption(rawValue: raw) ?? defaultCodec
     }
 }
 
@@ -201,9 +211,50 @@ final class H265Support: ObservableObject {
         }
     }
 
-    // MARK: 钩子 3：SRS/SRT 分支调（非 P2P 永远 H264）
+    // MARK: 钩子 3：SRS 分支调（第四十九章：SRS 也可选 H265，默认 h264）
 
-    /// 非 P2P 链路恢复 H264 preferred（SRS/SRT 不支持 H265，行为与现网完全一致）
+    /// SRS 推流前按登录页「多人编码」选择切 preferredCodec（SRS 与 P2P 同一套 WebRTC 工厂）。
+    /// 选 H265 但 SDK/设备不支持时回落 H264。SRS 服务器 6.0.184 已 --h265=on。
+    @discardableResult
+    func applySelectionForSrs() -> VideoCodecOption {
+        let selected = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h264)
+        guard let enc = encoderFactory else {
+            setEffective(.h264)
+            h265Log("⚠️ applySelectionForSrs: encoderFactory 未注册，维持 H264")
+            return .h264
+        }
+        if selected == .h265, sdkSupportsH265, let h265 = h265Info {
+            enc.preferredCodec = h265
+            setEffective(.h265)
+            h265Log("✅ SRS preferredCodec → H265(\(h265.name))。WHIP Offer H265 优先，SRS 6.0.184 回 H265")
+            return .h265
+        } else {
+            if let h264 = h264Preferred { enc.preferredCodec = h264 }
+            setEffective(.h264)
+            if selected == .h265 { h265Log("⚠️ SRS 选 H265 但不可用，回落 H264") }
+            return .h264
+        }
+    }
+
+    // MARK: 钩子 3b：SRT 分支调（HaishinKit/VideoToolbox，不走 WebRTC 工厂）
+
+    /// SRT 只定 effectiveCodec 供上报；实际编码由 SRTManager 读 srtWantsH265() 设 profileLevel（HEVC/H264）。
+    @discardableResult
+    func applySelectionForSrt() -> VideoCodecOption {
+        let selected = VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264)
+        // VideoToolbox HEVC 硬编在 A10(iPhone7)+ 普遍可用，直接采信选择
+        setEffective(selected == .h265 ? .h265 : .h264)
+        return effectiveCodec
+    }
+
+    /// SRTManager 读取：SRT 本次会话是否用 HEVC 编码
+    func srtWantsH265() -> Bool {
+        return VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264) == .h265
+    }
+
+    // MARK: 兼容保留
+
+    /// 非 P2P 链路恢复 H264 preferred（历史接口，个别路径仍可能调用）
     func forceH264ForNonP2P() {
         if let enc = encoderFactory, let h264 = h264Preferred {
             enc.preferredCodec = h264
@@ -265,6 +316,10 @@ final class H265Support: ObservableObject {
 /// 放本文件而非 MonitorLoginView，保持 H265 相关 UI 与旧登录页解耦。
 struct CodecOptionChips: View {
     @Binding var selected: VideoCodecOption
+    /// 存储 key（P2P=p2p_video_codec / SRS=srs_video_codec / SRT=srt_video_codec）
+    var storageKey: String = VideoCodecOption.storageKey
+    /// 标题文案（P2P编码/多人编码/SRT编码）
+    var title: String = "P2P编码"
 
     var body: some View {
         HStack(spacing: 6) {
@@ -279,7 +334,7 @@ struct CodecOptionChips: View {
             }
             .frame(width: 24, height: 24)
 
-            Text("P2P编码")
+            Text(title)
                 .font(.system(size: 16))
                 .foregroundColor(Color(hex: "1A1A1A"))
 
@@ -300,7 +355,7 @@ struct CodecOptionChips: View {
         let isSelected = (selected == codec)
         Button(action: {
             selected = codec
-            UserDefaults.standard.set(codec.rawValue, forKey: VideoCodecOption.storageKey)
+            UserDefaults.standard.set(codec.rawValue, forKey: storageKey)
         }) {
             Text(codec.title)
                 .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
