@@ -41,7 +41,7 @@ struct MonitorLoginView: View {
     @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected  // ⭐ P2P编码二级选项（H264/H265，实现在 H265Support.swift）
     // ⭐ 第四十九章：SRS/SRT 也可选编码，与 P2P 独立记忆、默认 h264
     @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h264)
-    @State private var selectedCodecSrt: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264)
+    // ⭐ SRT 编码选项已隐藏（2026-07-24，服务器 SRS 6.0 桥不支持 HEVC，SRT 固定 H264；升 SRS 7.0.33+ 后恢复）
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -274,11 +274,10 @@ struct MonitorLoginView: View {
                             Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
                             CodecOptionChips(selected: $selectedCodecSrs,
                                              storageKey: VideoCodecOption.srsStorageKey, title: "多人编码")
-                        } else if selectedConnectMode == .srt {
-                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
-                            CodecOptionChips(selected: $selectedCodecSrt,
-                                             storageKey: VideoCodecOption.srtStorageKey, title: "SRT编码")
                         }
+                        // ⭐ SRT 编码选项已隐藏（2026-07-24）：服务器 SRS 6.0.184 的 RTMP→RTC 桥接
+                        //   源码写死丢弃 HEVC（srs_app_rtc_source.cpp:1074），SRT+H265 必黑屏。
+                        //   SRS 7.0.33+ 才支持 rtmp2rtc HEVC，服务器升级后恢复此选项即可（SRT 固定 H264）。
                     }
                     .background(Color.white)
                     .cornerRadius(16, corners: [.topLeft, .topRight])

@@ -239,17 +239,19 @@ final class H265Support: ObservableObject {
     // MARK: 钩子 3b：SRT 分支调（HaishinKit/VideoToolbox，不走 WebRTC 工厂）
 
     /// SRT 只定 effectiveCodec 供上报；实际编码由 SRTManager 读 srtWantsH265() 设 profileLevel（HEVC/H264）。
+    /// ⭐ 2026-07-24 SRT 强制 H264：服务器 SRS 6.0.184 的 RTMP→RTC 桥接源码写死丢弃 HEVC
+    ///（srs_app_rtc_source.cpp:1074 "WebRTC does NOT support HEVC"），SRT+H265 必黑屏。
+    ///   登录页 SRT 编码选项已同步隐藏；这里兜底忽略历史存储的 h265 偏好。
+    ///   服务器升 SRS 7.0.33+（rtmp2rtc 支持 HEVC）后，恢复读 srtStorageKey 即可。
     @discardableResult
     func applySelectionForSrt() -> VideoCodecOption {
-        let selected = VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264)
-        // VideoToolbox HEVC 硬编在 A10(iPhone7)+ 普遍可用，直接采信选择
-        setEffective(selected == .h265 ? .h265 : .h264)
+        setEffective(.h264)
         return effectiveCodec
     }
 
-    /// SRTManager 读取：SRT 本次会话是否用 HEVC 编码
+    /// SRTManager 读取：SRT 本次会话是否用 HEVC 编码（服务器桥不支持 HEVC，恒 false，见上）
     func srtWantsH265() -> Bool {
-        return VideoCodecOption.lastSelected(key: VideoCodecOption.srtStorageKey, defaultCodec: .h264) == .h265
+        return false
     }
 
     // MARK: 兼容保留
