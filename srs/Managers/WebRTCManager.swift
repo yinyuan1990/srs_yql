@@ -3032,8 +3032,12 @@ final class WebRTCManager: NSObject, ObservableObject {
     ///   单向操作：会话期内不切回直连（pcId 进 forceRelayPeerIds），会话拆除时自动重置。
     ///   relaySwitchGapSec：两次触发的最小间隔。软切(ICE Restart)生效要几秒，期间路径仍显示直连，
     ///   若每秒重触发会被 P2PManager 误判「软切无效」而提前硬切拆会话。
+    ///   ⚠️ 2026-07-27 §52.6：判定沿用，但**动作已从「切中继」改为「退登录页提示改用多人线路」**，
+    ///      下面两个限频字段随之成为死变量（保留以备回滚）。
     private var lastRelaySwitchAt: CFAbsoluteTime = 0
     private let relaySwitchGapSec: Double = 8
+    /// ⭐ §52.6：本次推流会话内「非同 WiFi」只处理一次，防止 stats 每秒重复发通知
+    var notSameWifiHandled = false
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
 
     /// 帧率档位表（直接切档，不逐步微调）
@@ -3933,6 +3937,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
     func startP2PPublish(initialProfile: LadderProfile? = nil) {
         print("🎬 [P2P] 启动 P2P 直连推流")
+        notSameWifiHandled = false   // ⭐ §52.6：新一轮推流重新判定同 WiFi
         // 预览采集管线应已就绪（进主页/唤醒时已 startPreviewIfNeeded）；未就绪则回主线程补起后重试
         if localVideoTrack == nil || capturer == nil {
             Task { @MainActor [weak self] in
@@ -6078,15 +6083,20 @@ final class WebRTCManager: NSObject, ObservableObject {
                             }
                         }
 
-                        // ⭐ §25.7 链路择优（简化版）：非同 WiFi（选中路径不是 host↔host）→ 立即切中继。
-                        //   两侧候选类型都已知才判定；relaySwitchGapSec 限频，给软切(ICE Restart)生效时间，
-                        //   仍未生效才由 P2PManager 升级硬切。
-                        if self.currentConnMode == .p2p, activePairId != nil, !pathIsRelay,
+                        // ⭐ §52.6（替代原 §25.7 的「切中继」）：非同 WiFi（选中路径不是 host↔host）
+                        //   → 停止推流并退回登录页，提示改用多人线路(SRS)。
+                        //   原来是切 TURN 中继，但中继下码率被钳到 relayMaxKbps，且路径与 SRS 完全相同却
+                        //   拿不到 SRS 的服务端重传/GOP cache/一对多分发（§52.5）——是最差的一档组合。
+                        //   判定沿用已有的 pathIsLan，不新造检测。后端显式 forceRelay 时不干预。
+                        if self.currentConnMode == .p2p, activePairId != nil, !self.notSameWifiHandled,
+                           !self.p2pManager.forceRelay,
                            let lt = localPathType, let rt = remotePathType, !pathIsLan {
-                            if now - self.lastRelaySwitchAt >= self.relaySwitchGapSec {
-                                self.lastRelaySwitchAt = now
-                                self.malvshezhingLog("[线路] 🔀非同WiFi直连(本端=\(lt) 远端=\(rt)) → 立即切中继")
-                                self.p2pManager.switchAllSessionsToRelay(reason: "non_lan_\(lt)_\(rt)")
+                            self.notSameWifiHandled = true
+                            self.malvshezhingLog("[线路] 🚫非同WiFi(本端=\(lt) 远端=\(rt)) → 退出 P2P，提示改用多人线路")
+                            DispatchQueue.main.async {
+                                NotificationCenter.default.post(
+                                    name: Notification.Name("P2PNotSameWifi"),
+                                    object: nil, userInfo: ["reason": "non_lan_\(lt)_\(rt)"])
                             }
                         }
                         

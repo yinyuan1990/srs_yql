@@ -456,7 +456,8 @@ struct MonitorLoginView: View {
                     .padding(.bottom, 80)
                     .transition(.opacity)
                     .onAppear {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        // 5s：这里也用于承载「不在同一 WiFi，请选择多人线路」这类操作指引（§52.6），2.5s 读不完
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
                             appState.loginToast = ""
                         }
                     }

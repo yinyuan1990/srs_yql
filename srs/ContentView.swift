@@ -1009,6 +1009,20 @@ struct ContentView: View {
                 if rtc.isPublishing { print("⚠️ [原因] 退出登录停止推流"); rtc.stopPublish() }
             }
             
+            // ⭐ §52.6 非同一 WiFi：P2P 只有局域网直连才有优势，跨网走中继全面劣于 SRS。
+            //   停推流 → 把下次登录的默认线路改成多人线路 → 退回登录页并提示。
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("P2PNotSameWifi"),
+                object: nil,
+                queue: .main
+            ) { _ in
+                if rtc.isPublishing { print("⚠️ [原因] 非同一WiFi，退出 P2P 推流"); rtc.stopPublish() }
+                UserDefaults.standard.set(ConnectModeOption.srs.rawValue, forKey: ConnectModeOption.storageKey)
+                UserDefaults.standard.set(ConnectModeOption.srs.rawValue, forKey: "connect_mode")
+                appState.loginToast = "不在同一 WiFi，请选择「多人线路」"
+                appState.navigateToMonitorLogin()
+            }
+            
             // 监听扫码前释放摄像头通知
             NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("ReleaseCameraForScanner"),
