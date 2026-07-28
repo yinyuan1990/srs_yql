@@ -470,20 +470,50 @@ struct ControlPanelView: View {
         }
     }
 
+    // MARK: - ⭐ §53.9 会员已开通的档位标绿
+    //
+    // 会员等级与档位的对应（用户口径：**等级1 高清会员对应前端 2 个档位**）：
+    //   等级1 高清会员   → 超低网 + 高清            （2 档）
+    //   等级2 超清会员   → 上面 + 超清              （3 档）
+    //   等级3 超高清会员 → 上面 + 超高清            （4 档）
+    //   等级4 超高帧会员 → 上面 + 超高帧            （5 档，全开）
+    // 即 `档位门槛 <= 会员等级` 即为已开通；超低网与高清同为门槛 1。
+    private func profileRequiredLevel(_ p: LadderProfile) -> Int {
+        switch p {
+        case .low:      return 1   // 超低网：与高清同属等级1
+        case .standard: return 1   // 高清
+        case .high:     return 2   // 超清
+        case .p4k:      return 3   // 超高清
+        case .ultra:    return 4   // 超高帧
+        }
+    }
+
+    /// 该档位是否已随会员开通（未激活=一个都不算开通，不标绿）
+    private func isProfileUnlocked(_ p: LadderProfile) -> Bool {
+        guard UserDefaults.standard.bool(forKey: "activated") else { return false }
+        let level = UserDefaults.standard.integer(forKey: "activation_level")
+        return profileRequiredLevel(p) <= level
+    }
+
     var body: some View {
         // ✅ 横屏模式：水平排列
         HStack(spacing: 16) {
             // 档位切换（清晰度）
             HStack(spacing: 6) {
                 ForEach([LadderProfile.standard, .high, .p4k, .ultra, .low], id: \.self) { profile in
+                    let selected = (rtc.currentProfile == profile)
+                    let unlocked = isProfileUnlocked(profile)
                     Button(action: {
                         rtc.applyProfile(profile)
                     }) {
                         Text(profileName(profile))
-                            .font(.system(size: 10, weight: rtc.currentProfile == profile ? .bold : .regular))
-                            .foregroundColor(rtc.currentProfile == profile ? .yellow : .white)
+                            .font(.system(size: 10, weight: selected ? .bold : .regular))
+                            .foregroundColor(selected ? .yellow : .white)
                             .frame(width: 40, height: 30)
-                            .background(rtc.currentProfile == profile ? Color.blue.opacity(0.8) : Color.black.opacity(0.6))
+                            // 选中仍是蓝底（保持原有辨识）；未选中但已随会员开通 → 绿底标注
+                            .background(selected ? Color.blue.opacity(0.8)
+                                                 : (unlocked ? Color.green.opacity(0.55)
+                                                             : Color.black.opacity(0.6)))
                             .cornerRadius(6)
                     }
                 }

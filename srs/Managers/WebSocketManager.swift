@@ -1039,6 +1039,10 @@ extension WebSocketManager: SwiftStompDelegate {
         if let expireAt = activationExpireAt {
             UserDefaults.standard.set(expireAt, forKey: "activation_expire_at")
         }
+        // ⭐ §53.9：服务器推送的激活状态变化里也带开通时间（后台改等级/续期后无需重登即刷新「我的」页）
+        if let activationTime = msgDict["activationTime"] as? String {
+            UserDefaults.standard.set(activationTime, forKey: "activation_time")
+        }
         if let quality = qualityAccess {
             UserDefaults.standard.set(quality, forKey: "quality_access")
         }

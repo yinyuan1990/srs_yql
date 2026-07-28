@@ -92,6 +92,7 @@ struct TrialInfo: Codable {
     let activationLevel: Int?         // 激活等级 (1=标清, 2=高清, 3=超清, 4=4K)
     let activationLevelName: String?  // 等级名称
     let activationExpireAt: String?   // 激活到期时间
+    let activationTime: String?       // ⭐ §53.9 开通时间（「我的」页显示"<等级>会员 + 开通时间"）
     let qualityAccess: [String]?      // 可用画质列表
     
     // 🔥 日试用相关（新增）

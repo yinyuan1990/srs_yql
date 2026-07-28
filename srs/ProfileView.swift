@@ -527,6 +527,29 @@ struct ProfileView: View {
         }
     }
     
+    // MARK: - ⭐ §53.9「我的」页首行：未开通=注册时间 / 已开通=<等级>会员 + 开通时间
+    //
+    // 等级命名以总后台「会员管理」为准（1=高清 2=超清 3=超高清 4=超高帧），
+    // 与 levelDisplayText 同一套口径。**不用后端 activationLevelName**——那个给的是
+    // 「标清/高清/超清/4K」的老命名，与产品/PC/档位口径不一致（后端 DeviceBindingService 里也标注了这点）。
+    private var isMemberActivated: Bool {
+        UserDefaults.standard.bool(forKey: "activated")
+    }
+    private var membershipRowTitle: String {
+        isMemberActivated ? "\(levelDisplayText)会员" : "注册时间"
+    }
+    private var membershipRowSubtitle: String {
+        if isMemberActivated {
+            let t = UserDefaults.standard.string(forKey: "activation_time") ?? ""
+            // 老后端不下发开通时间时不硬凑一个假日期，直接留白
+            return t.isEmpty ? "—" : "开通时间 " + formatDate(t)
+        }
+        return formatDate(viewModel.userProfile?.createdAt)
+    }
+    private var membershipRowIcon: String {
+        isMemberActivated ? levelIcon : "clock"
+    }
+
     private var settingsListView: some View {
         VStack(spacing: 0) {
             settingsSection1
@@ -538,7 +561,12 @@ struct ProfileView: View {
     
     private var settingsSection1: some View {
         VStack(spacing: 0) {
-            ProfileRowView(icon: "clock", title: "注册时间", subtitle: formatDate(viewModel.userProfile?.createdAt), showArrow: true) {
+            // ⭐ §53.9：开通会员后，这一行从「注册时间 + 注册时间值」变成「<等级>会员 + 开通时间」；
+            //   未开通（试用）时保持原样显示注册时间。
+            ProfileRowView(icon: membershipRowIcon,
+                           title: membershipRowTitle,
+                           subtitle: membershipRowSubtitle,
+                           showArrow: true) {
                 handleRegistrationTimeAction()
             }
             Divider().padding(.leading, 60)

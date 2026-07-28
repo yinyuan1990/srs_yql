@@ -765,6 +765,10 @@ struct MonitorLoginView: View {
         if let expireAt = trialInfo.activationExpireAt {
             UserDefaults.standard.set(expireAt, forKey: "activation_expire_at")
         }
+        // ⭐ §53.9 开通时间（「我的」页把"注册时间"整行换成「<等级>会员 + 开通时间」）
+        if let activationTime = trialInfo.activationTime {
+            UserDefaults.standard.set(activationTime, forKey: "activation_time")
+        }
         if let qualityAccess = trialInfo.qualityAccess {
             UserDefaults.standard.set(qualityAccess, forKey: "quality_access")
         }
