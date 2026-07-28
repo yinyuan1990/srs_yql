@@ -1494,6 +1494,15 @@ struct ContentView: View {
         } else {
             isCameraReady = false
         }
+
+        // ⭐ §53.13：回前台后做一次推流健康检查。
+        //   后台期间相机被系统收走、socket 死、ICE 断，但 isPublishing 还是 true →
+        //   tryAutoPublish 的 `!isPublishing` 不成立不会重推，PC 那边也早就放弃重发 REQUEST，
+        //   于是**谁都不再发起恢复，PC 上永远停在最后一帧**。这一步是唯一的恢复出口。
+        //   延迟 1.2s：等 WS 重连与相机中断恢复先跑一拍，避免在半就绪状态上误判。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            rtc.publishHealthCheck("回前台")
+        }
     }
 }
 

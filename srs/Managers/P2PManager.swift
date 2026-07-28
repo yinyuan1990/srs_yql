@@ -233,6 +233,44 @@ final class P2PManager: NSObject {
         onNetworkSwitchReconnect?()   // 通知上层置"重连中"（左上角显示，PC 重连成功后清除）
     }
 
+    /// ⭐ §53.13：回前台 / WS 重连后的会话自检。
+    ///
+    /// App 被挂到后台期间 socket 会死、ICE 也会断；醒来时**观看端那边早就放弃重试了**
+    ///（PC 的 WEBRTC_REQUEST 只重发 5 次共 ~7.5s），于是没有任何人再发起重连，
+    /// PC 上就永远停在最后一帧。这里把已经死掉的会话拆掉并发
+    /// HANGUP(network_switch_reconnect)——PC 已有处理：不拆 pipeline、自动重发 REQUEST，
+    /// 手机再回一个全新 Offer（与切网恢复同一套动作，复用已验证的路径）。
+    ///
+    /// 没有会话时什么都不做（那是正常的"等 PC 来看"状态）。
+    @discardableResult
+    func recoverSessionsIfBroken(reason: String) -> Int {
+        guard isActive, !viewerSessions.isEmpty else { return 0 }
+        var broken: [String] = []
+        for (pcId, pc) in viewerSessions {
+            switch pc.iceConnectionState {
+            case .connected, .completed:
+                continue          // 活着，别碰
+            default:
+                broken.append(pcId)
+            }
+        }
+        guard !broken.isEmpty else {
+            print("✅ [P2P] \(reason)：\(viewerSessions.count) 个会话 ICE 均正常，无需重连")
+            return 0
+        }
+        print("🚑 [P2P] \(reason)：\(broken.count)/\(viewerSessions.count) 个会话 ICE 已死 → 拆除并让 PC 重连")
+        for pcId in broken {
+            iceRetryCount[pcId] = 0
+            if isOnCellular { forceRelayPeerIds.insert(pcId) }
+            removeViewerSession(pcId, notifyPC: false)
+            WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
+                                                        reason: "network_switch_reconnect",
+                                                        toDevice: pcId)
+        }
+        onNetworkSwitchReconnect?()   // 上层置"重连中"，PC 重连成功后由心跳清除
+        return broken.count
+    }
+
     // MARK: - 传输策略
 
     private func effectiveForceRelay(for pcId: String) -> Bool {

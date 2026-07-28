@@ -3387,10 +3387,17 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
 
-        // ⭐ §53.4.3：本机切网（WiFi↔蜂窝/换 WiFi）= 决策输入变化，交给 SessionPolicy 评估
-        //   （原为 no-op：那时连接方式是登录页静态选的，不允许自动切换）
-        p2pManager.onLocalNetworkChange = {
+        // ⭐ §53.4.3 / §53.12：本机切网（WiFi↔蜂窝/换 WiFi）。
+        //   ① 只给 SessionPolicy 打"待重新决策"标记，不在此刻评估（切网瞬间输入最不可靠，
+        //      且会与切网自愈抢着重启推流 —— Android 上实测就是切网后不出画面）。
+        //   ② 延迟做一次推流健康检查：**P2P 有专门的切网恢复**（P2PManager 拆会话+HANGUP 让 PC 重连），
+        //      但 **SRS 模式此前在 iOS 上切网后完全没有恢复路径**——PeerConnection 早死了也没人重推，
+        //      观看端就一直黑。3s 延迟是等 WS 重连与 ICE 状态稳定，避免在半就绪状态上误判。
+        p2pManager.onLocalNetworkChange = { [weak self] in
             SessionPolicy.shared.onLocalNetworkChanged()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                Task { @MainActor in self?.publishHealthCheck("切网") }
+            }
         }
         p2pManager.onViewerPermanentlyFailed = { _ in /* no-op：P2P 模式下不回落 SRS */ }
         // ⭐ 切网重连：置"重连中"（左上角显示），PC 重连成功后由 viewerConnected 心跳清除
@@ -5541,6 +5548,67 @@ final class WebRTCManager: NSObject, ObservableObject {
         bitrateEnforceTimer = nil
     }
     
+    // MARK: - ⭐ §53.13 推流健康检查（回前台 / 唤醒后的统一恢复出口，对标 Android publishHealthCheck）
+
+    /// App 从后台回到前台（或其它"可能已经断了很久"的时机）后，自检整条推流链路并恢复。
+    ///
+    /// **为什么必须有这个**：iOS 被挂到后台时相机会被系统收走、socket 会死、ICE 会断，而
+    /// `isPublishing` 还停在 true —— 于是 `tryAutoPublish` 的 `!isPublishing` 前置条件不成立、
+    /// 不会重推；观看端那边 PC 的 `WEBRTC_REQUEST` 也只重发 5 次（~7.5s）早就放弃了。
+    /// 结果就是**谁都不再发起恢复，PC 上永远停在最后一帧**（实测："从后台切到前台画面静止"）。
+    /// Android 早有 `publishHealthCheck` 兜住同样的场景，iOS 一直缺这一环。
+    ///
+    /// 恢复动作按"从轻到重"排：先救采集 → 没在推流就重推 → 在推流则按模式修媒体链路。
+    @MainActor
+    func publishHealthCheck(_ source: String) {
+        guard !isCameraSleeping else { return }
+        print("🔄 [健康检查] \(source): publishing=\(isPublishing) mode=\(currentConnMode)")
+
+        // ① 采集：长时间没有新帧 = 相机在后台被收走了没回来 → 用最近一次配置整体重建会话。
+        //    这里比看门狗的 3s 窗口更早介入（回前台就该立刻救），恢复后补一拍 IDR。
+        if let t = frameThrottler, t.hasReceivedFrame, t.lastCaptureFrameAt > 0 {
+            let gap = CFAbsoluteTimeGetCurrent() - t.lastCaptureFrameAt
+            if gap >= 1.5 {
+                print("🚑 [健康检查] \(source): 已 \(String(format: "%.1f", gap))s 无采集帧 → 重建相机会话")
+                capturer?.restartSessionFromLastConfig()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.forceKeyframe()
+                }
+            }
+        }
+
+        // ② 压根没在推流（后台被系统停掉）→ 重新推一次
+        guard isPublishing else {
+            if !baseStreamKey.isEmpty {
+                print("🔄 [健康检查] \(source): 未在推流 → 重新推流")
+                startPublish(initialProfile: currentProfile)
+            }
+            return
+        }
+
+        // ③ 在推流：按模式检查媒体链路死没死
+        switch currentConnMode {
+        case .p2p:
+            // 死掉的会话拆掉 + HANGUP，让 PC 重发 REQUEST（复用切网恢复那套已验证动作）
+            p2pManager.recoverSessionsIfBroken(reason: source)
+        case .srs:
+            let st = pc?.iceConnectionState
+            let dead = (pc == nil || st == .failed || st == .disconnected || st == .closed)
+            if dead {
+                print("🚑 [健康检查] \(source): SRS 媒体连接已死(\(String(describing: st))) → 停流后重推")
+                let profile = currentProfile
+                stopPublish()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.startPublish(initialProfile: profile)
+                }
+            } else {
+                print("▶️ [健康检查] \(source): SRS 媒体连接正常(\(String(describing: st)))")
+            }
+        default:
+            break
+        }
+    }
+
     // MARK: - 🚑 采集看门狗（2026-07-02 切档概率卡死修复）
 
     private func startCaptureWatchdog() {
