@@ -635,6 +635,11 @@ extension WebSocketManager: SwiftStompDelegate {
                 let h265Recv = (msgDict?["h265Recv"] as? Bool) ?? true   // 缺省宽松：旧版 PC 视为能收
                 let kernel = (msgDict?["kernel"] as? String) ?? "unknown"
                 let pcUsername = (msgDict?["pcUsername"] as? String) ?? ""
+                // ⭐⭐ §53.11 必须转发 localIps！这是"推流前判同不同 WiFi"的唯一依据（§53.4）。
+                //   漏了它 → SessionPolicy 拿到空网段 → 判成"观看端未上报网段(旧版PC)" →
+                //   **同 WiFi 也永远走 SRS，P2P 彻底不生效**（2026-07-28 实测：iOS 废了、Android 正常，
+                //   因为 Android 是在自己的 WebSocketManager 里直接解析 JSON，没经过这层通知转发）。
+                let localIps = (msgDict?["localIps"] as? String) ?? ""
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(
                         name: NSNotification.Name("PCPresence"),
@@ -644,7 +649,8 @@ extension WebSocketManager: SwiftStompDelegate {
                             "viewing": viewing,
                             "h265Recv": h265Recv,
                             "kernel": kernel,
-                            "pcUsername": pcUsername
+                            "pcUsername": pcUsername,
+                            "localIps": localIps
                         ]
                     )
                 }

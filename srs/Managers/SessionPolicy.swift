@@ -179,6 +179,12 @@ final class SessionPolicy {
         current = d
         renegotiateCount = 0
         pinnedToSrs = false
+        // ⭐ §53.11：把**决策输入**一起打出来。上一版只打结果与原因，结果 iOS 因为
+        //   `localIps` 在通知转发时漏传（空网段）而永远走 SRS，日志里看不出是输入缺了。
+        lock.lock()
+        let inputs = viewers.map { "\($0.key)[\($0.value.localIps.joined(separator: "/"))\($0.value.h265Recv ? "" : " 不收H265")]" }
+        lock.unlock()
+        log("决策输入：本机网段=\(Self.localIPv4Addresses().joined(separator: "/")) 观看端=\(inputs.isEmpty ? "无" : inputs.joined(separator: " "))")
         log("✅ 推流前定案：\(d.mode.rawValue.uppercased()) + \(d.codec.title) —— \(d.reason)")
         return d
     }
