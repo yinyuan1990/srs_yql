@@ -103,11 +103,17 @@ final class SessionPolicy {
                                    kernel: kernel, localIps: localIps)
         lock.unlock()
 
-        // 只在"可能改变决策"的字段变了时才去评估，避免每秒心跳都跑一遍决策
+        // 只在"可能改变决策"的字段变了时才去评估，避免每秒心跳都跑一遍决策。
+        // ⭐ §53.12：本机切过网时也在这里补评估一次（那时不评估，见 onLocalNetworkChanged）。
         let inputChanged = isNew
             || old?.h265Recv != h265Recv
             || old?.localIps != localIps
-        if inputChanged { evaluateForRenegotiate(trigger: isNew ? "PC上线(\(pcId))" : "PC网络/能力变化(\(pcId))") }
+        let pending = pendingNetworkChange
+        if pending { pendingNetworkChange = false }
+        if inputChanged || pending {
+            let base = isNew ? "PC上线(\(pcId))" : "PC网络/能力变化(\(pcId))"
+            evaluateForRenegotiate(trigger: pending ? base + " + 本机切过网" : base)
+        }
         return isNew
     }
 
@@ -135,6 +141,7 @@ final class SessionPolicy {
         pinnedToSrs = false
         lastRenegotiateAt = .distantPast
         graceConsumed = false
+        pendingNetworkChange = false
     }
 
     /// 停止推流：只清"本次会话"的定案，**保留观看端注册表**
@@ -272,10 +279,19 @@ final class SessionPolicy {
         onRenegotiateNeeded?(trigger)
     }
 
-    /// 设备自己切网（WiFi↔蜂窝/换 WiFi）由 WebRTCManager 的网络监听调用
+    /// 设备自己切网（WiFi↔蜂窝/换 WiFi）由 WebRTCManager 的网络监听调用。
+    ///
+    /// ⚠️ §53.12：**只打标记，不在这里评估**。切网瞬间 WS 多半已断、PC 的 presence 也停了，
+    /// 此刻算出来的"网段关系"是拿旧的/空的观看端网段去比，最不可靠；更要紧的是切网同时会触发
+    /// 各端原有的切网自愈（iOS 是 P2PManager 拆会话 + HANGUP 让 PC 重新 REQUEST），
+    /// 两条恢复路径在同一事件里抢着重建，顺序不确定 —— Android 上实测就是「切网后不出画面」。
+    /// 等观看端心跳重新到达（网络已稳、网段是新的）时，由 updatePresence 一并评估。
     func onLocalNetworkChanged() {
-        evaluateForRenegotiate(trigger: "本机切换网络")
+        pendingNetworkChange = true
+        log("📶 本机切网 → 标记待重新决策（等观看端心跳恢复后再评估，避免与切网自愈打架）")
     }
+
+    private var pendingNetworkChange = false
 
     /// 兜底：推流前预判为同 WiFi，但实测 ICE 路径不是局域网（AP 隔离/多网卡/NAT 掩盖网段）。
     /// 直接把本次会话钉在 SRS 并重新协商——比让用户自己去登录页改线路正确（§52.6 已废弃）。
