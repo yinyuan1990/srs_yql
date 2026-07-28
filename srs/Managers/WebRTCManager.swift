@@ -885,6 +885,20 @@ final class WebRTCManager: NSObject, ObservableObject {
     @Published var viewerConnected: Bool = false
     /// ⭐ 切网重连中（P2P）：拆会话+HANGUP 后等 PC 重连，左上角显示"网络切换重连中…"；PC 心跳恢复即清除
     @Published var p2pReconnecting: Bool = false
+
+    // MARK: - §53.2 PC 在线（与"在看"分开的两个状态）
+    /// 有没有 PC **登录在线**（收到 PC_PRESENCE 心跳，不管它有没有画面）。
+    /// 与 `viewerConnected`（=有画面在看）严格区分：两者组合起来才能说清现场状态——
+    /// 「PC在线 + 未在看」正是"两端都在线却没画面"这类故障的特征，以前只有一个灯，看不出来。
+    @Published var pcOnline: Bool = false
+    /// 在线 PC 台数
+    @Published var pcOnlineCount: Int = 0
+    /// 在线 PC 里是否**存在收不了 H265 的**（网页内核=Chromium 134，收 H265 必黑屏，见 §49.6-10）。
+    /// SRS 模式据此把编码降到 H264（§53.5，编码要服从最弱的观看端）。
+    @Published var anyViewerCannotRecvH265: Bool = false
+    /// 本次会话定案的链路/编码原因（随 CONFIG_STATE.connectReason 上报，PC 顶栏显示——"互相监督"的一半）
+    @Published var connectReason: String = ""
+
     private var lastViewerHeartbeatTime: Date = Date.distantPast
     private var viewerHeartbeatChecker: Timer?
     var currentKbps: Int = 0       // 🔥 去掉@Published，纯统计不触发UI刷新
@@ -1393,6 +1407,39 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - §53.2 PC 在线心跳（与拉流心跳分开，不看有没有画面）
+
+    @objc private func onPCPresence(_ notification: Notification) {
+        guard let pcId = notification.userInfo?["fromDevice"] as? String, !pcId.isEmpty else { return }
+        let viewing = (notification.userInfo?["viewing"] as? Bool) ?? false
+        let h265Recv = (notification.userInfo?["h265Recv"] as? Bool) ?? true
+        let kernel = (notification.userInfo?["kernel"] as? String) ?? "unknown"
+        let ipsStr = (notification.userInfo?["localIps"] as? String) ?? ""
+        let localIps = ipsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+
+        // ⭐ §53.4：观看端状态的唯一存放处是 SessionPolicy（决策要用同一份输入），
+        //   这里只把结果镜像成 @Published 给左上角状态条用。
+        let isNew = SessionPolicy.shared.updatePresence(pcId: pcId, viewing: viewing,
+                                                        h265Recv: h265Recv, kernel: kernel,
+                                                        localIps: localIps)
+        if isNew {
+            print("🖥 [PC在线] \(pcId) 上线（内核=\(kernel) 能收H265=\(h265Recv) 在看=\(viewing) 网段=\(localIps)）")
+        }
+        refreshPCPresenceState()
+    }
+
+    /// 汇总在线 PC 状态到 @Published（主线程调用）
+    private func refreshPCPresenceState() {
+        let count = SessionPolicy.shared.onlineViewerCount
+        let noH265 = SessionPolicy.shared.anyViewerCannotRecvH265
+        if pcOnlineCount != count { pcOnlineCount = count }
+        if pcOnline != (count > 0) { pcOnline = (count > 0) }
+        if anyViewerCannotRecvH265 != noH265 {
+            anyViewerCannotRecvH265 = noH265
+            print("🎞️ [编码仲裁] 在线观看端\(noH265 ? "存在" : "不存在")收不了 H265 的内核 → 编码\(noH265 ? "需降 H264" : "可用 H265")")
+        }
+    }
+
     // MARK: - 🔥 v2.0 PC端自适应FPS指令处理
 
     @objc private func onViewerHeartbeat(_ notification: Notification) {
@@ -3277,6 +3324,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: NSNotification.Name("ViewerHeartbeat"),
                 object: nil
         )
+        // ⭐ §53.2 PC 在线心跳监听（PC_PRESENCE，1s 一条、与画面无关）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onPCPresence(_:)),
+                name: NSNotification.Name("PCPresence"),
+                object: nil
+        )
         viewerHeartbeatChecker = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let elapsed = Date().timeIntervalSince(self.lastViewerHeartbeatTime)
@@ -3284,6 +3338,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self.viewerConnected = false
                 print("📺 [VIEWER] 心跳超时，PC 未连接")
             }
+            // ⭐ §53.2 清理离线 PC（>4s 无 PC_PRESENCE）。
+            //   注意：PC 掉线**不**触发重新协商（它可能只是重启一下，为此重启推流是自伤）——
+            //   等它回来时若网段变了，updatePresence 那条路径才会重新协商（§53.4.3）。
+            if SessionPolicy.shared.removeStalePresence() {
+                print("🖥 [PC在线] 有 PC 心跳超时下线，剩余 \(SessionPolicy.shared.onlineViewerCount) 台")
+            }
+            self.refreshPCPresenceState()
             // ⭐ 清理过期观看者（>4s 无心跳）
             let now = Date()
             let before = self.viewerRegistry.count
@@ -3318,9 +3379,19 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ 两种连接管理类（P2P / SRS）的数据源
         p2pManager.dataSource = self
         srsManager.dataSource = self
-        // 连接方式静态（用户登录页选择决定），不再因网络变化/ICE 失败自动切换。
-        // 回调保留为空，仅 P2PManager 内部自有的 ICE Restart/relay 兜底仍生效。
-        p2pManager.onLocalNetworkChange = { /* no-op：静态连接方式，不自动切换 */ }
+
+        // ⭐ §53.4.3：决策输入变化 → 停推流 → 重新决策 → 起推流（冷却/次数上限在 SessionPolicy）
+        SessionPolicy.shared.onRenegotiateNeeded = { [weak self] reason in
+            Task { @MainActor [weak self] in
+                self?.renegotiateSession(reason: reason)
+            }
+        }
+
+        // ⭐ §53.4.3：本机切网（WiFi↔蜂窝/换 WiFi）= 决策输入变化，交给 SessionPolicy 评估
+        //   （原为 no-op：那时连接方式是登录页静态选的，不允许自动切换）
+        p2pManager.onLocalNetworkChange = {
+            SessionPolicy.shared.onLocalNetworkChanged()
+        }
         p2pManager.onViewerPermanentlyFailed = { _ in /* no-op：P2P 模式下不回落 SRS */ }
         // ⭐ 切网重连：置"重连中"（左上角显示），PC 重连成功后由 viewerConnected 心跳清除
         p2pManager.onNetworkSwitchReconnect = { [weak self] in
@@ -3599,32 +3670,43 @@ final class WebRTCManager: NSObject, ObservableObject {
             return
         }
 
-        // ⭐ 自动协商：决定本次走 P2P 还是 SRS（能 P2P 就 P2P 省流量，否则 SRS）
-        let mode = decideMode()
-        if mode == .p2p {
+        // ⭐ §53.4.1 宽限期：推流那一刻若还没收到任何 PC_PRESENCE（两端登录有先后，
+        //   刚开机时消息可能还在路上），等 2s 再决策一次——否则"其实同 WiFi"却因消息未到白走 SRS。
+        //   只等一次，等不到就按 SRS（对任何网络都成立的安全默认）。
+        if SessionPolicy.shared.shouldWaitForPresence() {
+            let grace = SessionPolicy.shared.presenceGraceSec
+            print("🧭 [链路决策] 暂未收到观看端在线心跳，等 \(grace)s 再定案（避免同 WiFi 被误判成跨网）")
+            DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+                self?.startPublish(initialProfile: initialProfile)
+            }
+            return
+        }
+
+        // ⭐ §53.4-定稿：**推流前一次定案** mode + codec（决策逻辑全在 SessionPolicy.swift）。
+        //   输入 = PC_PRESENCE 心跳带来的「观看端网段 + 能否收 H265」+ 服务器默认编码 + 本机硬编能力。
+        //   登录页不再让用户选线路/编码；推流中也不再切换（切网/换观看端 → 走重新协商，见 onRenegotiateNeeded）。
+        let decision = SessionPolicy.shared.decideForPublish(
+            deviceCanEncodeH265: H265Support.deviceCanEncodeHEVC())
+        connectReason = decision.reason
+        WebSocketManager.connectReason = decision.reason   // 随 CONFIG_STATE 上报给 PC 顶栏显示
+
+        if decision.mode == .p2p {
             currentConnMode = .p2p
             WebRTCManager.effectiveConnectstype = 1
-            // ⭐ H265：仅 P2P 链路按登录页「P2P编码」选项切 preferredCodec（H265Support.swift 内聚全部逻辑）
-            H265Support.shared.applySelectionForP2P()
+            // ⭐ H265：按定案编码切 preferredCodec（H265Support.swift 内聚全部逻辑）
+            H265Support.shared.applyDecidedCodec(decision.codec, mode: "P2P")
             startP2PPublish(initialProfile: initialProfile)
-            startModeEvalTimer()
             return
         }
         // MARK: - SRT (independent)
-        // 三种连接方式互斥，本次会话只走一条。选 SRT 即只推 SRT，不建立 WebRTC/SRS。
-        if mode == .srt {
-            currentConnMode = .srt
-            WebRTCManager.effectiveConnectstype = 2   // 2=SRT；方案 A 下 SRS 桥接成 WebRTC，PC 仍 WebRTC 拉
-            // ⭐ H265（第四十九章）：SRT 也可选 H265，SRTManager 读 srtWantsH265() 设 HEVC profileLevel
-            H265Support.shared.applySelectionForSrt()
-            startSRTPublish(initialProfile: initialProfile)
-            return
-        }
+        // ⭐ §53.4-定稿：SRT 已退役（登录页去掉选项、决策也不再产出 SRT）。
+        //   SRTManager / startSRTPublish 全部保留为死代码，便于回滚——
+        //   退役理由：SRS 6.0.184 的 RTMP→RTC 桥写死丢弃 HEVC（§49.6-9），SRT+H265 必黑屏，
+        //   而默认编码已改 H265，这条链路没有可用组合。
         currentConnMode = .srs
         WebRTCManager.effectiveConnectstype = 0
-        // ⭐ H265（第四十九章）：SRS 也按登录页「多人编码」选项切 preferredCodec（默认 h264，SRS 6.0.184 支持 H265）
-        H265Support.shared.applySelectionForSrs()
-        startModeEvalTimer()
+        // ⭐ 按定案编码切 preferredCodec（SRS 与 P2P 同一套 WebRTC 工厂）
+        H265Support.shared.applyDecidedCodec(decision.codec, mode: "SRS")
         
         // 🔥 检查摄像头预览是否准备好（只有在预览模式下才需要检查）
         // 如果 capturer 和 localVideoTrack 都不存在，后面会自动初始化（无预览模式）
@@ -3926,6 +4008,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ 停止对应连接管理类
         modeEvalTimer?.invalidate(); modeEvalTimer = nil
         currentConnMode = .none
+        // ⭐ §53.4：清掉"本次会话定案"，但**保留观看端在线注册表**——PC 还在线、心跳还在来，
+        //   下次推流要用它决策（清空会导致重新协商后必然误判成"无观看端"→ 白走 SRS）。
+        SessionPolicy.shared.onPublishStopped()
         viewerRegistry.removeAll()
         if p2pManager.isActive { p2pManager.stop() }
         if srsManager.isActive { srsManager.stop() }
@@ -4049,21 +4134,43 @@ final class WebRTCManager: NSObject, ObservableObject {
         print("✅ [SRT] 就绪：srt://\(ip):10080 streamKey=\(streamKey)")
     }
 
-    // MARK: - ⭐ P2P/SRS 自动协商决策与切换
+    // MARK: - ⭐ §53.4-定稿：链路/编码决策与重新协商
 
-    /// 决策：完全静态，以用户在登录页的手动选择（connect_mode）为准，不再自动切换。
-    /// connect_mode == "p2p" → P2P；"srt" → SRT（独立链路）；其它（"srs"/"auto"/缺省）→ SRS。
+    /// ⛔ 已废弃（§53.4-定稿）：链路不再由登录页手选，改为推流前按网络关系自动决策
+    ///（`SessionPolicy.decideForPublish`）。保留本方法仅供回滚参考。
+    /// 后端 `connect.mode == "srs"` 仍可一键强制多人线路——该判定已移入 SessionPolicy 之前的调用处。
     private func decideMode() -> ConnMode {
         switch backendConnectMode {
         case "p2p": return .p2p
-        case "srt": return .srt   // MARK: - SRT (independent)
+        case "srt": return .srt   // MARK: - SRT (independent)（已退役）
         default:    return .srs
         }
     }
 
-    /// ⛔ 已废弃：去掉 P2P↔SRS 自动切换后不再启动周期评估定时器（保留空实现避免调用点报错）。
+    /// ⛔ 已废弃：去掉周期评估定时器（重新协商改为事件驱动，见 SessionPolicy.onRenegotiateNeeded）。
     private func startModeEvalTimer() {
         modeEvalTimer?.invalidate(); modeEvalTimer = nil
+    }
+
+    /// ⭐ §53.4.3 重新协商：决策输入变了（观看端换网段 / 新增收不了 H265 的观看端 / 本机切网）
+    /// 且新结果与已定案不同时，由 SessionPolicy 回调到这里。
+    ///
+    /// **标准动作：停推流 → 重新决策 → 起推流**，不做任何"边推边改"的 in-place 切换——
+    /// mode/codec 都要在推流前定好（编码器工厂、SDP、PC 的解码管线全都依赖它）。
+    /// 冷却与次数上限在 SessionPolicy 里，这里只负责执行。
+    @MainActor
+    func renegotiateSession(reason: String) {
+        guard isPublishing else {
+            print("🧭 [链路决策] 收到重新协商(\(reason))但当前未推流，忽略")
+            return
+        }
+        print("🧭 [链路决策] 执行重新协商：\(reason) —— 停推流 → 重新决策 → 起推流")
+        let profile = currentProfile
+        stopPublish()
+        // 留一拍给 PeerConnection/采集管线收尾，避免拆建重叠（与切档重建同款间隔）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.startPublish(initialProfile: profile)
+        }
     }
 
     /// ⛔ 已废弃：连接方式静态，由用户登录页选择决定，不再做运行时自动协商切换。
@@ -6083,21 +6190,18 @@ final class WebRTCManager: NSObject, ObservableObject {
                             }
                         }
 
-                        // ⭐ §52.6（替代原 §25.7 的「切中继」）：非同 WiFi（选中路径不是 host↔host）
-                        //   → 停止推流并退回登录页，提示改用多人线路(SRS)。
-                        //   原来是切 TURN 中继，但中继下码率被钳到 relayMaxKbps，且路径与 SRS 完全相同却
-                        //   拿不到 SRS 的服务端重传/GOP cache/一对多分发（§52.5）——是最差的一档组合。
-                        //   判定沿用已有的 pathIsLan，不新造检测。后端显式 forceRelay 时不干预。
+                        // ⭐ §53.4-定稿：这里**只做兜底核对，不再退登录页**。
+                        //   正常情况下"同不同 WiFi"已在推流前用 PC_PRESENCE 的 localIps 比过网段
+                        //   （SessionPolicy），跨网压根不会走 P2P。真跑到这儿说明预判与实际不符
+                        //   （例：同网段但 AP 隔离、多网卡、PC 网段判断被 NAT 掩盖）→ 交给
+                        //   SessionPolicy 重新协商（停推流→重决策→起推流），它自带冷却与次数上限。
+                        //   §52.6 的"退回登录页让用户自己改线路"已废弃：用户不该为网络拓扑负责。
                         if self.currentConnMode == .p2p, activePairId != nil, !self.notSameWifiHandled,
                            !self.p2pManager.forceRelay,
                            let lt = localPathType, let rt = remotePathType, !pathIsLan {
                             self.notSameWifiHandled = true
-                            self.malvshezhingLog("[线路] 🚫非同WiFi(本端=\(lt) 远端=\(rt)) → 退出 P2P，提示改用多人线路")
-                            DispatchQueue.main.async {
-                                NotificationCenter.default.post(
-                                    name: Notification.Name("P2PNotSameWifi"),
-                                    object: nil, userInfo: ["reason": "non_lan_\(lt)_\(rt)"])
-                            }
+                            self.malvshezhingLog("[线路] ⚠️实测路径非同WiFi(本端=\(lt) 远端=\(rt))，与推流前预判不符 → 重新协商走多人线路")
+                            SessionPolicy.shared.forceSrsForSession(reason: "实测ICE路径非局域网(\(lt)/\(rt))")
                         }
                         
                         // 综合评估网络质量等级

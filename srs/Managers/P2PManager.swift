@@ -88,6 +88,19 @@ final class P2PManager: NSObject {
     private var qualityRelayPeerIds: Set<String> = []
     private var peerNetworkType: [String: String] = [:] // pcDeviceId → "cellular"/"wifi"/...
 
+    /// ⭐ §53.3①：最近一次给某个 PC 发出 Offer 的时刻。
+    /// 用来判定「重复的 WEBRTC_REQUEST」——**不再用 PeerConnection 的 new/connecting 状态判**。
+    /// 旧实现把 state ∈ {new, connecting} 一律当"建立中，忽略重复请求"，但上一个 PC 进程消失后
+    /// 那条会话会在 connecting 上挂几十秒（ICE 自己重试），而 VIEWER_DISCONNECTED 当时又不拆会话 →
+    /// 新登录的 PC 用同一个 pcDeviceId 来请求，5 次重试全被吞掉 → PC 等 Offer 超时黑屏（两端却都"在线"）。
+    private var lastOfferSentAt: [String: Date] = [:]
+    /// 同一个 pcId 在这个窗口内的重复请求才算"竞态重试"而忽略；超过就一律拆旧建新。
+    /// 取 2s：PC 侧重发间隔 1.5s（gstplayer.cpp P2P_VIEW_REQUEST_RETRY_INTERVAL_MS），
+    /// 给上一个 Offer 留出到达时间，又不至于让幽灵会话长期吞请求。
+    private let duplicateRequestWindowSec: Double = 2.0
+    /// PC 带来的 requestId（每次 connectP2P/重发递增，旧版 PC 不带）。仅用于日志与"变了就必须重建"。
+    private var lastRequestId: [String: Int64] = [:]
+
     private var signalingObserver: NSObjectProtocol?
     private var reconnectObserver: NSObjectProtocol?
 
@@ -301,7 +314,14 @@ final class P2PManager: NSObject {
         case "VIEWER_CONNECTED":
             print("✅ [P2P] PC \(fromDevice) 已收到画面")
         case "VIEWER_DISCONNECTED":
-            print("🔌 [P2P] PC \(fromDevice) 断开")
+            // ⭐ §53.3①：必须真的拆会话。以前这里只打日志，PC 退出时发的这条通知等于白发，
+            //   会话留在 connecting 上变成"幽灵会话"，把 PC 下次登录的请求全吞掉 → 重登黑屏。
+            if viewerSessions[fromDevice] != nil {
+                print("🔌 [P2P] PC \(fromDevice) 断开 → 拆会话（防幽灵会话吞掉下次 WEBRTC_REQUEST）")
+                removeViewerSession(fromDevice, notifyPC: false)
+            } else {
+                print("🔌 [P2P] PC \(fromDevice) 断开（无活动会话）")
+            }
         case "WEBRTC_REQUEST":
             peerNetworkType[fromDevice] = (message["networkType"] as? String) ?? "unknown"
             applyLanPrecheck(for: fromDevice, message: message)   // §25.7e：建会话前定直连/中继
@@ -309,7 +329,8 @@ final class P2PManager: NSObject {
                 WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_REJECT", reason: "not_ready", toDevice: fromDevice)
                 return
             }
-            createViewerSession(for: fromDevice)
+            let reqId = (message["requestId"] as? NSNumber)?.int64Value
+            createViewerSession(for: fromDevice, requestId: reqId)
         case "WEBRTC_SDP":
             let sdpType = message["sdpType"] as? String ?? ""
             let sdp = message["sdp"] as? String ?? ""
@@ -360,17 +381,24 @@ final class P2PManager: NSObject {
 
     // MARK: - 会话管理
 
-    func createViewerSession(for pcId: String) {
+    func createViewerSession(for pcId: String, requestId: Int64? = nil) {
         guard let ds = dataSource else { print("❌ [P2P] dataSource 为空"); return }
 
+        // ⭐ §53.3① 幂等化：判据从「PeerConnection 状态」换成「距上次给这个 PC 发 Offer 多久」。
+        //   窗口内 = PC 的重发与我们的 Offer 在路上交错（真竞态）→ 忽略；
+        //   窗口外 = PC 确实没拿到 Offer（或是新登录的 PC 撞上幽灵会话）→ 一律拆旧建新、重发 Offer。
+        //   requestId 变化视同"新请求"，直接跳过忽略分支（旧版 PC 不带该字段时只靠时间窗）。
         if let existing = viewerSessions[pcId] {
-            let s = existing.connectionState
-            if s == .new || s == .connecting {
-                print("⚠️ [P2P] PC \(pcId) 会话建立中，忽略重复请求")
+            let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
+            let sameRequest = (requestId == nil) || (requestId == lastRequestId[pcId])
+            if sameRequest && sinceOffer < duplicateRequestWindowSec {
+                print("⚠️ [P2P] PC \(pcId) 重复请求（距上次Offer \(String(format: "%.1f", sinceOffer))s，reqId=\(requestId.map(String.init) ?? "无")）→ 忽略")
                 return
             }
+            print("♻️ [P2P] PC \(pcId) 重新请求（state=\(existing.connectionState.rawValue) 距上次Offer=\(String(format: "%.1f", sinceOffer))s reqId=\(requestId.map(String.init) ?? "无")）→ 拆旧建新")
             removeViewerSession(pcId, notifyPC: false)
         }
+        if let rid = requestId { lastRequestId[pcId] = rid }
 
         guard viewerSessions.count < maxViewers else {
             print("❌ [P2P] 已达最大观看人数(\(maxViewers))，拒绝 \(pcId)")
@@ -448,6 +476,7 @@ final class P2PManager: NSObject {
                 H265Support.shared.reconcileFromOfferSdp(s)
             }
             WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
+            self.lastOfferSentAt[pcId] = Date()   // §53.3①：重复请求判据
             print("📤 [P2P] 已发送 Offer 给 \(pcId)")
         }
     }
@@ -464,6 +493,8 @@ final class P2PManager: NSObject {
         iceRetryCount.removeValue(forKey: pcId)
         forceRelayPeerIds.remove(pcId)
         peerNetworkType.removeValue(forKey: pcId)
+        lastOfferSentAt.removeValue(forKey: pcId)   // §53.3①：拆了就别再拿旧时刻当"竞态窗口"
+        lastRequestId.removeValue(forKey: pcId)
         print("🔌 [P2P] 移除会话 \(pcId)，剩余 \(viewerSessions.count)")
     }
 
@@ -482,6 +513,8 @@ final class P2PManager: NSObject {
         forceRelayPeerIds.removeAll()
         qualityRelayPeerIds.removeAll()   // §25.7b：整体停止才清 relay 钉住（单会话拆建不清）
         peerNetworkType.removeAll()
+        lastOfferSentAt.removeAll()
+        lastRequestId.removeAll()
     }
 
     private func findPcId(for pc: RTCPeerConnection) -> String? {

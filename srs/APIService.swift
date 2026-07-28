@@ -155,10 +155,13 @@ struct LoginResponse: Codable {
     let boundControlCount: Int?   // 🔥 绑定的控制端数量，0时需要跳转扫码绑定页面
     let scan: Int?                // 🔥 是否需要扫码绑定：1=需要跳转扫码，0=不需要
     // ⭐ 连接方式与 P2P 配置（全局二选一，srs/p2p 不混用；缺省 p2p）
-    let connectMode: String?      // "srs" | "p2p"
+    let connectMode: String?      // "srs"=总后台强制多人线路 | 其它(auto)=推流前自动决策（§53.4）
     let iceServers: [IceServer]?  // P2P 模式 STUN/TURN 列表
     let forceRelay: Bool?         // 强制 TURN 中继
     let maxP2PViewers: Int?       // 最大 P2P 观看端数
+    // ⭐ §53.4.4：编码默认值改由总后台配置（默认 h265，不支持时客户端自动回退 h264）
+    let videoCodecP2p: String?    // "h264" | "h265"
+    let videoCodecSrs: String?    // "h264" | "h265"
 }
 
 

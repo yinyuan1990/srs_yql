@@ -1,24 +1,28 @@
 import SwiftUI
 
-// 连接方式（登录页三选一，互斥，静态不自动切换）
+// ⭐ §53.4-定稿（2026-07-28）：**登录页不再让用户选线路，也不再选编码**。
+//   线路由系统在推流前按网络关系自动决定（同 WiFi → P2P 单人直连；否则 → SRS 多人线路），
+//   编码由总后台配置（默认 H265，观看端内核或本机硬编不支持时自动回退 H264）——
+//   决策逻辑全部在 `Managers/SessionPolicy.swift`。
+//   **SRT 已退役**：SRS 6.0.184 的 RTMP→RTC 桥写死丢弃 HEVC（§49.6-9），SRT+H265 必黑屏。
+//
+//   本枚举保留（rawValue 仍写进 `connect_mode`，供后端强制 SRS 与回滚用），
+//   但 `.srt` 不再出现在任何 UI/决策里，`allCases` 也不再被登录页使用。
 enum ConnectModeOption: String, CaseIterable {
     case srs = "srs"
-    case srt = "srt"
     case p2p = "p2p"
 
     var title: String {
         switch self {
         // ⭐ 2026-07-11：SRS=多人线路、P2P=单人线路（仅改显示名，rawValue 仍是 srs/p2p）
         case .srs: return "多人线路"
-        case .srt: return "SRT"
         case .p2p: return "单人线路"
         }
     }
 
-    /// 三条链路均可选（SRT 已接入独立链路，方案 A）。
     var isEnabled: Bool { true }
 
-    /// 本地记忆 key
+    /// 本地记忆 key（现仅由系统写入决策结果，用户不再手选）
     static let storageKey = "selected_connect_mode"
 
     /// 读取上次选择（无则默认 SRS，与后端默认一致）
@@ -37,11 +41,11 @@ struct MonitorLoginView: View {
     @State private var password: String = ""
     @State private var isPasswordVisible: Bool = false
     @State private var rememberPassword: Bool = false
-    @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected  // 连接方式（默认上次选择）
-    @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected  // ⭐ P2P编码二级选项（H264/H265，实现在 H265Support.swift）
-    // ⭐ 第四十九章：SRS/SRT 也可选编码，与 P2P 独立记忆、默认 h264
-    @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h264)
-    // ⭐ SRT 编码选项已隐藏（2026-07-24，服务器 SRS 6.0 桥不支持 HEVC，SRT 固定 H264；升 SRS 7.0.33+ 后恢复）
+    // ⭐ §53.4-定稿：下面三个选择态**已不再驱动任何 UI**（线路/编码改为系统决策）。
+    //   仅与保留下来的 `connectModeChip` / `CodecOptionChips` 一起留着，便于一键回滚到"用户手选"。
+    @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected
+    @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected
+    @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h265)
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -236,48 +240,11 @@ struct MonitorLoginView: View {
                             .background(Color(hex: "F0F0F0"))
                             .padding(.leading, 50)
 
-                        // 连接方式三选一（SRS / SRT / P2P，互斥，静态不自动切换）
-                        HStack(spacing: 6) {
-                            // 连接方式图标
-                            ZStack {
-                                Circle()
-                                    .stroke(Color(hex: "B3B3B3"), lineWidth: 0.6)
-                                    .frame(width: 20, height: 20)
-
-                                Image(systemName: "antenna.radiowaves.left.and.right")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(Color(hex: "1A1A1A"))
-                            }
-                            .frame(width: 24, height: 24)
-
-                            Text("连接方式")
-                                .font(.system(size: 16))
-                                .foregroundColor(Color(hex: "1A1A1A"))
-
-                            Spacer()
-
-                            HStack(spacing: 8) {
-                                ForEach(ConnectModeOption.allCases, id: \.self) { mode in
-                                    connectModeChip(mode)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-
-                        // ⭐ 编码二级选项 H264/H265（第四十九章：P2P/SRS/SRT 都显示，各自独立记忆；UI 组件在 H265Support.swift）
-                        if selectedConnectMode == .p2p {
-                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
-                            CodecOptionChips(selected: $selectedCodec,
-                                             storageKey: VideoCodecOption.storageKey, title: "单人编码")
-                        } else if selectedConnectMode == .srs {
-                            Divider().background(Color(hex: "F0F0F0")).padding(.leading, 50)
-                            CodecOptionChips(selected: $selectedCodecSrs,
-                                             storageKey: VideoCodecOption.srsStorageKey, title: "多人编码")
-                        }
-                        // ⭐ SRT 编码选项已隐藏（2026-07-24）：服务器 SRS 6.0.184 的 RTMP→RTC 桥接
-                        //   源码写死丢弃 HEVC（srs_app_rtc_source.cpp:1074），SRT+H265 必黑屏。
-                        //   SRS 7.0.33+ 才支持 rtmp2rtc HEVC，服务器升级后恢复此选项即可（SRT 固定 H264）。
+                        // ⭐ §53.4-定稿：原「连接方式 SRS/SRT/P2P」与「H264/H265 编码」两组选项已移除。
+                        //   线路 = 推流前按"与观看端是否同 WiFi"自动决定；编码 = 总后台配置（默认 H265，
+                        //   不支持自动回退 H264）。用户无需、也无法做出正确选择，故不再暴露。
+                        //   实现见 `Managers/SessionPolicy.swift`；`connectModeChip` / `CodecOptionChips`
+                        //   两个组件保留未删，便于回滚。
                     }
                     .background(Color.white)
                     .cornerRadius(16, corners: [.topLeft, .topRight])
@@ -695,17 +662,26 @@ struct MonitorLoginView: View {
                         print("✅ 保存推流IP: \(streamPushIp)")
                     }
 
-                    // ⭐ 连接方式：以用户在登录页的手动选择为准（静态、互斥、不自动切换），覆盖后端下发
-                    let connectMode = selectedConnectMode.rawValue
+                    // ⭐ §53.4-定稿：连接方式**改以后端下发为准**（不再被登录页选择覆盖）。
+                    //   "srs" = 总后台一键强制多人线路；其它（auto/p2p/缺省）= 交给 SessionPolicy
+                    //   在推流前按"与观看端是否同 WiFi"自动决定。用户已无从手选。
+                    let connectMode = (loginResponse.connectMode ?? "auto").lowercased()
                     UserDefaults.standard.set(connectMode, forKey: "connect_mode")
-                    UserDefaults.standard.set(connectMode, forKey: ConnectModeOption.storageKey)  // 记住本次选择
                     UserDefaults.standard.set(loginResponse.forceRelay ?? false, forKey: "forceRelay")
                     UserDefaults.standard.set(loginResponse.maxP2PViewers ?? 4, forKey: "maxP2PViewers")
                     if let iceServers = loginResponse.iceServers,
                        let iceData = try? JSONEncoder().encode(iceServers) {
                         UserDefaults.standard.set(iceData, forKey: "iceServers")
                     }
-                    print("✅ 连接方式(用户选): \(connectMode), 后端下发: \(loginResponse.connectMode ?? "nil"), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
+
+                    // ⭐ §53.4.4 编码默认值改由总后台配置（默认 h265；本机硬编或观看端内核不支持时
+                    //   由 SessionPolicy/H265Support 自动回退 h264）。缺省字段 = 老后端 → 按 h265。
+                    let codecP2p = (loginResponse.videoCodecP2p ?? "h265").lowercased()
+                    let codecSrs = (loginResponse.videoCodecSrs ?? "h265").lowercased()
+                    UserDefaults.standard.set(codecP2p, forKey: VideoCodecOption.storageKey)
+                    UserDefaults.standard.set(codecSrs, forKey: VideoCodecOption.srsStorageKey)
+
+                    print("✅ 连接方式(后端): \(connectMode), 编码默认(后端) P2P=\(codecP2p)/SRS=\(codecSrs), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
                     
                     if let trialInfo = loginResponse.trialInfo {
                         saveTrialInfo(trialInfo)

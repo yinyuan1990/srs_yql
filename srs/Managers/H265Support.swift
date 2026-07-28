@@ -182,6 +182,36 @@ final class H265Support: ObservableObject {
         RTCVideoCodecInfo(name: kRTCVideoCodecH265Name)
     }
 
+    // MARK: 钩子 2'：§53.4-定稿 —— 按 SessionPolicy 定案的编码切换（登录页不再让用户选）
+
+    /// 推流前由 `SessionPolicy` 定案 codec 后调用（P2P / SRS 共用同一套 WebRTC 工厂）。
+    ///
+    /// 与旧的 `applySelectionForP2P/Srs` 的区别：**不再自己读 UserDefaults 里的用户选择**——
+    /// 编码由 SessionPolicy 综合「服务器默认(总后台可配) + 观看端内核能否收 H265 + 本机能否硬编」
+    /// 一次算好，这里只负责落到编码器工厂。这样"谁决定编码"只有一个地方，不会两处打架。
+    @discardableResult
+    func applyDecidedCodec(_ codec: VideoCodecOption, mode: String) -> VideoCodecOption {
+        guard let enc = encoderFactory else {
+            setEffective(.h264)
+            h265Log("⚠️ applyDecidedCodec(\(mode)): encoderFactory 未注册，维持 H264")
+            return .h264
+        }
+        if codec == .h265, sdkSupportsH265, let h265 = h265Info {
+            enc.preferredCodec = h265
+            setEffective(.h265)
+            h265Log("✅ \(mode) preferredCodec → H265(\(h265.name))（定案编码；对端不支持时 SDP 协商自动回落 H264）")
+            return .h265
+        }
+        if let h264 = h264Preferred { enc.preferredCodec = h264 }
+        setEffective(.h264)
+        if codec == .h265 {
+            h265Log("⚠️ \(mode) 定案 H265 但本机不可用（需 webrtc-sdk 144+ 且设备支持 HEVC 硬编），回落 H264")
+        } else {
+            h265Log("ℹ️ \(mode) 定案 H264")
+        }
+        return .h264
+    }
+
     // MARK: 钩子 2：startPublish P2P 分支调（每次推流定案）
 
     /// P2P 推流前按登录页选择切换 preferredCodec。

@@ -1,0 +1,331 @@
+import Foundation
+
+// ============================================================================
+// SessionPolicy —— 「本次推流走什么链路、用什么编码」的唯一决策点（§53.4-定稿）
+//
+// 设计口径（用户 2026-07-28 拍板）：
+//   1. **推流前定案**：iOS/Android 登录成功后与 PC 已经能互相通信（`/topic/device/{id}/config`
+//      双方都订阅），所以在按下推流之前就能把「网络关系」和「观看端能力」交换清楚，
+//      一次定下 mode + codec。**推流中不再切换**（旧方案"先起 P2P、发现跨网再回落/退登录页"作废）。
+//   2. 登录页不再让用户选线路/编码 —— 用户选不出正确答案，这是系统该判的事。
+//   3. 一方断线 / 切网 = 决策输入变了 → **重新协商**：停推流 → 重新决策 → 起推流。
+//      带冷却与次数上限，绝不无限抖（见 renegotiateCooldownSec / maxRenegotiatePerSession）。
+//
+// 为什么单独一个文件：决策逻辑不该散进 6000 行的 WebRTCManager。本文件对外只暴露
+//   · updatePresence / removeStalePresence  ← 喂输入
+//   · decideForPublish()                    ← 出结果（startPublish 调）
+//   · onRenegotiateNeeded                   ← 输入变化且结果会变时回调上层重启推流
+// 删掉本文件 + 还原 WebRTCManager 里的 3 处调用即可回退到"登录页手选"的老行为。
+// ============================================================================
+
+/// 本次会话的链路
+enum SessionMode: String {
+    case p2p = "p2p"
+    case srs = "srs"
+
+    /// CONFIG_STATE.connectstype 上报值（PC 按此跟随：0=SRS / 1=P2P）
+    var connectstype: Int { self == .p2p ? 1 : 0 }
+}
+
+/// 一次决策的完整结果
+struct SessionDecision: Equatable {
+    let mode: SessionMode
+    let codec: VideoCodecOption
+    /// 人话原因，随 CONFIG_STATE.connectReason 上报给 PC 顶栏显示（"互相监督"的一半）
+    let reason: String
+
+    /// 只比较"会不会改变链路行为"的两项——reason 变化不触发重新协商
+    static func == (l: SessionDecision, r: SessionDecision) -> Bool {
+        l.mode == r.mode && l.codec == r.codec
+    }
+}
+
+/// 一个在线观看端（PC）的状态快照
+private struct ViewerInfo {
+    var lastSeen: Date
+    var viewing: Bool
+    var h265Recv: Bool
+    var kernel: String
+    var localIps: [String]
+}
+
+final class SessionPolicy {
+
+    static let shared = SessionPolicy()
+    private init() {}
+
+    // MARK: - 可调参数（集中在此，便于现场调）
+
+    /// 推流前等 PC_PRESENCE 的宽限期：两端登录有先后，刚开机时消息可能还没到。
+    /// 等不到就按 SRS（对任何网络都成立的安全默认），避免"其实同 WiFi 却白走 SRS"。
+    let presenceGraceSec: Double = 2.0
+    /// 两次重新协商的最小间隔
+    private let renegotiateCooldownSec: Double = 5.0
+    /// 单次推流会话内最多重新协商几次；超了就钉在 SRS（对所有网络都成立）
+    private let maxRenegotiatePerSession = 3
+    /// 观看端心跳超时（与 PC 侧 1s 发送间隔匹配，容忍 3 次丢包）
+    private let presenceTimeoutSec: Double = 4.0
+
+    // MARK: - 输入
+
+    private var viewers: [String: ViewerInfo] = [:]
+    private let lock = NSLock()
+
+    /// 服务器下发的默认编码（总后台可配，§53.4.4）。登录时写入 UserDefaults，P2P/SRS 各一个 key。
+    /// 这里只读、不猜：读不到就按 h265（产品默认），设备/观看端不支持时下面会如实降 H264。
+    private func serverDefaultCodec(for mode: SessionMode) -> VideoCodecOption {
+        let key = (mode == .p2p) ? VideoCodecOption.storageKey : VideoCodecOption.srsStorageKey
+        return VideoCodecOption.lastSelected(key: key, defaultCodec: .h265)
+    }
+
+    // MARK: - 输出
+
+    /// 本次会话已定案的决策（nil = 还没推流）
+    private(set) var current: SessionDecision?
+    /// 输入变化且新结果与已定案不同 → 回调上层做「停推流 → 重新决策 → 起推流」
+    var onRenegotiateNeeded: ((String) -> Void)?
+
+    private var lastRenegotiateAt: Date = .distantPast
+    private var renegotiateCount = 0
+    /// 达到次数上限后钉死 SRS，不再响应任何输入变化
+    private var pinnedToSrs = false
+
+    // MARK: - 喂输入：PC_PRESENCE 心跳
+
+    /// 收到一条 PC_PRESENCE。返回是否是新上线的 PC（供上层打日志）。
+    @discardableResult
+    func updatePresence(pcId: String, viewing: Bool, h265Recv: Bool,
+                        kernel: String, localIps: [String]) -> Bool {
+        lock.lock()
+        let isNew = viewers[pcId] == nil
+        let old = viewers[pcId]
+        viewers[pcId] = ViewerInfo(lastSeen: Date(), viewing: viewing, h265Recv: h265Recv,
+                                   kernel: kernel, localIps: localIps)
+        lock.unlock()
+
+        // 只在"可能改变决策"的字段变了时才去评估，避免每秒心跳都跑一遍决策
+        let inputChanged = isNew
+            || old?.h265Recv != h265Recv
+            || old?.localIps != localIps
+        if inputChanged { evaluateForRenegotiate(trigger: isNew ? "PC上线(\(pcId))" : "PC网络/能力变化(\(pcId))") }
+        return isNew
+    }
+
+    /// 清理超时未续期的观看端。返回是否有 PC 下线。
+    @discardableResult
+    func removeStalePresence() -> Bool {
+        let cutoff = Date()
+        lock.lock()
+        let before = viewers.count
+        viewers = viewers.filter { cutoff.timeIntervalSince($0.value.lastSeen) <= presenceTimeoutSec }
+        let changed = viewers.count != before
+        lock.unlock()
+        // ⭐ PC 掉线**不**触发重新协商：它可能只是重启一下，为此重启推流是自伤。
+        //   等它回来时若网段变了，updatePresence 那条路径会处理。
+        return changed
+    }
+
+    /// 退登录 / 切设备：清空，避免上一台设备的观看端状态串到下一次
+    func reset() {
+        lock.lock()
+        viewers.removeAll()
+        lock.unlock()
+        current = nil
+        renegotiateCount = 0
+        pinnedToSrs = false
+        lastRenegotiateAt = .distantPast
+        graceConsumed = false
+    }
+
+    /// 停止推流：只清"本次会话"的定案，**保留观看端注册表**
+    ///（PC 还在线、心跳还在来，下次推流要用它决策）
+    func onPublishStopped() {
+        current = nil
+        graceConsumed = false
+    }
+
+    /// 一次性宽限：推流那一刻还没收到任何 PC_PRESENCE 时返回 true，
+    /// 调用方等 `presenceGraceSec` 再重试一次决策（两端登录有先后，消息可能刚好没到）。
+    /// 只放行一次，等不到就按 SRS 走，绝不无限等。
+    private var graceConsumed = false
+    func shouldWaitForPresence() -> Bool {
+        if graceConsumed { return false }
+        graceConsumed = true
+        return onlineViewerCount == 0
+    }
+
+    // MARK: - 对外查询（UI 灯 + 编码仲裁复用同一份数据）
+
+    var onlineViewerCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return viewers.count
+    }
+    /// 在线观看端里是否存在收不了 H265 的（网页内核=Chromium 134，收 H265 必黑屏，§49.6-10）
+    var anyViewerCannotRecvH265: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return viewers.values.contains { !$0.h265Recv }
+    }
+    var anyViewerActuallyViewing: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return viewers.values.contains { $0.viewing }
+    }
+
+    // MARK: - 决策（唯一入口，startPublish 调）
+
+    /// 按当前输入定案本次会话的 mode + codec。
+    /// - Parameter deviceCanEncodeH265: 本机能否 H265 硬编（由 H265Support 探测）
+    func decideForPublish(deviceCanEncodeH265: Bool) -> SessionDecision {
+        let d = compute(deviceCanEncodeH265: deviceCanEncodeH265)
+        current = d
+        renegotiateCount = 0
+        pinnedToSrs = false
+        log("✅ 推流前定案：\(d.mode.rawValue.uppercased()) + \(d.codec.title) —— \(d.reason)")
+        return d
+    }
+
+    /// 纯计算，不改状态（评估是否需要重新协商时也用它）
+    private func compute(deviceCanEncodeH265: Bool) -> SessionDecision {
+        lock.lock()
+        let snapshot = viewers
+        lock.unlock()
+
+        let myIps = Self.localIPv4Addresses()
+        var reasons: [String] = []
+
+        // ① 链路：所有在线观看端都与本机同网段才走 P2P。
+        //    依据 §52.5：跨网时 P2P 只能走 TURN 中继，物理路径与 SRS 完全相同，却拿不到
+        //    服务端重传/GOP cache/一对多分发，是最差的一档组合 —— 所以跨网直接走 SRS。
+        let mode: SessionMode
+        // ⭐ 后端一键强制多人线路（总后台 `connect.mode=srs`）优先于一切网络判定，
+        //   保留这条运维开关：出问题时可以让全网设备立刻统一走 SRS。
+        let backendForcesSrs = (UserDefaults.standard.string(forKey: "connect_mode") ?? "auto")
+                                    .lowercased() == "srs"
+        if backendForcesSrs {
+            mode = .srs
+            reasons.append("后端强制多人线路")
+        } else if snapshot.isEmpty {
+            mode = .srs
+            reasons.append("暂无观看端在线，默认多人线路")
+        } else {
+            let allSameSubnet = snapshot.values.allSatisfy { Self.sharesSubnet(myIps: myIps, peerIps: $0.localIps) }
+            let anyMissingIps = snapshot.values.contains { $0.localIps.isEmpty }
+            if allSameSubnet && !anyMissingIps {
+                mode = .p2p
+                reasons.append("与观看端同 WiFi，走单人直连")
+            } else {
+                mode = .srs
+                reasons.append(anyMissingIps ? "观看端未上报网段(旧版PC)，走多人线路"
+                                             : "与观看端不在同一 WiFi，走多人线路")
+            }
+        }
+
+        // ② 编码：服务器默认（总后台可配，默认 H265），但要服从"最弱观看端"和本机硬编能力。
+        var codec = serverDefaultCodec(for: mode)
+        if codec == .h265 {
+            if snapshot.values.contains(where: { !$0.h265Recv }) {
+                codec = .h264
+                reasons.append("有观看端内核收不了 H265，已降 H264")
+            } else if !deviceCanEncodeH265 {
+                codec = .h264
+                reasons.append("本机无 H265 硬编，已降 H264")
+            }
+        }
+
+        return SessionDecision(mode: mode, codec: codec, reason: reasons.joined(separator: "；"))
+    }
+
+    // MARK: - 重新协商
+
+    /// 输入变了 → 看结果会不会变；会变才回调上层重启推流（带冷却与次数上限）
+    private func evaluateForRenegotiate(trigger: String) {
+        guard let decided = current else { return }      // 还没推流，等 decideForPublish
+        guard !pinnedToSrs else { return }
+
+        let fresh = compute(deviceCanEncodeH265: H265Support.deviceCanEncodeHEVC())
+        guard fresh != decided else {
+            log("输入变化(\(trigger))但决策结果不变（\(decided.mode.rawValue)+\(decided.codec.title)），不重启推流")
+            return
+        }
+
+        let since = Date().timeIntervalSince(lastRenegotiateAt)
+        guard since >= renegotiateCooldownSec else {
+            log("⏳ 需要重新协商(\(trigger))但距上次仅 \(String(format: "%.1f", since))s，等冷却")
+            return
+        }
+        renegotiateCount += 1
+        if renegotiateCount > maxRenegotiatePerSession {
+            pinnedToSrs = true
+            log("⚠️ 本次会话已重新协商 \(maxRenegotiatePerSession) 次，钉死多人线路(SRS)不再切换（防抖）")
+            current = SessionDecision(mode: .srs, codec: decided.codec, reason: "协商次数达上限，固定多人线路")
+            lastRenegotiateAt = Date()
+            onRenegotiateNeeded?("协商次数达上限→固定SRS")
+            return
+        }
+        lastRenegotiateAt = Date()
+        log("🔄 重新协商(\(trigger))：\(decided.mode.rawValue)+\(decided.codec.title) → \(fresh.mode.rawValue)+\(fresh.codec.title)（停推流→重决策→起推流）")
+        onRenegotiateNeeded?(trigger)
+    }
+
+    /// 设备自己切网（WiFi↔蜂窝/换 WiFi）由 WebRTCManager 的网络监听调用
+    func onLocalNetworkChanged() {
+        evaluateForRenegotiate(trigger: "本机切换网络")
+    }
+
+    /// 兜底：推流前预判为同 WiFi，但实测 ICE 路径不是局域网（AP 隔离/多网卡/NAT 掩盖网段）。
+    /// 直接把本次会话钉在 SRS 并重新协商——比让用户自己去登录页改线路正确（§52.6 已废弃）。
+    func forceSrsForSession(reason: String) {
+        guard let decided = current, decided.mode == .p2p else { return }
+        let since = Date().timeIntervalSince(lastRenegotiateAt)
+        guard since >= renegotiateCooldownSec else {
+            log("⏳ 实测非局域网(\(reason))，但距上次协商仅 \(String(format: "%.1f", since))s，等冷却")
+            return
+        }
+        lastRenegotiateAt = Date()
+        pinnedToSrs = true      // 本次会话不再回 P2P（预判已被实测否掉，别来回试）
+        current = SessionDecision(mode: .srs, codec: decided.codec, reason: "实测非局域网，改走多人线路")
+        log("🔧 \(reason) → 本次会话钉住多人线路(SRS)，执行重新协商")
+        onRenegotiateNeeded?(reason)
+    }
+
+    // MARK: - 网段工具（与 P2PManager.§25.7e 同一套算法，避免两份判定打架）
+
+    /// 本机全部 IPv4（WiFi en0 / 热点 bridge100 / 有线等，排除回环与链路本地 169.254.*）
+    static func localIPv4Addresses() -> [String] {
+        var results: [String] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return results }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            let ifa = p.pointee
+            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                let flags = Int32(ifa.ifa_flags)
+                if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 {
+                    var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                        let ip = String(cString: buf)
+                        if !ip.hasPrefix("169.254.") { results.append(ip) }
+                    }
+                }
+            }
+            ptr = p.pointee.ifa_next
+        }
+        return results
+    }
+
+    /// 同网段判定（/24）：双方任意一对 IPv4 前三段相同 = 同一局域网（同 WiFi）
+    static func sharesSubnet(myIps: [String], peerIps: [String]) -> Bool {
+        func prefix24(_ ip: String) -> String? {
+            let parts = ip.split(separator: ".")
+            guard parts.count == 4 else { return nil }
+            return parts[0...2].joined(separator: ".")
+        }
+        let mine = Set(myIps.compactMap(prefix24))
+        return peerIps.contains { prefix24($0).map(mine.contains) ?? false }
+    }
+
+    private func log(_ msg: String) {
+        print("🧭 [链路决策] \(msg)")
+    }
+}

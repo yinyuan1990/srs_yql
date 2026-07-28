@@ -18,6 +18,8 @@ class WebSocketManager: ObservableObject {
     static var publishingLowPowerCapture: Bool = false  // 当前是否处于低功率采集模式
     static var publishingStreamKey: String = ""  // 当前推流使用的唯一streamKey
     static var networkQuality: String = "unknown"  // 网络质量: excellent/good/fair/poor/unknown
+    /// ⭐ §53.4.5：本次会话链路/编码的决策原因（人话），随 CONFIG_STATE 上报给 PC 顶栏显示
+    static var connectReason: String = ""
     static var packetLoss: Double = 0.0  // 丢包率 0.0~1.0
     static var rtt: Int = 0  // RTT往返时延(ms)
     // 设备状态推送
@@ -176,6 +178,9 @@ class WebSocketManager: ObservableObject {
             "connectMode": connectMode,
             // ⭐ H265：P2P 实际生效编码（"h264"/"h265"），PC 据此选择 H264/H265 解码管线
             "videoCodec": H265Support.shared.effectiveCodecString,
+            // ⭐ §53.4.5「互相监督」：本次链路/编码是**怎么定下来的**（人话），PC 顶栏直接显示。
+            //   有了它，现场看到"走的多人线路"或"降了 H264"时不用再猜是谁决定的、为什么。
+            "connectReason": WebSocketManager.connectReason,
             "p2pViewerCount": p2pViewerCount,
             "kbps": kbps,
             "fps": fps,
@@ -328,6 +333,10 @@ class WebSocketManager: ObservableObject {
     
     // MARK: - 断开
     func disconnect() {
+        // ⭐ §53.4：手动断开 = 退登录/切设备 → 清空观看端注册表与本次会话定案，
+        //   避免上一台设备/上一个账号的观看端状态串到下一次推流决策里。
+        SessionPolicy.shared.reset()
+        WebSocketManager.connectReason = ""
         swiftStomp?.disconnect()
         stopHeartbeat()
         stopReconnectTimer()
@@ -611,6 +620,31 @@ extension WebSocketManager: SwiftStompDelegate {
                             "fps": msgDict?["fps"] as? Int ?? 0,
                             "fromDevice": fromDevice,
                             "networkType": viewerNet
+                        ]
+                    )
+                }
+            }
+
+            // ⭐ §53.2 PC 在线心跳（与拉流心跳分开）：PC 每秒发一条，**不管有没有画面**。
+            //   有它才能把「PC 在线」和「PC 在看」分成两个状态——以前只有拉流心跳，
+            //   PC 登录着但没画面时设备端显示「PC未连接」，把故障现象说成了对方没上线。
+            //   同时带回 PC 内核的 H265 接收能力（§53.5 编码仲裁用）。
+            if msgType == "PC_PRESENCE" {
+                let fromDevice = (msgDict?["fromDevice"] as? String) ?? ""
+                let viewing = (msgDict?["viewing"] as? Bool) ?? false
+                let h265Recv = (msgDict?["h265Recv"] as? Bool) ?? true   // 缺省宽松：旧版 PC 视为能收
+                let kernel = (msgDict?["kernel"] as? String) ?? "unknown"
+                let pcUsername = (msgDict?["pcUsername"] as? String) ?? ""
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("PCPresence"),
+                        object: nil,
+                        userInfo: [
+                            "fromDevice": fromDevice,
+                            "viewing": viewing,
+                            "h265Recv": h265Recv,
+                            "kernel": kernel,
+                            "pcUsername": pcUsername
                         ]
                     )
                 }

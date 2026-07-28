@@ -556,6 +556,18 @@ struct BrightnessSliderView: View {
 struct ContentView: View {
     @StateObject var rtc = WebRTCManager()
     @ObservedObject var h265 = H265Support.shared   // ⭐ H265：左上角编码显示（H264/H265）
+
+    // ⭐ §53.2 左上角 PC 状态：在线（PC_PRESENCE 心跳）× 在看（拉流心跳）两两组合。
+    //   绿=在线且出画面；橙=在线但没画面（→ 查拉流/协商，不是账号或网络问题）；红=对方没上线。
+    private var pcStatusText: String {
+        if !rtc.pcOnline && !rtc.viewerConnected { return "PC未上线" }
+        let suffix = rtc.pcOnlineCount > 1 ? "×\(rtc.pcOnlineCount)" : ""
+        return rtc.viewerConnected ? "PC在线·在看\(suffix)" : "PC在线·未出画面\(suffix)"
+    }
+    private var pcStatusColor: Color {
+        if !rtc.pcOnline && !rtc.viewerConnected { return .red }
+        return rtc.viewerConnected ? .green : .orange
+    }
     @EnvironmentObject var appState: AppState
     @Environment(\.scenePhase) private var scenePhase  // ✅ App 生命周期
 
@@ -736,13 +748,17 @@ struct ContentView: View {
             VStack {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
+                        // ⭐ §53.2：「在线」与「在看」拆成两段，别再用一个灯表达两件事。
+                        //   以前这行只看拉流心跳（PC 只在有画面时才发），PC 登录着但没画面
+                        //   会显示「PC未连接」——把故障现象说成了对方没上线，现场没法判断。
+                        //   现在：绿=在线且在看 / 橙=在线但没出画面（问题在拉流侧）/ 红=真没上线。
                         HStack(spacing: 4) {
                             Circle()
-                                .fill(rtc.viewerConnected ? Color.green : Color.red)
+                                .fill(pcStatusColor)
                                 .frame(width: 7, height: 7)
-                            Text(rtc.viewerConnected ? "PC已连接" : "PC未连接")
+                            Text(pcStatusText)
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(rtc.viewerConnected ? .green : .red)
+                                .foregroundColor(pcStatusColor)
                         }
                         // ⭐ 切网重连中（P2P）：过程可视化，PC 心跳恢复后自动消失
                         if rtc.p2pReconnecting && !rtc.viewerConnected {
@@ -1009,18 +1025,15 @@ struct ContentView: View {
                 if rtc.isPublishing { print("⚠️ [原因] 退出登录停止推流"); rtc.stopPublish() }
             }
             
-            // ⭐ §52.6 非同一 WiFi：P2P 只有局域网直连才有优势，跨网走中继全面劣于 SRS。
-            //   停推流 → 把下次登录的默认线路改成多人线路 → 退回登录页并提示。
+            // ⭐ §53.4-定稿：§52.6 的「非同 WiFi → 退回登录页让用户改线路」已废弃。
+            //   线路现在由系统在推流前按网络关系自动决定（SessionPolicy），跨网直接走多人线路，
+            //   不需要用户做任何事。这个通知已无人发送，保留空观察者仅为回滚方便。
             NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("P2PNotSameWifi"),
                 object: nil,
                 queue: .main
             ) { _ in
-                if rtc.isPublishing { print("⚠️ [原因] 非同一WiFi，退出 P2P 推流"); rtc.stopPublish() }
-                UserDefaults.standard.set(ConnectModeOption.srs.rawValue, forKey: ConnectModeOption.storageKey)
-                UserDefaults.standard.set(ConnectModeOption.srs.rawValue, forKey: "connect_mode")
-                appState.loginToast = "不在同一 WiFi，请选择「多人线路」"
-                appState.navigateToMonitorLogin()
+                print("ℹ️ [线路] 收到已废弃的 P2PNotSameWifi 通知（§53.4 改为自动重新协商），忽略")
             }
             
             // 监听扫码前释放摄像头通知
