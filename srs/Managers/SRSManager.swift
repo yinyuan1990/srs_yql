@@ -261,6 +261,21 @@ extension SRSManager: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, peerConnection === self.pc else { return }
+            // ⭐ §53.14：**每次状态迁移都记一行**。原先只在 connected 打一行，
+            //   「首连不出画面」时日志里什么都没有，看不出是卡在 checking 还是压根没起来。
+            let name: String
+            switch newState {
+            case .new: name = "new"
+            case .checking: name = "checking"
+            case .connected: name = "connected"
+            case .completed: name = "completed"
+            case .failed: name = "failed"
+            case .disconnected: name = "disconnected"
+            case .closed: name = "closed"
+            case .count: name = "count"
+            @unknown default: name = "unknown"
+            }
+            print("🧊 [SRS] ICE 状态 → \(name)")
             switch newState {
             case .connected, .completed:
                 print("✅ [SRS] ICE 已连接")

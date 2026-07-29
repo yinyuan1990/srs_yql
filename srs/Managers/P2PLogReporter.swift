@@ -28,7 +28,10 @@ final class P2PLogReporter {
         "P2P", "p2p", "malvshezhing", "[自适应]", "ICE", "candidate",
         "Offer", "Answer", "offer", "answer", "关键帧", "PLI", "IDR",
         "推流", "码率", "fps", "FPS", "WEBRTC", "🔑", "🚑", "热点", "relay", "TURN",
-        "H265", "h265", "HEVC"   // ⭐ H265 专属诊断行（H265Support.swift 的 h265Log）
+        "H265", "h265", "HEVC",  // ⭐ H265 专属诊断行（H265Support.swift 的 h265Log）
+        // ⭐ §53.14：SRS 与采集侧的诊断此前**不在白名单里**，导致「SRS 首连不出画面」
+        //   「每几秒卡一次」这两类线索根本传不上来（除非那行恰好含"推流/fps/码率"）。
+        "SRS", "srs", "采集", "预览", "首帧", "中断", "健康检查", "链路决策", "会话"
     ]
 
     private var timerQueue = DispatchQueue(label: "p2plog.reporter")

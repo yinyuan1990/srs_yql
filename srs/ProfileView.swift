@@ -535,16 +535,16 @@ struct ProfileView: View {
     private var isMemberActivated: Bool {
         UserDefaults.standard.bool(forKey: "activated")
     }
+    /// ⭐ §53.15：等级名**不带"会员"二字**（超高清会员 → 超高清），只显示等级本身。
     private var membershipRowTitle: String {
-        isMemberActivated ? "\(levelDisplayText)会员" : "注册时间"
+        isMemberActivated ? levelDisplayText : "注册时间"
     }
+    /// ⭐ §53.15：已开通时副标题是「注册成功时间 <注册日期>」。
+    ///   **刻意不显示"开通时间"**：App Store 审核对"开通/付费"类信息敏感，这里只呈现账号注册时间，
+    ///   不暴露任何与购买/激活时点相关的内容。未开通时保持原样（纯注册时间）。
     private var membershipRowSubtitle: String {
-        if isMemberActivated {
-            let t = UserDefaults.standard.string(forKey: "activation_time") ?? ""
-            // 老后端不下发开通时间时不硬凑一个假日期，直接留白
-            return t.isEmpty ? "—" : "开通时间 " + formatDate(t)
-        }
-        return formatDate(viewModel.userProfile?.createdAt)
+        let created = formatDate(viewModel.userProfile?.createdAt)
+        return isMemberActivated ? "注册成功时间 " + created : created
     }
     private var membershipRowIcon: String {
         isMemberActivated ? levelIcon : "clock"
@@ -561,8 +561,8 @@ struct ProfileView: View {
     
     private var settingsSection1: some View {
         VStack(spacing: 0) {
-            // ⭐ §53.9：开通会员后，这一行从「注册时间 + 注册时间值」变成「<等级>会员 + 开通时间」；
-            //   未开通（试用）时保持原样显示注册时间。
+            // ⭐ §53.9 / §53.15：开通会员后这一行显示「<等级> + 注册成功时间」（等级名不带"会员"
+            //   二字，且**不显示开通时间**——审核对付费/开通信息敏感）；未开通时保持「注册时间」原样。
             ProfileRowView(icon: membershipRowIcon,
                            title: membershipRowTitle,
                            subtitle: membershipRowSubtitle,

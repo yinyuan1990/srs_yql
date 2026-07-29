@@ -575,16 +575,20 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
                 let cap = self.diagCapCount
                 let push = self.diagPushCount
                 let target = self.targetSendFps
-                
+
                 // 重置计数
                 self.diagCapCount = 0
                 self.diagPushCount = 0
-                
-                // 🔥 诊断输出（已禁用）
-                // let capStatus = cap > 0 ? "✅" : "❌"
-                // let pushStatus = push == target ? "✅" : (push < target ? "⚠️少\(target - push)" : "⚠️多\(push - target)")
-                // print("🔬 [诊断] cap=\(cap) \(capStatus) | push=\(push)/\(target) \(pushStatus)")
-                _ = (cap, push, target)  // 避免未使用变量警告
+
+                // ⭐ §53.14 重新启用（原先注释掉了）：排「首次连接手机端不出画面」与「每几秒卡一次」
+                //   必须看到最底层这两个数——cap=相机回调帧数、push=真正喂给编码器的帧数。
+                //   · cap=0 → 相机根本没吐帧（首连黑屏就是这种）；
+                //   · cap 正常但 push=0 → 卡在节流/编码入口；
+                //   · cap 周期性掉坑（如 30→8→30）→ 采集端卡顿，不是网络问题。
+                //   带「采集」关键词，P2PLogReporter 才会收进上报（见其 captureKeywords）。
+                let gapMs = self.lastCaptureFrameAt > 0
+                    ? Int((CFAbsoluteTimeGetCurrent() - self.lastCaptureFrameAt) * 1000) : -1
+                print("🔬 [采集诊断] cap=\(cap) push=\(push)/\(target) 距上帧=\(gapMs)ms 尺寸=\(self.lastFrameWidth)x\(self.lastFrameHeight) 首帧=\(self.hasReceivedFrame ? "已到" : "未到")")
             }
         }
     }
@@ -5626,6 +5630,14 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     private func captureWatchdogTick() {
         guard isPublishing, !isCameraSleeping else { return }
+
+        // ⭐ §53.14 推流侧 2s 心跳诊断行（排「首连不出画面」「每几秒卡一次」）：
+        //   把"设备这边到底在不在发"一次说清——链路/编码/推送fps/码率/首帧/距上帧。
+        //   与上面的 [采集诊断]（相机侧）配成一对：一眼分清是采集断了还是发送断了。
+        let hbLast = frameThrottler?.lastCaptureFrameAt ?? 0
+        let hbGapMs = hbLast > 0 ? Int((CFAbsoluteTimeGetCurrent() - hbLast) * 1000) : -1
+        print("💓 [推流诊断] 链路=\(currentConnMode) 编码=\(H265Support.shared.effectiveCodecString) 推送=\(WebSocketManager.publishingSendFps)fps 码率=\(WebSocketManager.publishingKbps)kbps 网络=\(WebSocketManager.networkQuality) 首帧=\(frameThrottler?.hasReceivedFrame == true ? "已到" : "未到") 距上帧=\(hbGapMs)ms 观看端=\(SessionPolicy.shared.onlineViewerCount)台")
+
         guard let throttler = frameThrottler, throttler.hasReceivedFrame else { return }  // 从未出过帧=还在启动，不误判
         let last = throttler.lastCaptureFrameAt
         guard last > 0 else { return }

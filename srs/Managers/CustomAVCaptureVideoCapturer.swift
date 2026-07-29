@@ -73,6 +73,43 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                                                selector: #selector(sessionInterruptionEnded(_:)),
                                                name: .AVCaptureSessionInterruptionEnded,
                                                object: captureSession)
+        // ⭐ §53.14：**中断开始**此前完全没记。排「首次连接手机端不出画面、睡眠一次才好」
+        //   必须知道相机是不是被系统中断了、以及中断原因（多前台App抢占/被其它客户端占用/
+        //   音频设备冲突…）。原因码直接决定是我们的 bug 还是系统行为。
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(sessionWasInterrupted(_:)),
+                                               name: .AVCaptureSessionWasInterrupted,
+                                               object: captureSession)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(sessionDidStartRunning(_:)),
+                                               name: .AVCaptureSessionDidStartRunning,
+                                               object: captureSession)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(sessionDidStopRunning(_:)),
+                                               name: .AVCaptureSessionDidStopRunning,
+                                               object: captureSession)
+    }
+
+    @objc private func sessionWasInterrupted(_ notification: Notification) {
+        let raw = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
+        let reason: String
+        switch AVCaptureSession.InterruptionReason(rawValue: raw) {
+        case .videoDeviceNotAvailableInBackground: reason = "后台不可用(正常)"
+        case .audioDeviceInUseByAnotherClient:     reason = "音频被其它App占用"
+        case .videoDeviceInUseByAnotherClient:     reason = "相机被其它App占用"
+        case .videoDeviceNotAvailableWithMultipleForegroundApps: reason = "多前台App(分屏/画中画)"
+        case .videoDeviceNotAvailableDueToSystemPressure:        reason = "系统压力(过热/资源不足)"
+        default: reason = "未知(\(raw))"
+        }
+        print("⚠️ [CustomCapture] 采集会话被中断: \(reason)")
+    }
+
+    @objc private func sessionDidStartRunning(_ notification: Notification) {
+        print("▶️ [CustomCapture] 采集会话已启动(startRunning)")
+    }
+
+    @objc private func sessionDidStopRunning(_ notification: Notification) {
+        print("⏹️ [CustomCapture] 采集会话已停止(stopRunning)")
     }
 
     deinit {
