@@ -5,7 +5,8 @@
 //  独立的 P2P/WebRTC 直连管理类。
 //  - 与 SRS 模式互斥：connect_mode == "p2p" 时由 WebRTCManager 启动本类，SRS 推流不启用。
 //  - 多观看端：每个观看 PC 一个独立 RTCPeerConnection。
-//  - 链路顺序：P2P 直连(host/srflx) → TURN 中继(relay)；不回退 SRS（由全局开关决定走哪条）。
+//  - ⭐ §53.19/§53.21：P2P = **纯局域网直连（host-only）**。TURN 中继与 STUN 打洞代码已物理删除
+//    （用户拍板）：跨网一律走 SRS，本类只负责同 WiFi 的 host↔host 会话；ICE 失败 = 确认非局域网 → 回落 SRS。
 //  - 信令走 WebSocketManager 的 /app/webrtc/signal，本类只负责会话与 ICE 逻辑。
 //
 
@@ -81,12 +82,6 @@ final class P2PManager: NSObject {
     private var pendingIceRestart: Set<String> = []
     private var iceRetryCount: [String: Int] = [:]
     private let maxICERetries = 2
-    private var forceRelayPeerIds: Set<String> = []     // ICE 失败黑名单 → 重建时强制 relay
-    /// ⭐ §25.7b：链路择优的 relay 钉住集合。与 forceRelayPeerIds 的区别：**跨会话拆建存活**
-    ///（removeViewerSession 不清除，仅 closeAllViewerSessions/stop 清），因为硬切中继 =
-    /// 拆会话让 PC 重新 REQUEST，重建时必须还记得「这个 PC 要走 relay」。
-    private var qualityRelayPeerIds: Set<String> = []
-    private var peerNetworkType: [String: String] = [:] // pcDeviceId → "cellular"/"wifi"/...
 
     /// ⭐ §53.3①：最近一次给某个 PC 发出 Offer 的时刻。
     /// 用来判定「重复的 WEBRTC_REQUEST」——**不再用 PeerConnection 的 new/connecting 状态判**。
@@ -104,7 +99,7 @@ final class P2PManager: NSObject {
     private var signalingObserver: NSObjectProtocol?
     private var reconnectObserver: NSObjectProtocol?
 
-    // 本机网络监听（蜂窝强制 relay + 切网重连）
+    // 本机网络监听（切网重连；isOnCellular 仅用于检测"蜂窝↔WiFi 类型变化"这一切网信号）
     private var isOnCellular = false
     private let nwMonitor = NWPathMonitor()
     private let nwQueue = DispatchQueue(label: "p2p.nwpath", qos: .utility)
@@ -115,7 +110,6 @@ final class P2PManager: NSObject {
     private var lastNetSwitchAt: TimeInterval = 0
 
     var maxViewers: Int { let v = UserDefaults.standard.integer(forKey: "maxP2PViewers"); return v > 0 ? v : 4 }
-    var forceRelay: Bool { UserDefaults.standard.bool(forKey: "forceRelay") }
 
     var viewerCount: Int { viewerSessions.count }
 
@@ -127,7 +121,7 @@ final class P2PManager: NSObject {
         isReadyForViewers = true
         registerObservers()
         startNetworkMonitoring()
-        print("✅ [P2P] P2PManager 启动，maxViewers=\(maxViewers), forceRelay=\(forceRelay)")
+        print("✅ [P2P] P2PManager 启动，maxViewers=\(maxViewers)（纯局域网直连，无中继/打洞）")
     }
 
     func stop() {
@@ -210,7 +204,7 @@ final class P2PManager: NSObject {
         nwMonitor.start(queue: nwQueue)
     }
 
-    /// 网络切换：重新评估每个会话的传输策略（蜂窝→relay）并重连
+    /// 网络切换：拆除全部会话并让 PC 重连
     ///
     /// ⭐ 2026-07-09 修「切网后必须手动重登 PC 才出画面」根因：
     ///   观看端恒为 PC GStreamer，其 webrtcbin **不支持在旧实例上 ICE Restart**（收新 ufrag 的
@@ -223,8 +217,6 @@ final class P2PManager: NSObject {
         print("📶 [P2P] 网络切换，拆除并让 PC 重连 \(sessions.count) 个会话（PC 恒 GStreamer，不做 ICE Restart）")
         for (pcId, _) in sessions {
             iceRetryCount[pcId] = 0
-            // 切到蜂窝：拉黑该 peer，PC 重建后手机回的新 Offer 走 TURN relay
-            if isOnCellular { forceRelayPeerIds.insert(pcId) }
             removeViewerSession(pcId, notifyPC: false)
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
                                                         reason: "network_switch_reconnect",
@@ -261,7 +253,6 @@ final class P2PManager: NSObject {
         print("🚑 [P2P] \(reason)：\(broken.count)/\(viewerSessions.count) 个会话 ICE 已死 → 拆除并让 PC 重连")
         for pcId in broken {
             iceRetryCount[pcId] = 0
-            if isOnCellular { forceRelayPeerIds.insert(pcId) }
             removeViewerSession(pcId, notifyPC: false)
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
                                                         reason: "network_switch_reconnect",
@@ -271,76 +262,9 @@ final class P2PManager: NSObject {
         return broken.count
     }
 
-    // MARK: - 传输策略
-
-    private func effectiveForceRelay(for pcId: String) -> Bool {
-        if forceRelay { return true }
-        return isOnCellular || peerNetworkType[pcId] == "cellular" || forceRelayPeerIds.contains(pcId)
-            || qualityRelayPeerIds.contains(pcId)
-    }
-
-    // MARK: - §25.7e 线路预判定（建会话前经 WebSocket 信令定直连/中继）
-
-    /// 本机全部 IPv4（WiFi en0 / 热点 bridge100 / 有线等，排除回环与链路本地 169.254.*）
-    private func localIPv4Addresses() -> [String] {
-        var results: [String] = []
-        var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return results }
-        defer { freeifaddrs(ifaddr) }
-        var ptr: UnsafeMutablePointer<ifaddrs>? = first
-        while let p = ptr {
-            let ifa = p.pointee
-            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
-                let flags = Int32(ifa.ifa_flags)
-                if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 {
-                    var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
-                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
-                        let ip = String(cString: buf)
-                        if !ip.hasPrefix("169.254.") { results.append(ip) }
-                    }
-                }
-            }
-            ptr = p.pointee.ifa_next
-        }
-        return results
-    }
-
-    /// 同网段判定（/24）：双方任意一对 IPv4 前三段相同 = 同一局域网（同 WiFi）
-    private func sharesSubnet(with peerIps: [String]) -> Bool {
-        func prefix24(_ ip: String) -> String? {
-            let parts = ip.split(separator: ".")
-            guard parts.count == 4 else { return nil }
-            return parts[0...2].joined(separator: ".")
-        }
-        let myPrefixes = Set(localIPv4Addresses().compactMap(prefix24))
-        return peerIps.contains { ip in prefix24(ip).map(myPrefixes.contains) ?? false }
-    }
-
-    /// ⭐ §25.7e：建会话前预判线路。PC 的 WEBRTC_REQUEST 带 localIps（逗号分隔的局域网 IPv4），
-    ///   与本机比网段：非同网段 = 非同 WiFi → pcId 钉进 qualityRelayPeerIds → 会话从创建起
-    ///   relay-only，一次 ICE 定终身，不再有「直连先通→ICE 换车→软切/硬切」的中途折腾。
-    ///   同网段/字段缺失（旧版 PC）→ 保持直连优先，host↔host stats 判定兜底。
-    ///   只进不出：不因后续 REQUEST 判同网段而摘除钉住（防两个不同网络恰好同网段号 → 死循环回直连）。
-    private func applyLanPrecheck(for pcId: String, message: [String: Any]) {
-        guard let ipsStr = message["localIps"] as? String, !ipsStr.isEmpty else {
-            print("🛣 [P2P线路预判] \(pcId) REQUEST 未带 localIps（旧版PC）→ 直连优先+stats兜底")
-            return
-        }
-        let peerIps = ipsStr.split(separator: ",").map(String.init)
-        if sharesSubnet(with: peerIps) {
-            print("🛣 [P2P线路预判] \(pcId) 同网段(同WiFi) → 直连优先 peer=\(peerIps)")
-        } else {
-            qualityRelayPeerIds.insert(pcId)
-            print("🛣 [P2P线路预判] \(pcId) 非同网段(非同WiFi) → 建会话即中继 peer=\(peerIps) 本机=\(localIPv4Addresses())")
-        }
-    }
-
-    private func loadIceServers() -> [IceServer] {
-        guard let data = UserDefaults.standard.data(forKey: "iceServers"),
-              let servers = try? JSONDecoder().decode([IceServer].self, from: data) else { return [] }
-        return servers
-    }
+    // ⭐ §53.21：原「传输策略(effectiveForceRelay) / §25.7e 线路预判(applyLanPrecheck) /
+    //   loadIceServers」已物理删除——P2P 只做局域网 host↔host 直连，无 TURN/STUN；
+    //   同不同 WiFi 由 SessionPolicy 在推流前判定（localIps 网段 + 公网出口 IP，§53.20.2）。
 
     // MARK: - 信令处理
 
@@ -361,8 +285,6 @@ final class P2PManager: NSObject {
                 print("🔌 [P2P] PC \(fromDevice) 断开（无活动会话）")
             }
         case "WEBRTC_REQUEST":
-            peerNetworkType[fromDevice] = (message["networkType"] as? String) ?? "unknown"
-            applyLanPrecheck(for: fromDevice, message: message)   // §25.7e：建会话前定直连/中继
             guard isReadyForViewers else {
                 WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_REJECT", reason: "not_ready", toDevice: fromDevice)
                 return
@@ -470,7 +392,7 @@ final class P2PManager: NSObject {
         //   · 同一 WiFi：host↔host 直连秒连，0 跳、不吃公网/服务器带宽（P2P 唯一该用的场景）；
         //   · 不在同一 WiFi：没有 srflx/relay 候选可用 → ICE 必然失败 → 回落 SRS。
         //   这样从 ICE 层根断了"非局域网还假装 P2P（实走中继）"——不再依赖上层网段预判是否准。
-        //   loadIceServers()/effectiveForceRelay()/qualityRelayPeerIds 等中继逻辑保留但不再生效，便于回滚。
+        //   §53.21：中继/打洞代码（TURN 配置、relay 钉住、软切/硬切）已全部物理删除。
         cfg.iceServers = []
         cfg.continualGatheringPolicy = .gatherContinually
         cfg.iceBackupCandidatePairPingInterval = 2000
@@ -531,8 +453,6 @@ final class P2PManager: NSObject {
         pendingRemoteIce.removeValue(forKey: pcId)
         pendingIceRestart.remove(pcId)
         iceRetryCount.removeValue(forKey: pcId)
-        forceRelayPeerIds.remove(pcId)
-        peerNetworkType.removeValue(forKey: pcId)
         lastOfferSentAt.removeValue(forKey: pcId)   // §53.3①：拆了就别再拿旧时刻当"竞态窗口"
         lastRequestId.removeValue(forKey: pcId)
         print("🔌 [P2P] 移除会话 \(pcId)，剩余 \(viewerSessions.count)")
@@ -550,9 +470,6 @@ final class P2PManager: NSObject {
         pendingRemoteIce.removeAll()
         pendingIceRestart.removeAll()
         iceRetryCount.removeAll()
-        forceRelayPeerIds.removeAll()
-        qualityRelayPeerIds.removeAll()   // §25.7b：整体停止才清 relay 钉住（单会话拆建不清）
-        peerNetworkType.removeAll()
         lastOfferSentAt.removeAll()
         lastRequestId.removeAll()
     }
@@ -562,13 +479,12 @@ final class P2PManager: NSObject {
         return nil
     }
 
-    // MARK: - ICE 重连（P2P/TURN 内部，不回退 SRS）
+    // MARK: - ICE 重连（局域网内重试；耗尽 = 确认非局域网 → 回落 SRS）
 
     private func retryICEConnection(for pcId: String, peerConnection pc: RTCPeerConnection) {
         let cur = iceRetryCount[pcId] ?? 0
         if cur < maxICERetries {
             iceRetryCount[pcId] = cur + 1
-            forceRelayPeerIds.insert(pcId)   // 失败后下次重建走 relay
             let cons = RTCMediaConstraints(
                 mandatoryConstraints: ["IceRestart": "true",
                                        "OfferToReceiveAudio": "false",
@@ -590,60 +506,8 @@ final class P2PManager: NSObject {
         }
     }
 
-    // MARK: - 链路择优（§25.7：直连质量差 → 主动切中继）
-
-    /// 直连路径质量持续差（由 WebRTCManager stats 判定）时，把所有会话切到 TURN 中继。
-    /// 两级策略（§25.7b，2026-07-03 实测日志定型）：
-    /// - **第一次触发 = 软切**：setConfiguration(.relay) + ICE Restart（不整拆会话，旧路径出画面
-    ///   直到新路径 nominated）。Chromium 内核（网页内核）走这条即可完成切换。
-    /// - **第二次触发（10s 后路径仍是直连）= 硬切**：实测 GStreamer webrtcbin 收到新 ufrag 的
-    ///   Offer 不重启 libnice、不重新收集候选（回了 Answer 但零新增 [本地候选]），软切必然失效。
-    ///   升级为：pcId 钉进 qualityRelayPeerIds（跨会话存活）→ 拆会话 → 发
-    ///   WEBRTC_HANGUP(network_switch_reconnect)（PC 已有处理：不拆 pipeline，自动重发
-    ///   WEBRTC_REQUEST）→ 重建的会话 effectiveForceRelay=true，从建会话起就只走 TURN。
-    ///   网页内核第一次软切就生效、到不了第二次，不受硬切 HANGUP（网页内核收 HANGUP 停播不重连）影响。
-    func switchAllSessionsToRelay(reason: String) {
-        // 无 TURN 服务器时强制 relay = 零候选必死，直接放弃
-        let hasTurn = loadIceServers().contains { s in
-            s.urls.contains { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") }
-        }
-        guard hasTurn else {
-            print("⚠️ [P2P] 切中继请求被忽略（无 TURN 服务器配置）reason=\(reason)")
-            return
-        }
-        for (pcId, pc) in viewerSessions {
-            if forceRelayPeerIds.contains(pcId) {
-                // 已软切过仍被再次触发 = 路径还是直连，对端不支持 ICE Restart（GStreamer）→ 硬切
-                guard !qualityRelayPeerIds.contains(pcId) else { continue }   // 硬切也做过 = 等重建，别重复拆
-                qualityRelayPeerIds.insert(pcId)
-                print("🔨 [P2P] 软切中继未生效(路径仍直连，对端不支持 ICE Restart) → 硬切重建 \(pcId) reason=\(reason)")
-                removeViewerSession(pcId, notifyPC: false)
-                WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
-                                                            reason: "network_switch_reconnect",
-                                                            toDevice: pcId)
-                continue
-            }
-            forceRelayPeerIds.insert(pcId)
-            let cfg = pc.configuration
-            cfg.iceTransportPolicy = .relay
-            pc.setConfiguration(cfg)
-            let cons = RTCMediaConstraints(
-                mandatoryConstraints: ["IceRestart": "true",
-                                       "OfferToReceiveAudio": "false",
-                                       "OfferToReceiveVideo": "false"],
-                optionalConstraints: nil)
-            pendingIceRestart.insert(pcId)
-            pc.offer(for: cons) { [weak pc] sdp, err in
-                guard let pc = pc, let sdp = sdp else {
-                    print("❌ [P2P] 切中继 Offer 创建失败 \(pcId): \(err?.localizedDescription ?? "")")
-                    return
-                }
-                pc.setLocalDescription(sdp) { _ in }
-                WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
-                print("🔀 [P2P] 已切中继并发送 ICE Restart Offer → \(pcId) reason=\(reason)")
-            }
-        }
-    }
+    // ⭐ §53.21：原「链路择优 switchAllSessionsToRelay（§25.7 软切/硬切 TURN 中继）」已物理删除——
+    //   P2P 无中继可切，直连质量差/路径非局域网时由 SessionPolicy 重新协商切 SRS。
 
     // MARK: - 编码参数（PC 调参时由 WebRTCManager 调用，统一作用到所有会话）
     //

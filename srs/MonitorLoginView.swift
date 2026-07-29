@@ -667,12 +667,12 @@ struct MonitorLoginView: View {
                     //   在推流前按"与观看端是否同 WiFi"自动决定。用户已无从手选。
                     let connectMode = (loginResponse.connectMode ?? "auto").lowercased()
                     UserDefaults.standard.set(connectMode, forKey: "connect_mode")
-                    UserDefaults.standard.set(loginResponse.forceRelay ?? false, forKey: "forceRelay")
                     UserDefaults.standard.set(loginResponse.maxP2PViewers ?? 4, forKey: "maxP2PViewers")
-                    if let iceServers = loginResponse.iceServers,
-                       let iceData = try? JSONEncoder().encode(iceServers) {
-                        UserDefaults.standard.set(iceData, forKey: "iceServers")
-                    }
+                    // ⭐ §53.21：forceRelay / iceServers 不再落地——P2P 中继与打洞代码已物理删除
+                    //  （纯局域网 host-only 直连），后端这两个字段对 iOS 已无消费方。
+                    //   顺带清掉历史残留，防旧 key 误导排查。
+                    UserDefaults.standard.removeObject(forKey: "forceRelay")
+                    UserDefaults.standard.removeObject(forKey: "iceServers")
 
                     // ⭐ §53.4.4 编码默认值改由总后台配置（默认 h265；本机硬编或观看端内核不支持时
                     //   由 SessionPolicy/H265Support 自动回退 h264）。缺省字段 = 老后端 → 按 h265。
@@ -685,7 +685,7 @@ struct MonitorLoginView: View {
                     //   PC 上报的 publicIp 比对，防 /24 网段号撞车误判同 WiFi。老后端无此字段 → 存空。
                     UserDefaults.standard.set(loginResponse.clientIp ?? "", forKey: "public_ip")
 
-                    print("✅ 连接方式(后端): \(connectMode), 编码默认(后端) P2P=\(codecP2p)/SRS=\(codecSrs), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
+                    print("✅ 连接方式(后端): \(connectMode), 编码默认(后端) P2P=\(codecP2p)/SRS=\(codecSrs), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4)（P2P=纯局域网直连，无中继/打洞）")
                     
                     if let trialInfo = loginResponse.trialInfo {
                         saveTrialInfo(trialInfo)

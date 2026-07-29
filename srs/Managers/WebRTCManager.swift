@@ -3069,25 +3069,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     private let emergencyBitrateStepDown: Double = 0.7   // 每次下压 ×0.7
     private let emergencyBitrateStepUp: Double = 0.15    // 恢复每次 +0.15
 
-    /// ⭐ 2026-07-03 §25.5-1：P2P 选中路径走 TURN 中继时的码率钳制。
-    ///   中继实测（2026-07-03 三端日志）：p4k 档 7.5Mbps 灌 TURN → 缓冲堆积 20s → RTT 5.6s → ICE 断链 10s。
-    ///   服务器侧 coturn 已加 max-bps≈4Mbps 兜底（超限丢包倒逼），客户端在编码器层主动钳到 relayMaxKbps 更平滑。
-    ///   由 stats 的 candidate-pair/local-candidate 判定，路径切换（直连↔中继）时自动重算并下发。
-    var p2pPathIsRelay: Bool = false
-    private let relayMaxKbps: Int = 3000   // 中继单路码率上限（< coturn max-bps 4Mbps，留余量）
-
-    /// ⭐ 2026-07-04 §25.7（简化）：链路择优——只认「同 WiFi 直连」，其余一律中继。
-    ///   旧版靠 ICE RTT>300ms 持续 10s 才切中继，探测窗口内用户已经卡了 10 秒；且跨网直连
-    ///   （srflx 打洞）质量随公网波动，探测阈值难调。现改为拓扑判定，一次到位：
-    ///   选中 ICE 候选对 host↔host（两端候选类型都是 host）= 局域网直连 = 同 WiFi → 保持直连；
-    ///   选中路径含 srflx/prflx（跨 NAT/公网）→ 立即 switchAllSessionsToRelay，不看 RTT、不等待。
-    ///   单向操作：会话期内不切回直连（pcId 进 forceRelayPeerIds），会话拆除时自动重置。
-    ///   relaySwitchGapSec：两次触发的最小间隔。软切(ICE Restart)生效要几秒，期间路径仍显示直连，
-    ///   若每秒重触发会被 P2PManager 误判「软切无效」而提前硬切拆会话。
-    ///   ⚠️ 2026-07-27 §52.6：判定沿用，但**动作已从「切中继」改为「退登录页提示改用多人线路」**，
-    ///      下面两个限频字段随之成为死变量（保留以备回滚）。
-    private var lastRelaySwitchAt: CFAbsoluteTime = 0
-    private let relaySwitchGapSec: Double = 8
+    // ⭐ §53.21：原「中继码率钳制(p2pPathIsRelay/relayMaxKbps) + 链路择优限频(lastRelaySwitchAt/
+    //   relaySwitchGapSec)」已随 TURN 中继物理删除——P2P 只有局域网直连，无中继路径可钳可切。
     /// ⭐ §52.6：本次推流会话内「非同 WiFi」只处理一次，防止 stats 每秒重复发通知
     var notSameWifiHandled = false
     // maxAdaptiveFps 动态取值：使用 targetOutputFPS（后端下发的推送FPS）作为上限
@@ -5970,7 +5953,6 @@ final class WebRTCManager: NSObject, ObservableObject {
         lastBytesSent = 0; lastTs = 0
         lastFramesSent = 0; lastPacketsSent = 0
         lastPacketsLost = 0; lastNackCount = 0; lastPliCount = 0
-        lastRelaySwitchAt = 0
         
         // ⭐ 2026-06-25 发热优化：常态【不】启动定时强制关键帧。
         //   旧实现 startKeyframeTimer() 常驻每 0.5~1s 强制一个 IDR（forceKeyframeViaBitrate 码率抖动），
@@ -6136,9 +6118,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                         if let lcId = pairLocalCandId[pid] { localPathType = localCandType[lcId] }
                         if let rcId = pairRemoteCandId[pid] { remotePathType = remoteCandType[rcId] }
                     }
-                    // 选中路径是否走 TURN 中继
-                    let pathIsRelay = (localPathType == "relay")
                     // ⭐ §25.7：同 WiFi 判定 = 选中候选对 host↔host（两侧类型都拿到才判定，防 stats 未就绪误判）
+                    //   §53.21：无 TURN/STUN 后本端候选只有 host，pathIsRelay 判定已随中继代码删除。
                     let pathIsLan = (localPathType == "host" && remotePathType == "host")
                     DispatchQueue.main.async {
                         let now = CFAbsoluteTimeGetCurrent()
@@ -6280,15 +6261,6 @@ final class WebRTCManager: NSObject, ObservableObject {
                         if iceRttMs > 0 && rrRttMs > 0 && abs(iceRttMs - rrRttMs) > 200 {
                             self.malvshezhingLog("[RTT] ⚠️两源偏差 ice=\(iceRttMs)ms rr=\(rrRttMs)ms → 采用 ice（RR 疑被拉流端污染）")
                         }
-                        // ⭐ 选中路径 relay 状态同步（首次/变化时触发中继码率钳制）
-                        if activePairId != nil && pathIsRelay != self.p2pPathIsRelay {
-                            self.p2pPathIsRelay = pathIsRelay
-                            self.malvshezhingLog("[线路] 选中路径=\(pathIsRelay ? "中继(relay)" : "直连") → 码率区间重算")
-                            if self.currentConnMode == .p2p {
-                                self.p2pManager.applyBitrateToAllSessions()
-                            }
-                        }
-
                         // ⭐ §53.4-定稿：这里**只做兜底核对，不再退登录页**。
                         //   正常情况下"同不同 WiFi"已在推流前用 PC_PRESENCE 的 localIps 比过网段
                         //   （SessionPolicy），跨网压根不会走 P2P。真跑到这儿说明预判与实际不符
@@ -6296,7 +6268,6 @@ final class WebRTCManager: NSObject, ObservableObject {
                         //   SessionPolicy 重新协商（停推流→重决策→起推流），它自带冷却与次数上限。
                         //   §52.6 的"退回登录页让用户自己改线路"已废弃：用户不该为网络拓扑负责。
                         if self.currentConnMode == .p2p, activePairId != nil, !self.notSameWifiHandled,
-                           !self.p2pManager.forceRelay,
                            let lt = localPathType, let rt = remotePathType, !pathIsLan {
                             self.notSameWifiHandled = true
                             self.malvshezhingLog("[线路] ⚠️实测路径非同WiFi(本端=\(lt) 远端=\(rt))，与推流前预判不符 → 重新协商走多人线路")
@@ -6506,14 +6477,9 @@ extension WebRTCManager: P2PManagerDataSource {
     var p2pFactory: RTCPeerConnectionFactory { factory }
     var p2pLocalVideoTrack: RTCVideoTrack? { localVideoTrack }
     func p2pBitrateRangeKbps() -> (min: Int, max: Int) {
-        var baseMin = effectiveMinKbpsForCurrentProfile()
-        var baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
-        // ⭐ 2026-07-03 §25.5-1：选中路径=TURN 中继时整体钳到 relayMaxKbps，
-        //   防止高档位把中继灌崩（min 也一起钳，否则 libwebrtc 被下限焊死无法退让）。
-        if p2pPathIsRelay && baseMax > relayMaxKbps {
-            baseMax = relayMaxKbps
-            baseMin = min(baseMin, relayMaxKbps * 6 / 10)   // 下限同步压到上限的 60%
-        }
+        // ⭐ §53.21：原「中继时钳到 relayMaxKbps」已随 TURN 中继物理删除（P2P 只有局域网直连）。
+        let baseMin = effectiveMinKbpsForCurrentProfile()
+        let baseMax = max(baseMin, effectiveMaxKbpsForCurrentProfile())
         let minK = max(100, Int(Double(baseMin) * emergencyBitrateScale))
         let maxK = max(minK, Int(Double(baseMax) * emergencyBitrateScale))
         return (minK, maxK)
