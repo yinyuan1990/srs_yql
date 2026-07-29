@@ -397,34 +397,44 @@ class WebSocketManager: ObservableObject {
     }
     
     // MARK: - ⭐ P2P WebRTC 信令发送（统一发到 /app/webrtc/signal）
-    func sendWebRTCSignalingSDP(sdpType: String, sdp: String, toDevice: String) {
+    // ⭐ §53.25：epoch = PC 发起本轮协商时生成的轮次标识（WEBRTC_REQUEST 带来，会话记住）。
+    //   该会话所有出站信令回带它，PC 只收当前轮次——幽灵 Offer/迟到 ICE 从协议层根绝。
+    //   nil = 老版 PC 没带（兼容），不写字段。
+    func sendWebRTCSignalingSDP(sdpType: String, sdp: String, toDevice: String, epoch: Int64? = nil) {
         guard let deviceId = deviceId else { return }
-        sendWebRTCSignalingPayload([
+        var payload: [String: Any] = [
             "type": "WEBRTC_SDP", "sdpType": sdpType, "sdp": sdp,
             "fromDevice": deviceId, "toDevice": toDevice
-        ])
+        ]
+        if let e = epoch { payload["epoch"] = e }
+        sendWebRTCSignalingPayload(payload)
     }
 
-    func sendWebRTCSignalingICE(candidate: String, sdpMid: String, sdpMLineIndex: Int32, toDevice: String) {
+    func sendWebRTCSignalingICE(candidate: String, sdpMid: String, sdpMLineIndex: Int32, toDevice: String, epoch: Int64? = nil) {
         guard let deviceId = deviceId else { return }
-        sendWebRTCSignalingPayload([
+        var payload: [String: Any] = [
             "type": "WEBRTC_ICE", "candidate": candidate, "sdpMid": sdpMid,
             "sdpMLineIndex": sdpMLineIndex, "fromDevice": deviceId, "toDevice": toDevice
-        ])
+        ]
+        if let e = epoch { payload["epoch"] = e }
+        sendWebRTCSignalingPayload(payload)
     }
 
-    func sendWebRTCSignalingHangup(reason: String, toDevice: String) {
+    func sendWebRTCSignalingHangup(reason: String, toDevice: String, epoch: Int64? = nil) {
         guard let deviceId = deviceId else { return }
-        sendWebRTCSignalingPayload([
+        var payload: [String: Any] = [
             "type": "WEBRTC_HANGUP", "reason": reason,
             "fromDevice": deviceId, "toDevice": toDevice
-        ])
+        ]
+        if let e = epoch { payload["epoch"] = e }
+        sendWebRTCSignalingPayload(payload)
     }
 
-    func sendWebRTCSignaling(type: String, reason: String = "", toDevice: String) {
+    func sendWebRTCSignaling(type: String, reason: String = "", toDevice: String, epoch: Int64? = nil) {
         guard let deviceId = deviceId else { return }
         var payload: [String: Any] = ["type": type, "fromDevice": deviceId, "toDevice": toDevice]
         if !reason.isEmpty { payload["reason"] = reason }
+        if let e = epoch { payload["epoch"] = e }
         sendWebRTCSignalingPayload(payload)
     }
 

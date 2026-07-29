@@ -95,6 +95,10 @@ final class P2PManager: NSObject {
     private let duplicateRequestWindowSec: Double = 2.0
     /// PC 带来的 requestId（每次 connectP2P/重发递增，旧版 PC 不带）。仅用于日志与"变了就必须重建"。
     private var lastRequestId: [String: Int64] = [:]
+    /// ⭐⭐ §53.25：会话 epoch——PC 每轮协商生成一个（重发不换、重建才换）。
+    /// REQUEST 带来时记住；该会话所有出站信令（Offer/ICE/HANGUP）回带；
+    /// 入站 Answer/ICE 轮次不符直接丢弃。同 epoch 的重复 REQUEST 天然幂等（确定性，不靠时间窗猜）。
+    private var sessionEpoch: [String: Int64] = [:]
 
     private var signalingObserver: NSObjectProtocol?
     private var reconnectObserver: NSObjectProtocol?
@@ -217,10 +221,11 @@ final class P2PManager: NSObject {
         print("📶 [P2P] 网络切换，拆除并让 PC 重连 \(sessions.count) 个会话（PC 恒 GStreamer，不做 ICE Restart）")
         for (pcId, _) in sessions {
             iceRetryCount[pcId] = 0
+            let e = sessionEpoch[pcId]   // §53.25：拆除前取轮次，HANGUP 回带（PC 校验同轮才处理）
             removeViewerSession(pcId, notifyPC: false)
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
                                                         reason: "network_switch_reconnect",
-                                                        toDevice: pcId)
+                                                        toDevice: pcId, epoch: e)
         }
         onNetworkSwitchReconnect?()   // 通知上层置"重连中"（左上角显示，PC 重连成功后清除）
     }
@@ -253,10 +258,11 @@ final class P2PManager: NSObject {
         print("🚑 [P2P] \(reason)：\(broken.count)/\(viewerSessions.count) 个会话 ICE 已死 → 拆除并让 PC 重连")
         for pcId in broken {
             iceRetryCount[pcId] = 0
+            let e = sessionEpoch[pcId]   // §53.25
             removeViewerSession(pcId, notifyPC: false)
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP",
                                                         reason: "network_switch_reconnect",
-                                                        toDevice: pcId)
+                                                        toDevice: pcId, epoch: e)
         }
         onNetworkSwitchReconnect?()   // 上层置"重连中"，PC 重连成功后由心跳清除
         return broken.count
@@ -271,6 +277,10 @@ final class P2PManager: NSObject {
     func handleSignaling(_ message: [String: Any]) {
         guard let type = message["type"] as? String else { return }
         let fromDevice = message["fromDevice"] as? String ?? ""
+        // ⭐⭐ §53.25：会话 epoch——PC 每轮协商生成一个（重发不换），我们记住并在该会话
+        //   所有出站信令里回带；入站 Answer/ICE/HANGUP 轮次不符 = 上一轮的过期信令，直接丢弃。
+        //   缺字段（老版 PC）= 跳过校验，退回时间窗行为。
+        let msgEpoch = (message["epoch"] as? NSNumber)?.int64Value
 
         switch type {
         case "VIEWER_CONNECTED":
@@ -290,14 +300,28 @@ final class P2PManager: NSObject {
                 return
             }
             let reqId = (message["requestId"] as? NSNumber)?.int64Value
-            createViewerSession(for: fromDevice, requestId: reqId)
+            createViewerSession(for: fromDevice, requestId: reqId, epoch: msgEpoch)
         case "WEBRTC_SDP":
             let sdpType = message["sdpType"] as? String ?? ""
             let sdp = message["sdp"] as? String ?? ""
-            if sdpType == "answer" { handleRemoteAnswer(sdp, from: fromDevice) }
+            if sdpType == "answer" {
+                if let e = msgEpoch, let cur = sessionEpoch[fromDevice], e != cur {
+                    print("🗑 [P2P] 丢弃过期轮次 Answer(\(fromDevice)) msgEpoch=\(e) 当前=\(cur)")
+                    return
+                }
+                handleRemoteAnswer(sdp, from: fromDevice)
+            }
         case "WEBRTC_ICE":
+            if let e = msgEpoch, let cur = sessionEpoch[fromDevice], e != cur {
+                print("🗑 [P2P] 丢弃过期轮次 ICE(\(fromDevice)) msgEpoch=\(e) 当前=\(cur)")
+                return
+            }
             handleRemoteIce(message, from: fromDevice)
         case "WEBRTC_HANGUP":
+            if let e = msgEpoch, let cur = sessionEpoch[fromDevice], e != cur {
+                print("🗑 [P2P] 丢弃过期轮次 HANGUP(\(fromDevice)) msgEpoch=\(e) 当前=\(cur)")
+                return
+            }
             removeViewerSession(fromDevice, notifyPC: false)
         default:
             break
@@ -341,28 +365,32 @@ final class P2PManager: NSObject {
 
     // MARK: - 会话管理
 
-    func createViewerSession(for pcId: String, requestId: Int64? = nil) {
+    func createViewerSession(for pcId: String, requestId: Int64? = nil, epoch: Int64? = nil) {
         guard let ds = dataSource else { print("❌ [P2P] dataSource 为空"); return }
 
-        // ⭐ §53.3① / §53.16 幂等化：判据 = 「距上次给这个 PC 发 Offer 多久」，**纯时间窗**。
-        //   窗口内 = PC 的重发与我们的 Offer 在路上交错（真竞态）→ 忽略；
-        //   窗口外 = PC 确实没拿到 Offer（或新登录的 PC 撞上幽灵会话）→ 拆旧建新、重发 Offer。
-        //
-        //   ⚠️ §53.16 回归修复：**不要再拿 requestId 判断"是不是同一轮请求"**。
-        //   PC 侧的 requestId 是**逐条消息**生成的毫秒时间戳（`websocketclient.cpp`），
-        //   连它自己 1.5s 一次的重发都会换新值 —— 一旦把"id 变了"当成"新一轮"，
-        //   这个时间窗就等于没有：每次重试都拆掉刚发完 Offer 的会话重建，
-        //   PC 拿着 Offer#1 回的 Answer 落到会话#2 上，SDP 对不上 → 永远连不通，
-        //   现象就是 iOS 采集一切正常但 `推送=0fps 码率=0kbps`、PC 端不出画面。
-        //   requestId 现在只用于日志关联。
+        // ⭐⭐ §53.25 幂等判据（确定性，优先）：PC 每轮协商一个 epoch，重发不换。
+        //   同 epoch 的重复 REQUEST = 同一轮的重发 → 幂等忽略；
+        //   epoch 变了 = PC 起了新一轮（重建 pipeline）→ 拆旧建新。
+        // ⭐ §53.3① / §53.16 时间窗（兜底，仅老版 PC 无 epoch 时用）：
+        //   距上次 Offer < 2s = 竞态重发 → 忽略；超窗 → 拆旧建新。
+        //   requestId 是逐条消息的时间戳，仅用于日志关联（§53.16 的教训：别拿它判轮次）。
         if let existing = viewerSessions[pcId] {
-            let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
-            if sinceOffer < duplicateRequestWindowSec {
-                print("⚠️ [P2P] PC \(pcId) 重复请求（距上次Offer \(String(format: "%.1f", sinceOffer))s，reqId=\(requestId.map(String.init) ?? "无")）→ 忽略，等 Answer")
-                return
+            if let e = epoch, let cur = sessionEpoch[pcId] {
+                if e == cur {
+                    print("⚠️ [P2P] PC \(pcId) 同轮次重发(epoch=\(e)) → 幂等忽略，等 Answer")
+                    return
+                }
+                print("♻️ [P2P] PC \(pcId) 新轮次请求(epoch \(cur)→\(e)) → 拆旧建新")
+                removeViewerSession(pcId, notifyPC: false)
+            } else {
+                let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
+                if sinceOffer < duplicateRequestWindowSec {
+                    print("⚠️ [P2P] PC \(pcId) 重复请求（距上次Offer \(String(format: "%.1f", sinceOffer))s，reqId=\(requestId.map(String.init) ?? "无")）→ 忽略，等 Answer")
+                    return
+                }
+                print("♻️ [P2P] PC \(pcId) 重新请求（state=\(existing.connectionState.rawValue) 距上次Offer=\(String(format: "%.1f", sinceOffer))s reqId=\(requestId.map(String.init) ?? "无")）→ 拆旧建新")
+                removeViewerSession(pcId, notifyPC: false)
             }
-            print("♻️ [P2P] PC \(pcId) 重新请求（state=\(existing.connectionState.rawValue) 距上次Offer=\(String(format: "%.1f", sinceOffer))s reqId=\(requestId.map(String.init) ?? "无")）→ 拆旧建新")
-            removeViewerSession(pcId, notifyPC: false)
         }
         if let rid = requestId { lastRequestId[pcId] = rid }
 
@@ -414,6 +442,8 @@ final class P2PManager: NSObject {
         let sender = newPC.add(videoTrack, streamIds: ["s0"])
         viewerSessions[pcId] = newPC
         viewerSenders[pcId] = sender
+        // ⭐ §53.25：记住本会话的协商轮次（出站信令回带；老版 PC 无 epoch 则清掉旧值）
+        if let e = epoch { sessionEpoch[pcId] = e } else { sessionEpoch.removeValue(forKey: pcId) }
         applyEncoding(to: sender)
 
         print("✅ [P2P] 会话创建成功 \(pcId)，当前观看 \(viewerSessions.count)/\(maxViewers)")
@@ -445,19 +475,22 @@ final class P2PManager: NSObject {
                 H265Support.shared.h265Log("[Offer] 发给 \(pcId): 含H265=\(hasH265) 含H264兜底=\(hasH264) 含BUNDLE=\(hasBundle)")
                 H265Support.shared.reconcileFromOfferSdp(s)
             }
-            WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
+            WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId,
+                                                           epoch: self.sessionEpoch[pcId])   // §53.25 回带轮次
             self.lastOfferSentAt[pcId] = Date()   // §53.3①：重复请求判据
-            print("📤 [P2P] 已发送 Offer 给 \(pcId)")
+            print("📤 [P2P] 已发送 Offer 给 \(pcId)（epoch=\(self.sessionEpoch[pcId].map(String.init) ?? "无")）")
         }
     }
 
     func removeViewerSession(_ pcId: String, notifyPC: Bool) {
         if notifyPC {
-            WebSocketManager.shared.sendWebRTCSignalingHangup(reason: "ios_close", toDevice: pcId)
+            WebSocketManager.shared.sendWebRTCSignalingHangup(reason: "ios_close", toDevice: pcId,
+                                                              epoch: sessionEpoch[pcId])   // §53.25 回带轮次
         }
         if let s = viewerSessions[pcId] { s.close() }
         viewerSessions.removeValue(forKey: pcId)
         viewerSenders.removeValue(forKey: pcId)
+        sessionEpoch.removeValue(forKey: pcId)   // §53.25
         pendingRemoteIce.removeValue(forKey: pcId)
         pendingIceRestart.remove(pcId)
         iceRetryCount.removeValue(forKey: pcId)
@@ -469,12 +502,14 @@ final class P2PManager: NSObject {
     func closeAllViewerSessions(notifyPC: Bool) {
         for (pcId, s) in viewerSessions {
             if notifyPC {
-                WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP", reason: "ios_stop_publish", toDevice: pcId)
+                WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP", reason: "ios_stop_publish",
+                                                            toDevice: pcId, epoch: sessionEpoch[pcId])
             }
             s.close()
         }
         viewerSessions.removeAll()
         viewerSenders.removeAll()
+        sessionEpoch.removeAll()   // §53.25
         pendingRemoteIce.removeAll()
         pendingIceRestart.removeAll()
         iceRetryCount.removeAll()
@@ -508,14 +543,16 @@ final class P2PManager: NSObject {
                     return
                 }
                 pc.setLocalDescription(sdp) { _ in }
-                WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
+                WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId,
+                                                               epoch: self.sessionEpoch[pcId])   // §53.25
                 print("🔄 [P2P] ICE Restart Offer 已发送 \(pcId) (\(cur + 1)/\(self.maxICERetries))")
             }
         } else {
             print("❌ [P2P] \(pcId) ICE 重试耗尽，断开 → 回落 SRS")
             iceRetryCount.removeValue(forKey: pcId)
+            let e = sessionEpoch[pcId]   // §53.25
             removeViewerSession(pcId, notifyPC: false)
-            WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP", reason: "ice_failed", toDevice: pcId)
+            WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_HANGUP", reason: "ice_failed", toDevice: pcId, epoch: e)
             onViewerPermanentlyFailed?(pcId)
         }
     }
@@ -643,7 +680,8 @@ extension P2PManager: RTCPeerConnectionDelegate {
             candidate: candidate.sdp,
             sdpMid: candidate.sdpMid ?? "0",
             sdpMLineIndex: candidate.sdpMLineIndex,
-            toDevice: pcId)
+            toDevice: pcId,
+            epoch: sessionEpoch[pcId])   // §53.25 回带轮次
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
