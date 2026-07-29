@@ -5636,7 +5636,18 @@ final class WebRTCManager: NSObject, ObservableObject {
         //   与上面的 [采集诊断]（相机侧）配成一对：一眼分清是采集断了还是发送断了。
         let hbLast = frameThrottler?.lastCaptureFrameAt ?? 0
         let hbGapMs = hbLast > 0 ? Int((CFAbsoluteTimeGetCurrent() - hbLast) * 1000) : -1
-        print("💓 [推流诊断] 链路=\(currentConnMode) 编码=\(H265Support.shared.effectiveCodecString) 推送=\(WebSocketManager.publishingSendFps)fps 码率=\(WebSocketManager.publishingKbps)kbps 网络=\(WebSocketManager.networkQuality) 首帧=\(frameThrottler?.hasReceivedFrame == true ? "已到" : "未到") 距上帧=\(hbGapMs)ms 观看端=\(SessionPolicy.shared.onlineViewerCount)台")
+        // ⭐ §53.16：必须带 **P2P 会话数/已连接数** —— 上一版只有"观看端N台"（那是 PC 在线心跳，
+        //   跟会话通没通是两回事），实测遇到「采集正常、推送=0fps、PC 没画面」时，光看这行
+        //   根本判断不出是"PC 没来请求"还是"会话建了没连上"，只能回头翻 [P2P] 行。
+        let p2pInfo: String
+        if currentConnMode == .p2p {
+            let total = p2pManager.viewerCount
+            let live = p2pManager.connectedViewerPeerConnections.count
+            p2pInfo = " P2P会话=\(total)(已连\(live))"
+        } else {
+            p2pInfo = ""
+        }
+        print("💓 [推流诊断] 链路=\(currentConnMode) 编码=\(H265Support.shared.effectiveCodecString) 推送=\(WebSocketManager.publishingSendFps)fps 码率=\(WebSocketManager.publishingKbps)kbps 网络=\(WebSocketManager.networkQuality) 首帧=\(frameThrottler?.hasReceivedFrame == true ? "已到" : "未到") 距上帧=\(hbGapMs)ms 观看端=\(SessionPolicy.shared.onlineViewerCount)台\(p2pInfo)")
 
         guard let throttler = frameThrottler, throttler.hasReceivedFrame else { return }  // 从未出过帧=还在启动，不误判
         let last = throttler.lastCaptureFrameAt

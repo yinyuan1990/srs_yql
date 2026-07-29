@@ -422,15 +422,21 @@ final class P2PManager: NSObject {
     func createViewerSession(for pcId: String, requestId: Int64? = nil) {
         guard let ds = dataSource else { print("❌ [P2P] dataSource 为空"); return }
 
-        // ⭐ §53.3① 幂等化：判据从「PeerConnection 状态」换成「距上次给这个 PC 发 Offer 多久」。
+        // ⭐ §53.3① / §53.16 幂等化：判据 = 「距上次给这个 PC 发 Offer 多久」，**纯时间窗**。
         //   窗口内 = PC 的重发与我们的 Offer 在路上交错（真竞态）→ 忽略；
-        //   窗口外 = PC 确实没拿到 Offer（或是新登录的 PC 撞上幽灵会话）→ 一律拆旧建新、重发 Offer。
-        //   requestId 变化视同"新请求"，直接跳过忽略分支（旧版 PC 不带该字段时只靠时间窗）。
+        //   窗口外 = PC 确实没拿到 Offer（或新登录的 PC 撞上幽灵会话）→ 拆旧建新、重发 Offer。
+        //
+        //   ⚠️ §53.16 回归修复：**不要再拿 requestId 判断"是不是同一轮请求"**。
+        //   PC 侧的 requestId 是**逐条消息**生成的毫秒时间戳（`websocketclient.cpp`），
+        //   连它自己 1.5s 一次的重发都会换新值 —— 一旦把"id 变了"当成"新一轮"，
+        //   这个时间窗就等于没有：每次重试都拆掉刚发完 Offer 的会话重建，
+        //   PC 拿着 Offer#1 回的 Answer 落到会话#2 上，SDP 对不上 → 永远连不通，
+        //   现象就是 iOS 采集一切正常但 `推送=0fps 码率=0kbps`、PC 端不出画面。
+        //   requestId 现在只用于日志关联。
         if let existing = viewerSessions[pcId] {
             let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
-            let sameRequest = (requestId == nil) || (requestId == lastRequestId[pcId])
-            if sameRequest && sinceOffer < duplicateRequestWindowSec {
-                print("⚠️ [P2P] PC \(pcId) 重复请求（距上次Offer \(String(format: "%.1f", sinceOffer))s，reqId=\(requestId.map(String.init) ?? "无")）→ 忽略")
+            if sinceOffer < duplicateRequestWindowSec {
+                print("⚠️ [P2P] PC \(pcId) 重复请求（距上次Offer \(String(format: "%.1f", sinceOffer))s，reqId=\(requestId.map(String.init) ?? "无")）→ 忽略，等 Answer")
                 return
             }
             print("♻️ [P2P] PC \(pcId) 重新请求（state=\(existing.connectionState.rawValue) 距上次Offer=\(String(format: "%.1f", sinceOffer))s reqId=\(requestId.map(String.init) ?? "无")）→ 拆旧建新")
