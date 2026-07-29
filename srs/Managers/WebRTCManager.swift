@@ -3403,7 +3403,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 Task { @MainActor in self?.publishHealthCheck("切网") }
             }
         }
-        p2pManager.onViewerPermanentlyFailed = { _ in /* no-op：P2P 模式下不回落 SRS */ }
+        // ⭐ §53.19：P2P 已改为**纯局域网直连**（无 TURN/STUN，见 P2PManager.createViewerSession）。
+        //   非同 WiFi 的会话没有任何可用候选、ICE 必然失败 —— 失败重试耗尽就是"确认不在局域网"，
+        //   必须回落 SRS（原来这里 no-op 是"连接方式静态"时代的口径，现在会造成永远黑屏）。
+        //   forceSrsForSession 自带冷却/钉住，本次会话不会再回 P2P。
+        p2pManager.onViewerPermanentlyFailed = { pcId in
+            SessionPolicy.shared.forceSrsForSession(reason: "P2P ICE 失败重试耗尽(\(pcId))，无中继=确认非局域网")
+        }
         // ⭐ 切网重连：置"重连中"（左上角显示），PC 重连成功后由 viewerConnected 心跳清除
         p2pManager.onNetworkSwitchReconnect = { [weak self] in
             DispatchQueue.main.async {

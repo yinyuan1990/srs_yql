@@ -457,34 +457,22 @@ final class P2PManager: NSObject {
 
         let cfg = RTCConfiguration()
         cfg.sdpSemantics = .unifiedPlan
-        let servers = loadIceServers()
-        if !servers.isEmpty {
-            cfg.iceServers = servers.map { s in
-                if let u = s.username, let c = s.credential {
-                    return RTCIceServer(urlStrings: s.urls, username: u, credential: c)
-                }
-                return RTCIceServer(urlStrings: s.urls)
-            }
-            let turn = servers.filter { $0.urls.contains(where: { $0.hasPrefix("turn:") }) }.count
-            print("🔔 [P2P] ICE 服务器 \(servers.count) 个 (TURN=\(turn))")
-        } else {
-            cfg.iceServers = [
-                RTCIceServer(urlStrings: ["stun:stun.miwifi.com:3478"]),
-                RTCIceServer(urlStrings: ["stun:stun.qq.com:3478"]),
-                RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
-            ]
-        }
+        // ⭐⭐ §53.19（用户拍板）：P2P **只做局域网直连**——彻底去掉 TURN 中继与 STUN 打洞。
+        //   iceServers 置空 → 只会产生 host 候选（本机局域网 IP）；
+        //   · 同一 WiFi：host↔host 直连秒连，0 跳、不吃公网/服务器带宽（P2P 唯一该用的场景）；
+        //   · 不在同一 WiFi：没有 srflx/relay 候选可用 → ICE 必然失败 → 回落 SRS。
+        //   这样从 ICE 层根断了"非局域网还假装 P2P（实走中继）"——不再依赖上层网段预判是否准。
+        //   loadIceServers()/effectiveForceRelay()/qualityRelayPeerIds 等中继逻辑保留但不再生效，便于回滚。
+        cfg.iceServers = []
         cfg.continualGatheringPolicy = .gatherContinually
         cfg.iceBackupCandidatePairPingInterval = 2000
         cfg.iceCandidatePoolSize = 2
         // P0-2：补齐 ICE 稳定性参数
         cfg.iceConnectionReceivingTimeout = 8000          // 8s 无收包才判 disconnected，弱网更耐抖
-        cfg.shouldPresumeWritableWhenFullyRelayed = true  // 全 relay 时预判可写，加快建连
-        let useRelay = effectiveForceRelay(for: pcId)
-        cfg.iceTransportPolicy = useRelay ? .relay : .all
+        cfg.iceTransportPolicy = .all   // 无 STUN/TURN，实际只剩 host 候选（=局域网直连）
         cfg.bundlePolicy = .maxBundle
         cfg.rtcpMuxPolicy = .require
-        print("🔔 [P2P] 创建会话 \(pcId)，传输策略=\(useRelay ? "relay(TURN)" : "all(直连优先)")")
+        print("🔔 [P2P] 创建会话 \(pcId)，传输策略=局域网直连(host-only，无 TURN/STUN)")
 
         let cons = RTCMediaConstraints(mandatoryConstraints: nil,
                                        optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
