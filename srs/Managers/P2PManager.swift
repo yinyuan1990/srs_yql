@@ -426,6 +426,14 @@ final class P2PManager: NSObject {
                 print("❌ [P2P] 创建 Offer 失败 \(pcId): \(err?.localizedDescription ?? "")")
                 return
             }
+            // ⭐ §53.24：幽灵 Offer 抑制——Offer 创建是异步的，期间会话可能已被拆除
+            //  （PC 断开 HANGUP / 新 REQUEST 拆旧建新）。过期会话的 Offer 发出去会与
+            //   新会话的 Offer 交错，PC 每收一个新 ufrag 就重建一次 pipeline → 重建风暴，
+            //   两端互相打断永远连不上（2026-07-30 01:46 实测：700ms 内 PC 收到 4 个 Offer）。
+            guard self.viewerSessions[pcId] === newPC else {
+                print("🗑 [P2P] 会话已拆除，丢弃过期 Offer(\(pcId))")
+                return
+            }
             newPC.setLocalDescription(sdp) { _ in }
             // ⭐ H265：用实际 Offer SDP 校准生效编码——若声称 H265 但 SDP 无 H265（本机不能编码 H265），
             //   如实降级 h264，CONFIG_STATE 随之报 h264，PC 建 H264 管线，画面退化为 H264 而非黑屏。
@@ -493,6 +501,12 @@ final class P2PManager: NSObject {
             pendingIceRestart.insert(pcId)
             pc.offer(for: cons) { [weak self, weak pc] sdp, _ in
                 guard let self = self, let pc = pc, let sdp = sdp else { return }
+                // ⭐ §53.24：幽灵 Offer 抑制（与 createViewerSession 同款）——
+                //   ICE Restart 的 Offer 也可能在异步创建期间赶上会话被拆除。
+                guard self.viewerSessions[pcId] === pc else {
+                    print("🗑 [P2P] 会话已拆除，丢弃过期 ICE Restart Offer(\(pcId))")
+                    return
+                }
                 pc.setLocalDescription(sdp) { _ in }
                 WebSocketManager.shared.sendWebRTCSignalingSDP(sdpType: "offer", sdp: sdp.sdp, toDevice: pcId)
                 print("🔄 [P2P] ICE Restart Offer 已发送 \(pcId) (\(cur + 1)/\(self.maxICERetries))")
