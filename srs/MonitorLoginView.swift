@@ -681,6 +681,10 @@ struct MonitorLoginView: View {
                     UserDefaults.standard.set(codecP2p, forKey: VideoCodecOption.storageKey)
                     UserDefaults.standard.set(codecSrs, forKey: VideoCodecOption.srsStorageKey)
 
+                    // ⭐ §53.20.2：本机公网出口 IP（后端按请求来源回填）。SessionPolicy 拿它与
+                    //   PC 上报的 publicIp 比对，防 /24 网段号撞车误判同 WiFi。老后端无此字段 → 存空。
+                    UserDefaults.standard.set(loginResponse.clientIp ?? "", forKey: "public_ip")
+
                     print("✅ 连接方式(后端): \(connectMode), 编码默认(后端) P2P=\(codecP2p)/SRS=\(codecSrs), forceRelay: \(loginResponse.forceRelay ?? false), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4), iceServers: \(loginResponse.iceServers?.count ?? 0)个")
                     
                     if let trialInfo = loginResponse.trialInfo {

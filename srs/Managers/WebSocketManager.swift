@@ -640,6 +640,8 @@ extension WebSocketManager: SwiftStompDelegate {
                 //   **同 WiFi 也永远走 SRS，P2P 彻底不生效**（2026-07-28 实测：iOS 废了、Android 正常，
                 //   因为 Android 是在自己的 WebSocketManager 里直接解析 JSON，没经过这层通知转发）。
                 let localIps = (msgDict?["localIps"] as? String) ?? ""
+                // ⭐ §53.20.2：PC 的公网出口 IP（防 /24 网段号撞车误判同 WiFi）。老 PC 缺省=空。
+                let publicIp = (msgDict?["publicIp"] as? String) ?? ""
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(
                         name: NSNotification.Name("PCPresence"),
@@ -650,7 +652,8 @@ extension WebSocketManager: SwiftStompDelegate {
                             "h265Recv": h265Recv,
                             "kernel": kernel,
                             "pcUsername": pcUsername,
-                            "localIps": localIps
+                            "localIps": localIps,
+                            "publicIp": publicIp
                         ]
                     )
                 }

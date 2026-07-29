@@ -444,6 +444,14 @@ final class P2PManager: NSObject {
         }
         if let rid = requestId { lastRequestId[pcId] = rid }
 
+        // ⭐ §53.20.3 P2P=单人直连，先到先得：已有**别的 PC** 的会话时，后来者直接拒绝并提示，
+        //   绝不拆先来者的会话（同 pcId 的重复/重连请求已在上面的去重窗处理）。
+        if let occupied = viewerSessions.keys.first(where: { $0 != pcId }) {
+            print("🚧 [P2P] 单人直连已被 \(occupied) 占用 → 拒绝后来的 \(pcId)（single_mode_occupied）")
+            WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_REJECT", reason: "single_mode_occupied", toDevice: pcId)
+            return
+        }
+
         guard viewerSessions.count < maxViewers else {
             print("❌ [P2P] 已达最大观看人数(\(maxViewers))，拒绝 \(pcId)")
             WebSocketManager.shared.sendWebRTCSignaling(type: "WEBRTC_REJECT", reason: "max_viewers_reached", toDevice: pcId)

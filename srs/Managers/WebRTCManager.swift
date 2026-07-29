@@ -1420,14 +1420,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         let kernel = (notification.userInfo?["kernel"] as? String) ?? "unknown"
         let ipsStr = (notification.userInfo?["localIps"] as? String) ?? ""
         let localIps = ipsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        let publicIp = (notification.userInfo?["publicIp"] as? String) ?? ""
 
         // ⭐ §53.4：观看端状态的唯一存放处是 SessionPolicy（决策要用同一份输入），
         //   这里只把结果镜像成 @Published 给左上角状态条用。
         let isNew = SessionPolicy.shared.updatePresence(pcId: pcId, viewing: viewing,
                                                         h265Recv: h265Recv, kernel: kernel,
-                                                        localIps: localIps)
+                                                        localIps: localIps, publicIp: publicIp)
         if isNew {
-            print("🖥 [PC在线] \(pcId) 上线（内核=\(kernel) 能收H265=\(h265Recv) 在看=\(viewing) 网段=\(localIps)）")
+            print("🖥 [PC在线] \(pcId) 上线（内核=\(kernel) 能收H265=\(h265Recv) 在看=\(viewing) 网段=\(localIps) 公网=\(publicIp.isEmpty ? "未报" : publicIp)）")
         }
         refreshPCPresenceState()
     }
@@ -4179,6 +4180,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     func renegotiateSession(reason: String) {
         guard isPublishing else {
             print("🧭 [链路决策] 收到重新协商(\(reason))但当前未推流，忽略")
+            SessionPolicy.shared.abortRenegotiation()   // §53.20.1：清标记，防污染下次手动推流
             return
         }
         print("🧭 [链路决策] 执行重新协商：\(reason) —— 停推流 → 重新决策 → 起推流")
