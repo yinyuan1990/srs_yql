@@ -93,6 +93,9 @@ final class P2PManager: NSObject {
     /// 取 2s：PC 侧重发间隔 1.5s（gstplayer.cpp P2P_VIEW_REQUEST_RETRY_INTERVAL_MS），
     /// 给上一个 Offer 留出到达时间，又不至于让幽灵会话长期吞请求。
     private let duplicateRequestWindowSec: Double = 2.0
+    /// ⭐ §54：**同 epoch** 的重发到达且会话未连通、距上次 Offer 超过此秒数 → 判定 Offer 已丢失，
+    /// 拆旧重建重发（PC 收到 Offer 就会停止重发，所以"同轮次重发还在来"本身就是没送达的证据）。
+    private let staleOfferRebuildSec: Double = 3.0
     /// PC 带来的 requestId（每次 connectP2P/重发递增，旧版 PC 不带）。仅用于日志与"变了就必须重建"。
     private var lastRequestId: [String: Int64] = [:]
     /// ⭐⭐ §53.25：会话 epoch——PC 每轮协商生成一个（重发不换、重建才换）。
@@ -232,9 +235,9 @@ final class P2PManager: NSObject {
 
     /// ⭐ §53.13：回前台 / WS 重连后的会话自检。
     ///
-    /// App 被挂到后台期间 socket 会死、ICE 也会断；醒来时**观看端那边早就放弃重试了**
-    ///（PC 的 WEBRTC_REQUEST 只重发 5 次共 ~7.5s），于是没有任何人再发起重连，
-    /// PC 上就永远停在最后一帧。这里把已经死掉的会话拆掉并发
+    /// App 被挂到后台期间 socket 会死、ICE 也会断；醒来时观看端可能早已停止等待
+    ///（§54 起 PC 的 WEBRTC_REQUEST 已改为 1.5s 常驻重发不放弃，但本自检仍保留：
+    ///  它能在 PC 还没来得及重发时就主动拆死会话让重连更快，也兜住旧版 PC）。这里把已经死掉的会话拆掉并发
     /// HANGUP(network_switch_reconnect)——PC 已有处理：不拆 pipeline、自动重发 REQUEST，
     /// 手机再回一个全新 Offer（与切网恢复同一套动作，复用已验证的路径）。
     ///
@@ -377,11 +380,26 @@ final class P2PManager: NSObject {
         if let existing = viewerSessions[pcId] {
             if let e = epoch, let cur = sessionEpoch[pcId] {
                 if e == cur {
-                    print("⚠️ [P2P] PC \(pcId) 同轮次重发(epoch=\(e)) → 幂等忽略，等 Answer")
-                    return
+                    // ⭐ §54（2026-07-31）：PC 侧等 Offer 已改为**同 epoch 1.5s 常驻重发（永不放弃）**。
+                    //   PC 只在「没收到 Offer」时才会重发——所以同轮次重发还在到达 = 上一份 Offer
+                    //   丢了/没送到。若无条件幂等忽略，这条会话就成了吞掉全部重发的幽灵会话。
+                    //   规则：会话未连通 且 距上次发 Offer > 3s → 拆旧重建、重发全新 Offer；
+                    //   （已连通的会话不受影响——PC 连上后不会再发同轮次 REQUEST；
+                    //     3s 窗口内的重发仍幂等忽略，给在途 Offer/Answer 留出往返时间。）
+                    let st = existing.iceConnectionState
+                    let connected = (st == .connected || st == .completed)
+                    let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
+                    if !connected && sinceOffer > staleOfferRebuildSec {
+                        print("♻️ [P2P] PC \(pcId) 同轮次重发但会话 \(String(format: "%.1f", sinceOffer))s 未连通(ice=\(st.rawValue)) → 拆旧重发 Offer（§54 防幽灵会话吞常驻重发）")
+                        removeViewerSession(pcId, notifyPC: false)
+                    } else {
+                        print("⚠️ [P2P] PC \(pcId) 同轮次重发(epoch=\(e)) → 幂等忽略，等 Answer")
+                        return
+                    }
+                } else {
+                    print("♻️ [P2P] PC \(pcId) 新轮次请求(epoch \(cur)→\(e)) → 拆旧建新")
+                    removeViewerSession(pcId, notifyPC: false)
                 }
-                print("♻️ [P2P] PC \(pcId) 新轮次请求(epoch \(cur)→\(e)) → 拆旧建新")
-                removeViewerSession(pcId, notifyPC: false)
             } else {
                 let sinceOffer = Date().timeIntervalSince(lastOfferSentAt[pcId] ?? .distantPast)
                 if sinceOffer < duplicateRequestWindowSec {
