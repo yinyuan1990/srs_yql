@@ -685,6 +685,10 @@ struct MonitorLoginView: View {
                     //   PC 上报的 publicIp 比对，防 /24 网段号撞车误判同 WiFi。老后端无此字段 → 存空。
                     UserDefaults.standard.set(loginResponse.clientIp ?? "", forKey: "public_ip")
 
+                    // ⭐ 需求#13（2026-07-31）：后端下发的 iOS 最新版本号（总后台可配，空=不提示）。
+                    //   进推流页前 ContentView 与本地 CFBundleShortVersionString 比对，不一致弹提示（软提示，可继续用）。
+                    UserDefaults.standard.set(loginResponse.latestVersions?.ios ?? "", forKey: "latest_ios_version")
+
                     print("✅ 连接方式(后端): \(connectMode), 编码默认(后端) P2P=\(codecP2p)/SRS=\(codecSrs), maxP2PViewers: \(loginResponse.maxP2PViewers ?? 4)（P2P=纯局域网直连，无中继/打洞）")
                     
                     if let trialInfo = loginResponse.trialInfo {

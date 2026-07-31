@@ -591,8 +591,9 @@ struct ContentView: View {
     //   绿=在线且出画面；橙=在线但没画面（→ 查拉流/协商，不是账号或网络问题）；红=对方没上线。
     private var pcStatusText: String {
         if !rtc.pcOnline && !rtc.viewerConnected { return "PC未上线" }
-        let suffix = rtc.pcOnlineCount > 1 ? "×\(rtc.pcOnlineCount)" : ""
-        return rtc.viewerConnected ? "PC在线·在看\(suffix)" : "PC在线·未出画面\(suffix)"
+        // ⭐ 需求#4（2026-07-31）：观看端数量始终显示（以前 >1 台才显示 ×N，用户看不到数量）
+        let n = max(rtc.pcOnlineCount, 1)
+        return rtc.viewerConnected ? "PC在线(\(n)台)·在看" : "PC在线(\(n)台)·未出画面"
     }
     private var pcStatusColor: Color {
         if !rtc.pcOnline && !rtc.viewerConnected { return .red }
@@ -633,6 +634,11 @@ struct ContentView: View {
     @State private var showTrialEndAlert: Bool = false
     @State private var trialEndMessage: String = ""
     @State private var isTrialEnded: Bool = false
+
+    // ⭐ 需求#13（2026-07-31）：版本更新提示（登录响应带的最新版本 ≠ 本地版本 → 推流前弹一次，软提示）
+    @State private var showUpdatePrompt: Bool = false
+    @State private var updatePromptText: String = ""
+    @State private var updatePromptShown: Bool = false
 
     /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
     private let showCaptureExperimentPanel = false
@@ -1019,6 +1025,17 @@ struct ContentView: View {
                 // 🔥 不启动摄像头和推流
                 return
             }
+
+            // ⭐ 需求#13：推流前版本检查（软提示，一次会话只弹一次；后台未配置=空串则跳过）
+            let latestIos = UserDefaults.standard.string(forKey: "latest_ios_version") ?? ""
+            let localVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+            if !updatePromptShown && !latestIos.isEmpty && !localVer.isEmpty && latestIos != localVer {
+                updatePromptShown = true
+                updatePromptText = "发现新版本 v\(latestIos)（当前 v\(localVer)），请更新后使用"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.showUpdatePrompt = true
+                }
+            }
             
             // 延迟启动摄像头
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1209,6 +1226,12 @@ struct ContentView: View {
             }
         } message: {
             Text(trialEndMessage.isEmpty ? "试用已结束，请扫码绑定设备后继续使用" : trialEndMessage)
+        }
+        // ⭐ 需求#13：版本更新软提示（不拦截推流，知道了即关）
+        .alert("发现新版本", isPresented: $showUpdatePrompt) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(updatePromptText)
         }
         // 激活页面
         .sheet(isPresented: $showingActivation, onDismiss: {

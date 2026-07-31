@@ -236,15 +236,16 @@ struct RegisterView: View {
                                         }
                                         .frame(width: 24, height: 24)
                                         
-                                        SecureField("请输入绑定码", text: $secondaryPassword)
+                                        // ⭐ 需求#6（2026-07-31）：统一叫「绑定密码」
+                                        SecureField("请输入绑定密码", text: $secondaryPassword)
                                             .font(.system(size: 16))
                                     }
                                     .padding(.vertical, 16)
                                     
                                     Divider().background(Color(hex: "F0F0F0"))
 
-                                    // ⭐ 提示：绑定码=绑定电脑用的独立密码，可与登录密码一致（加大加粗醒目提示）
-                                    Text("💡 绑定电脑使用的独立密码，可以和登录密码一致")
+                                    // ⭐ 需求#6：绑定密码说明（醒目提示）
+                                    Text("💡 用于绑定PC端的密码，可以和登录密码一样")
                                         .font(.system(size: 15, weight: .bold))
                                         .foregroundColor(Color(hex: "FF7A00"))
                                         .frame(maxWidth: .infinity, alignment: .leading)

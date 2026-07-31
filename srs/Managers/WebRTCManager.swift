@@ -1859,7 +1859,9 @@ final class WebRTCManager: NSObject, ObservableObject {
     func setCaptureFrameRate(shutterSpeed: Int, forceApply: Bool = false) {
         let oldShutter = cjfpsValue
         // 🔥 限制范围 60-600（后端下发的实际值）
-        cjfpsValue = max(60, min(600, shutterSpeed))
+        // ⭐ 需求#10（2026-07-31）：快门上限 600→1000（后台曝光FPS配置已放宽到 1000，
+        //   这里的硬钳制曾把下发的 1000 压回 600，是"后端设了 1000 拉不上去"的设备端一环）
+        cjfpsValue = max(60, min(1000, shutterSpeed))
         
         print("📸 [快门速度] cjfps: 1/\(oldShutter)s → 1/\(cjfpsValue)s")
         
