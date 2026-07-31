@@ -345,18 +345,36 @@ struct ActivationView: View {
                     .font(.system(size: 14))
                     .foregroundColor(Color(hex: "808080"))
                 
+                // ⭐ 2026-07-31 统一命名：产品口径 4 等级 5 档位（等级1对应超低网+高清两个档位）。
+                //   原"白银/黄金会员"文案是陈年占位，与实际等级体系完全对不上。
                 VStack(spacing: 0) {
                     LevelInfoRow(
-                        level: "白银会员",
-                        description: "标清、高清画质",
-                        color: .gray
+                        level: "高清会员",
+                        description: "超低网、高清档位",
+                        color: .green
                     )
                     
                     Divider().padding(.leading, 24)
                     
                     LevelInfoRow(
-                        level: "黄金会员",
-                        description: "标清、高清、超高帧、超清画质",
+                        level: "超清会员",
+                        description: "超低网、高清、超清档位",
+                        color: .blue
+                    )
+                    
+                    Divider().padding(.leading, 24)
+                    
+                    LevelInfoRow(
+                        level: "超高清会员",
+                        description: "超低网、高清、超清、超高清档位",
+                        color: .yellow
+                    )
+                    
+                    Divider().padding(.leading, 24)
+                    
+                    LevelInfoRow(
+                        level: "超高帧会员",
+                        description: "全部档位（含超高帧）",
                         color: .orange
                     )
                 }
@@ -432,12 +450,13 @@ struct ActivationView: View {
                     UserDefaults.standard.set(response.levelName, forKey: "activation_level_name")
                     UserDefaults.standard.set(response.expireAt, forKey: "activation_expire_at")
                     
-                    // 根据等级设置可用画质
-                    if response.level == 1 {
-                        UserDefaults.standard.set(["标清", "高清"], forKey: "quality_access")
-                    } else if response.level == 2 {
-                        UserDefaults.standard.set(["标清", "高清", "超高帧", "超清"], forKey: "quality_access")
-                    }
+                    // ⭐ 2026-07-31 统一命名：按产品口径生成可用档位（等级1=超低网+高清两个档位）。
+                    //   原来只写了等级1/2且用的是错位老命名（含"超高帧"错挂在等级2上）。
+                    var access = ["超低网", "高清"]
+                    if response.level >= 2 { access.append("超清") }
+                    if response.level >= 3 { access.append("超高清") }
+                    if response.level >= 4 { access.append("超高帧") }
+                    UserDefaults.standard.set(access, forKey: "quality_access")
                     
                     print("✅ 激活成功: level=\(response.level), levelName=\(response.levelName)")
                     
