@@ -153,8 +153,12 @@ final class P2PManager: NSObject {
             forName: .webSocketDidReconnect, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self = self, !self.viewerSessions.isEmpty else { return }
-            print("🔌 [P2P] WebSocket 重连，重连所有 P2P 会话")
-            self.restartAllIceForNetworkSwitch()
+            // ⭐ 需求#9（2026-07-31）：WS 闪断重连 ≠ 媒体断。P2P 媒体是局域网直连、不经服务器，
+            //   公网抖一下 WS 重连成功时 ICE 往往还活着——旧逻辑无条件拆所有会话重建，
+            //   等于自己把好画面掐灭几秒。改用选择性恢复：ICE 活着的会话绝不动，死的才拆重连
+            //  （真切网时 ICE 很快变 disconnected/failed，照样会被拆重建，该场景不受影响）。
+            print("🔌 [P2P] WebSocket 重连 → 选择性恢复（ICE 存活的会话保画面不拆）")
+            self.recoverSessionsIfBroken(reason: "WS重连")
         }
         print("✅ [P2P] 已注册信令观察者")
     }
