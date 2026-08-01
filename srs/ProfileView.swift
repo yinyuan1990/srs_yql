@@ -475,7 +475,9 @@ struct ProfileView: View {
     }
     
     // 🔥 等级显示文本
-    // 1=高清, 2=超清, 3=超高清, 4=超高帧
+    // ⭐⭐ 2026-08-01 用户拍板【故意对调，勿"修复"】：等级4 对外显示「超高清」、等级3 对外显示「超高帧」。
+    //   与总后台/后端的内部命名（3=超高清 4=超高帧）刻意不同——这是产品对外展示口径，
+    //   顶级档（等级4）对客户叫"超高清"。主页档位仅调换了显示位置（名称未动），与此处互不影响。
     private var levelDisplayText: String {
         let activated = UserDefaults.standard.bool(forKey: "activated")
         let level = UserDefaults.standard.integer(forKey: "activation_level")
@@ -487,8 +489,8 @@ struct ProfileView: View {
         }
 
         switch level {
-        case 4: return "超高帧"
-        case 3: return "超高清"
+        case 4: return "超高清"   // ⭐ 故意：等级4 对外显示超高清（内部命名是超高帧）
+        case 3: return "超高帧"   // ⭐ 故意：等级3 对外显示超高帧（内部命名是超高清）
         case 2: return "超清"
         case 1: return "高清"
         default: return "试用用户"
