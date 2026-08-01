@@ -290,8 +290,9 @@ struct QualityRadioButton: View {
     
     private var profileName: String {
         switch profile {
-        case .p4k: return "超高清"
-        case .ultra: return "超高帧"
+        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
+        case .p4k: return "超高帧"
+        case .ultra: return "超高清"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
@@ -462,8 +463,9 @@ struct ControlPanelView: View {
     // 档位名称（简短）
     private func profileName(_ p: LadderProfile) -> String {
         switch p {
-        case .p4k: return "超高清"
-        case .ultra: return "超高帧"
+        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
+        case .p4k: return "超高帧"
+        case .ultra: return "超高清"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
@@ -653,8 +655,9 @@ struct ContentView: View {
     // 档位名称
     private func profileDisplayName(_ p: LadderProfile) -> String {
         switch p {
-        case .p4k: return "超高清"
-        case .ultra: return "超高帧"
+        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
+        case .p4k: return "超高帧"
+        case .ultra: return "超高清"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
