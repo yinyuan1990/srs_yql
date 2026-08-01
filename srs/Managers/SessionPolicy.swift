@@ -127,7 +127,14 @@ final class SessionPolicy {
                 return isNew
             }
             let base = isNew ? "PC上线(\(pcId))" : "PC网络/能力变化(\(pcId))"
-            evaluateForRenegotiate(trigger: pending ? base + " + 本机切过网" : base)
+            let handled = evaluateForRenegotiate(trigger: pending ? base + " + 本机切过网" : base)
+            // ⭐⭐ 2026-08-01 修「切网后卡死在 P2P、切不到 SRS」：切网标记是唯一的评估触发源
+            //  （PC 没动，它心跳里的字段永远不变、inputChanged 永远 false）。评估若被 5s 冷却
+            //   挡下（快速来回切网必撞），标记已在上面被消费——不还回去就**再也没有任何东西
+            //   触发重评估**，跨网了还钉在 P2P 上黑屏。还回去后 PC 心跳 1s 一条，冷却一过自动重试。
+            if pending && !handled {
+                pendingNetworkChange = true
+            }
         }
         return isNew
     }
@@ -295,21 +302,25 @@ final class SessionPolicy {
 
     // MARK: - 重新协商
 
-    /// 输入变了 → 看结果会不会变；会变才回调上层重启推流（带冷却与次数上限）
-    private func evaluateForRenegotiate(trigger: String) {
-        guard let decided = current else { return }      // 还没推流，等 decideForPublish
-        guard !pinnedToSrs else { return }
+    /// 输入变了 → 看结果会不会变；会变才回调上层重启推流（带冷却与次数上限）。
+    /// ⭐ 2026-08-01 返回值：true=已处理完毕（协商已发起/结果不变/无需处理），
+    ///   false=**被冷却挡下、需要稍后重试**——调用方（updatePresence 的切网标记路径）据此把
+    ///   pendingNetworkChange 还回去，否则切网评估机会被冷却吞掉后永远不会再触发（卡死在旧链路）。
+    @discardableResult
+    private func evaluateForRenegotiate(trigger: String) -> Bool {
+        guard let decided = current else { return true }      // 还没推流，decideForPublish 会用最新输入重算
+        guard !pinnedToSrs else { return true }               // 本次会话已钉死，无需再评估
 
         let fresh = compute(deviceCanEncodeH265: H265Support.deviceCanEncodeHEVC())
         guard fresh != decided else {
             log("输入变化(\(trigger))但决策结果不变（\(decided.mode.rawValue)+\(decided.codec.title)），不重启推流")
-            return
+            return true
         }
 
         let since = Date().timeIntervalSince(lastRenegotiateAt)
         guard since >= renegotiateCooldownSec else {
-            log("⏳ 需要重新协商(\(trigger))但距上次仅 \(String(format: "%.1f", since))s，等冷却")
-            return
+            log("⏳ 需要重新协商(\(trigger))但距上次仅 \(String(format: "%.1f", since))s，等冷却后重试")
+            return false   // ⭐ 冷却挡下 ≠ 处理完，调用方须保留切网标记重试
         }
         renegotiateCount += 1
         if renegotiateCount > maxRenegotiatePerSession {
@@ -319,12 +330,13 @@ final class SessionPolicy {
             lastRenegotiateAt = Date()
             renegotiationInFlight = true   // §53.20.1：重启后的 decideForPublish 保留钉住/计数
             onRenegotiateNeeded?("协商次数达上限→固定SRS")
-            return
+            return true
         }
         lastRenegotiateAt = Date()
         log("🔄 重新协商(\(trigger))：\(decided.mode.rawValue)+\(decided.codec.title) → \(fresh.mode.rawValue)+\(fresh.codec.title)（停推流→重决策→起推流）")
         renegotiationInFlight = true       // §53.20.1
         onRenegotiateNeeded?(trigger)
+        return true
     }
 
     /// 设备自己切网（WiFi↔蜂窝/换 WiFi）由 WebRTCManager 的网络监听调用。
