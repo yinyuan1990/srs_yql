@@ -119,11 +119,14 @@ final class SessionPolicy {
         let pending = pendingNetworkChange
         if pending { pendingNetworkChange = false }
         if inputChanged || pending {
-            // ⭐ §53.20.3 单人模式先到先得：P2P 会话进行中，**新上线**的 PC 不触发重新协商
-            //  （不能让后来者把先来者正看着的直连会话顶掉切 SRS）——它的请求由 P2P 层
-            //   回 WEBRTC_REJECT(single_mode_occupied) 提示占线。本机切网(pending)例外照常评估。
-            if isNew && !pending && current?.mode == .p2p {
-                log("🚧 单人直连进行中，新上线PC(\(pcId))不打断当前会话（其请求由 P2P 层拒绝提示占线）")
+            // ⭐ §53.20.3 单人模式先到先得：P2P 会话进行中，**其它观看端的任何 presence 变化都不触发
+            //   重新协商**——不只是"新上线"。此前只挡 isNew，导致第二台 PC 的后续心跳字段一变
+            //   （或它跨网）就把 compute() 拖去"非同网段→SRS"，把正在 P2P 的第一台踢下来切 SRS，
+            //   第二台被拒绝走了又切回 P2P → P2P↔SRS 来回翻（用户实测"混乱"，PC 日志 connectstype 1↔0）。
+            //   单人模式=只认先来的那台；其它 PC 由 P2P 层回 single_mode_occupied 提示占线。
+            //   本机切网(pending)例外照常评估；真正的 P2P 对端变差由 ICE 失败 → forceSrsForSession 兜底。
+            if !pending && current?.mode == .p2p {
+                log("🚧 单人直连进行中，观看端(\(pcId))presence 变化不触发重协商（单人模式；其它 PC 由 P2P 层拒绝占线）")
                 return isNew
             }
             let base = isNew ? "PC上线(\(pcId))" : "PC网络/能力变化(\(pcId))"
