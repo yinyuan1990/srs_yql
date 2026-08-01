@@ -346,10 +346,18 @@ struct MonitorLoginView: View {
                     Spacer()
                     
                     // 🔥 隐藏入口：点击底部区域跳转设备ID页面
+                    // ⭐ 2026-08-01：底部显示当前版本号（点击仍是设备ID隐藏入口，功能不变）
                     Button(action: { showDeviceIdPage = true }) {
-                        Color.clear
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 60)
+                        VStack {
+                            Spacer()
+                            Text("版本 v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "B0B0B0"))
+                                .padding(.bottom, 12)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 60)
+                        .contentShape(Rectangle())
                     }
                 }
             }
