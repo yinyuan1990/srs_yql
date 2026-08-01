@@ -290,9 +290,8 @@ struct QualityRadioButton: View {
     
     private var profileName: String {
         switch profile {
-        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
-        case .p4k: return "超高帧"
-        case .ultra: return "超高清"
+        case .p4k: return "超高清"
+        case .ultra: return "超高帧"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
@@ -463,9 +462,8 @@ struct ControlPanelView: View {
     // 档位名称（简短）
     private func profileName(_ p: LadderProfile) -> String {
         switch p {
-        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
-        case .p4k: return "超高帧"
-        case .ultra: return "超高清"
+        case .p4k: return "超高清"
+        case .ultra: return "超高帧"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
@@ -502,7 +500,8 @@ struct ControlPanelView: View {
         HStack(spacing: 16) {
             // 档位切换（清晰度）
             HStack(spacing: 6) {
-                ForEach([LadderProfile.standard, .high, .p4k, .ultra, .low], id: \.self) { profile in
+                // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
+                ForEach([LadderProfile.standard, .high, .ultra, .p4k, .low], id: \.self) { profile in
                     let selected = (rtc.currentProfile == profile)
                     let unlocked = isProfileUnlocked(profile)
                     Button(action: {
@@ -655,9 +654,8 @@ struct ContentView: View {
     // 档位名称
     private func profileDisplayName(_ p: LadderProfile) -> String {
         switch p {
-        // ⭐ 2026-08-01 用户要求：主页档位标签 超高清/超高帧 互换位置（p4k 顶级显示"超高帧"、ultra 显示"超高清"）
-        case .p4k: return "超高帧"
-        case .ultra: return "超高清"
+        case .p4k: return "超高清"
+        case .ultra: return "超高帧"
         case .high: return "超清"
         case .standard: return "高清"
         case .low: return "超低网"
@@ -920,7 +918,8 @@ struct ContentView: View {
                         // 档位（可点击切换UI高亮，不发后端）+ 摄像头切换
                         HStack(spacing: 6) {
                             // 档位按钮（仅UI切换，不发送后端）
-                            ForEach([LadderProfile.low, .standard, .high, .p4k, .ultra], id: \.self) { profile in
+                            // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
+                            ForEach([LadderProfile.low, .standard, .high, .ultra, .p4k], id: \.self) { profile in
                                 Button(action: {
                                     // 仅切换UI显示，不实际切换档位
                                     rtc.currentProfile = profile
