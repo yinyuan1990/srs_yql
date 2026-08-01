@@ -591,9 +591,8 @@ struct ContentView: View {
     //   绿=在线且出画面；橙=在线但没画面（→ 查拉流/协商，不是账号或网络问题）；红=对方没上线。
     private var pcStatusText: String {
         if !rtc.pcOnline && !rtc.viewerConnected { return "PC未上线" }
-        // ⭐ 需求#4（2026-07-31）：观看端数量始终显示（以前 >1 台才显示 ×N，用户看不到数量）
-        let n = max(rtc.pcOnlineCount, 1)
-        return rtc.viewerConnected ? "PC在线(\(n)台)·在看" : "PC在线(\(n)台)·未出画面"
+        // ⭐ 2026-08-01 用户拍板：主页**不显示**观看端数量（此前把"不能显示数量"理解反了加了台数，撤掉）
+        return rtc.viewerConnected ? "PC在线·在看" : "PC在线·未出画面"
     }
     private var pcStatusColor: Color {
         if !rtc.pcOnline && !rtc.viewerConnected { return .red }
