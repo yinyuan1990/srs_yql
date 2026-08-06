@@ -98,6 +98,8 @@ class APIConfig {
         static let submit = "/message/submit"            // 提交问题反馈
         static let list = "/message/list"                // 获取问题反馈列表
         static let detail = "/message/detail"            // 获取问题反馈详情
+        static let unreadReplies = "/message/unread-replies"  // §56.11 未读回复（登录后弹框）
+        static let read = "/message/read"                // §56.11 全部标记已读（点"已读"后不再弹）
     }
     
     // MARK: - 完整URL生成方法

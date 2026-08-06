@@ -1515,6 +1515,74 @@ extension APIService {
         }
     }
     
+    // MARK: - §56.11 留言未读回复（登录后弹框）
+    
+    /// 单条未读回复
+    struct UnreadReplyItem: Codable, Identifiable {
+        let replyId: Int
+        let messageId: Int
+        let messageContent: String?   // 我的留言原文
+        let content: String?          // 管理员回复内容
+        let adminName: String?
+        let createdAt: String?
+        var id: Int { replyId }
+    }
+    
+    /// 未读回复响应
+    struct UnreadRepliesResponse: Codable {
+        let success: Bool
+        let total: Int?
+        let data: [UnreadReplyItem]?
+    }
+    
+    /// 获取未读回复（登录成功后调用，有未读则弹框）
+    func getUnreadReplies(userId: Int) async throws -> [UnreadReplyItem] {
+        let endpoint = "\(APIConfig.Message.unreadReplies)?userId=\(userId)"
+        guard let requestURL = APIConfig.shared.url(for: endpoint) else {
+            throw APIError.invalidURL
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+        if let token = UserDefaults.standard.string(forKey: "jwt_token") {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.invalidResponse
+        }
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("🔵 [UnreadReplies] Response: \(responseString)")
+        }
+        let resp = try JSONDecoder().decode(UnreadRepliesResponse.self, from: data)
+        return resp.data ?? []
+    }
+    
+    /// 全部未读回复标记已读（弹框点"已读"后调用，之后登录不再弹）
+    func markRepliesRead(userId: Int) async throws {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Message.read) else {
+            throw APIError.invalidURL
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+        if let token = UserDefaults.standard.string(forKey: "jwt_token") {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["userId": userId])
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.invalidResponse
+        }
+        print("🔵 [MarkRepliesRead] ✅ 已全部标记已读")
+    }
+    
     // MARK: - 🔥 图片上传相关
     
     /// 图片上传响应

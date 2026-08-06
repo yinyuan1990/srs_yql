@@ -640,6 +640,11 @@ struct ContentView: View {
     @State private var updatePromptText: String = ""
     @State private var updatePromptShown: Bool = false
 
+    // ⭐ §56.11（2026-08-06）：留言未读回复弹框（登录后拉一次；点「已读」后端置已读，之后不再弹）
+    @State private var showUnreadRepliesAlert: Bool = false
+    @State private var unreadRepliesText: String = ""
+    @State private var unreadRepliesChecked: Bool = false
+
     /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
     private let showCaptureExperimentPanel = false
     
@@ -1037,6 +1042,35 @@ struct ContentView: View {
                     self.showUpdatePrompt = true
                 }
             }
+
+            // ⭐ §56.11：登录后拉未读留言回复（一次会话只查一次；有未读则弹框，点「已读」后不再弹）
+            if !unreadRepliesChecked {
+                unreadRepliesChecked = true
+                let uid = UserDefaults.standard.integer(forKey: "user_id")
+                if uid > 0 {
+                    Task {
+                        do {
+                            let replies = try await APIService.shared.getUnreadReplies(userId: uid)
+                            if !replies.isEmpty {
+                                let text = replies.map { r -> String in
+                                    var lines: [String] = []
+                                    if let m = r.messageContent, !m.isEmpty { lines.append("我：\(m)") }
+                                    lines.append("回复：\(r.content ?? "")")
+                                    let time = (r.createdAt ?? "").replacingOccurrences(of: "T", with: " ").prefix(16)
+                                    lines.append("—— \(r.adminName ?? "客服") \(time)")
+                                    return lines.joined(separator: "\n")
+                                }.joined(separator: "\n\n")
+                                await MainActor.run {
+                                    self.unreadRepliesText = text
+                                    self.showUnreadRepliesAlert = true
+                                }
+                            }
+                        } catch {
+                            print("⚠️ [UnreadReplies] 拉取失败: \(error)")
+                        }
+                    }
+                }
+            }
             
             // 延迟启动摄像头
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1233,6 +1267,18 @@ struct ContentView: View {
             Button("知道了", role: .cancel) {}
         } message: {
             Text(updatePromptText)
+        }
+        // ⭐ §56.11：留言未读回复弹框（点「已读」→ 后端置已读，之后登录不再弹；「稍后」= 下次登录还会弹）
+        .alert("客服回复了你的留言", isPresented: $showUnreadRepliesAlert) {
+            Button("已读，不再提醒") {
+                let uid = UserDefaults.standard.integer(forKey: "user_id")
+                if uid > 0 {
+                    Task { try? await APIService.shared.markRepliesRead(userId: uid) }
+                }
+            }
+            Button("稍后", role: .cancel) {}
+        } message: {
+            Text(unreadRepliesText)
         }
         // 激活页面
         .sheet(isPresented: $showingActivation, onDismiss: {
