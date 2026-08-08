@@ -682,10 +682,11 @@ struct MonitorLoginView: View {
                     UserDefaults.standard.removeObject(forKey: "forceRelay")
                     UserDefaults.standard.removeObject(forKey: "iceServers")
 
-                    // ⭐ §53.4.4 编码默认值改由总后台配置（默认 h265；本机硬编或观看端内核不支持时
-                    //   由 SessionPolicy/H265Support 自动回退 h264）。缺省字段 = 老后端 → 按 h265。
-                    let codecP2p = (loginResponse.videoCodecP2p ?? "h265").lowercased()
-                    let codecSrs = (loginResponse.videoCodecSrs ?? "h265").lowercased()
+                    // ⭐ §53.4.4 编码默认值改由总后台配置（本机硬编或观看端内核不支持时
+                    //   由 SessionPolicy/H265Support 自动回退 h264）。
+                    //   §56.27：产品默认改 h264——字段缺省（老后端）也按 h264，与后端部署无关。
+                    let codecP2p = (loginResponse.videoCodecP2p ?? "h264").lowercased()
+                    let codecSrs = (loginResponse.videoCodecSrs ?? "h264").lowercased()
                     UserDefaults.standard.set(codecP2p, forKey: VideoCodecOption.storageKey)
                     UserDefaults.standard.set(codecSrs, forKey: VideoCodecOption.srsStorageKey)
 

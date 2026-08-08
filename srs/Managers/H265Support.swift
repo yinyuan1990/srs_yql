@@ -45,10 +45,10 @@ enum VideoCodecOption: String, CaseIterable {
     /// SRT 编码记忆 key（第四十九章新增，默认 h264；与 P2P 独立）
     static let srtStorageKey = "srt_video_codec"
 
-    /// 读取上次选择（⭐ 2026-07-11 默认改 H265；设备/协商不支持时 applySelectionForP2P 自动回退 H264）
+    /// 读取上次选择（⭐ §56.27 默认改回 H264 = 产品默认，与后端部署无关；设备/协商不支持时 applySelectionForP2P 自动回退 H264）
     static var lastSelected: VideoCodecOption {
         let raw = UserDefaults.standard.string(forKey: storageKey) ?? ""
-        return VideoCodecOption(rawValue: raw) ?? .h265
+        return VideoCodecOption(rawValue: raw) ?? .h264
     }
 
     /// 按 key 读取（SRS/SRT 用，默认由调用方给——SRS/SRT 默认 h264）

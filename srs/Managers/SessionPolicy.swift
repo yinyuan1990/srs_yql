@@ -79,10 +79,10 @@ final class SessionPolicy {
     private let lock = NSLock()
 
     /// 服务器下发的默认编码（总后台可配，§53.4.4）。登录时写入 UserDefaults，P2P/SRS 各一个 key。
-    /// 这里只读、不猜：读不到就按 h265（产品默认），设备/观看端不支持时下面会如实降 H264。
+    /// 这里只读、不猜：读不到就按 h264（§56.27 产品默认，与后端部署无关），设备/观看端不支持时下面会如实降 H264。
     private func serverDefaultCodec(for mode: SessionMode) -> VideoCodecOption {
         let key = (mode == .p2p) ? VideoCodecOption.storageKey : VideoCodecOption.srsStorageKey
-        return VideoCodecOption.lastSelected(key: key, defaultCodec: .h265)
+        return VideoCodecOption.lastSelected(key: key, defaultCodec: .h264)
     }
 
     // MARK: - 输出
