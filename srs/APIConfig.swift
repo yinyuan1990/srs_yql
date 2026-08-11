@@ -101,6 +101,12 @@ class APIConfig {
         static let unreadReplies = "/message/unread-replies"  // §56.11 未读回复（登录后弹框）
         static let read = "/message/read"                // §56.11 全部标记已读（点"已读"后不再弹）
     }
+
+    // 🔥 §59 登录广告（登录成功后弹框，后台可编辑）
+    struct Ad {
+        static let loginAd = "/config/login-ad"          // 广告配置（公开接口）
+        static let loginAdPage = "/config/login-ad/page" // 广告 HTML 页（WKWebView 直接加载）
+    }
     
     // MARK: - 完整URL生成方法
     

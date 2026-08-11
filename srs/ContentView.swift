@@ -644,6 +644,11 @@ struct ContentView: View {
     @State private var showUnreadRepliesAlert: Bool = false
     @State private var unreadRepliesText: String = ""
     @State private var unreadRepliesChecked: Bool = false
+    // ⭐ §59（2026-08-12）：登录广告弹框（后台可编辑 HTML，WKWebView 展示；点「已读」本地记 version 不再弹，后台改内容会重新弹）
+    @State private var showLoginAdSheet: Bool = false
+    @State private var loginAdTitle: String = "公告"
+    @State private var loginAdVersion: Int = 0
+    @State private var loginAdChecked: Bool = false
 
     /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
     private let showCaptureExperimentPanel = false
@@ -1072,6 +1077,29 @@ struct ContentView: View {
                     }
                 }
             }
+
+            // ⭐ §59：登录后拉广告配置（公开接口，一次会话只查一次）——enabled 且 version != 本地已读version → 弹广告框
+            if !loginAdChecked {
+                loginAdChecked = true
+                Task {
+                    do {
+                        let ad = try await APIService.shared.getLoginAd()
+                        let version = Int(ad.version ?? 0)
+                        if ad.enabled == true && version > 0 {
+                            let readVersion = UserDefaults.standard.integer(forKey: "login_ad_read_version")
+                            if version != readVersion {
+                                await MainActor.run {
+                                    self.loginAdTitle = ad.title ?? "公告"
+                                    self.loginAdVersion = version
+                                    self.showLoginAdSheet = true
+                                }
+                            }
+                        }
+                    } catch {
+                        print("⚠️ [LoginAd] 拉取失败: \(error)")
+                    }
+                }
+            }
             
             // 延迟启动摄像头
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1280,6 +1308,19 @@ struct ContentView: View {
             Button("稍后", role: .cancel) {}
         } message: {
             Text(unreadRepliesText)
+        }
+        // ⭐ §59：登录广告弹框（WKWebView 加载后端广告页；「已读」本地记 version 该版本不再弹，「关闭」/下滑 = 下次登录还弹）
+        .sheet(isPresented: $showLoginAdSheet) {
+            LoginAdView(
+                title: loginAdTitle,
+                onRead: {
+                    UserDefaults.standard.set(loginAdVersion, forKey: "login_ad_read_version")
+                    showLoginAdSheet = false
+                },
+                onClose: {
+                    showLoginAdSheet = false
+                }
+            )
         }
         // 激活页面
         .sheet(isPresented: $showingActivation, onDismiss: {

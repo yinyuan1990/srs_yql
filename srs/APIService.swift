@@ -1582,6 +1582,44 @@ extension APIService {
         }
         print("🔵 [MarkRepliesRead] ✅ 已全部标记已读")
     }
+
+    // MARK: - §59 登录广告
+
+    /// 登录广告配置（外层 {config:"<json string>"}，内层 {enabled,title,content,version}）
+    struct LoginAdEnvelope: Codable {
+        let config: String?
+    }
+
+    struct LoginAdConfig: Codable {
+        let enabled: Bool?
+        let title: String?
+        let version: Int64?
+    }
+
+    /// §59 获取登录广告配置（公开接口，登录成功后调用；内容由 WKWebView 直接加载 /config/login-ad/page）
+    func getLoginAd() async throws -> LoginAdConfig {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Ad.loginAd) else {
+            throw APIError.invalidURL
+        }
+
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.invalidResponse
+        }
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("🔵 [LoginAd] Response: \(responseString)")
+        }
+        let envelope = try JSONDecoder().decode(LoginAdEnvelope.self, from: data)
+        guard let inner = envelope.config?.data(using: .utf8) else {
+            throw APIError.invalidResponse
+        }
+        return try JSONDecoder().decode(LoginAdConfig.self, from: inner)
+    }
     
     // MARK: - 🔥 图片上传相关
     

@@ -175,3 +175,92 @@ struct WebView_Previews: PreviewProvider {
         WebView(url: "https://www.apple.com", title: "Apple官网")
     }
 }
+
+// MARK: - §59 登录广告弹框（登录成功后 sheet 弹出；WKWebView 加载后端 /config/login-ad/page）
+// 「已读，不再提醒」→ 调用方本地记 version，该版本不再弹；「关闭」/下滑关闭 = 不记，下次登录还弹。
+// 内容里的链接点击 → 外部浏览器打开；长按选择复制是 WKWebView 默认能力。
+struct LoginAdView: View {
+    let title: String
+    let onRead: () -> Void
+    let onClose: () -> Void
+
+    private var pageURL: String {
+        APIConfig.shared.fullURL(for: APIConfig.Ad.loginAdPage)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("关闭") { onClose() }
+                    .font(.system(size: 15))
+                    .foregroundColor(.gray)
+                Spacer()
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Button("浏览器打开") {
+                    if let url = URL(string: pageURL) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                .font(.system(size: 14))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            LoginAdWebView(urlString: pageURL)
+
+            Divider()
+
+            Button(action: onRead) {
+                Text("已读，不再提醒")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+        }
+    }
+}
+
+// §59 广告专用 WKWebView：JS 关闭，链接点击拦截 → 外部浏览器
+struct LoginAdWebView: UIViewRepresentable {
+    let urlString: String
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        if let url = URL(string: urlString) {
+            webView.load(URLRequest(url: url, timeoutInterval: 30.0))
+        }
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        // 初始加载是 .other；只有用户点内容里的链接（.linkActivated）才拦到外部浏览器
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated,
+               let url = navigationAction.request.url {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
