@@ -820,14 +820,15 @@ struct ContentView: View {
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(rtc.whiteBalanceIsAuto ? .cyan : .orange)
                         }
-                        // ⭐ H265：当前推流编码（H265 橙色醒目 / H264 灰色；实现在 H265Support.swift）
+                        // ⭐ §57.3（对齐 PC 的 §56.28b）：编码显示**故意**恒为 H265（障眼，不暴露真实
+                        //   会话编码）。真实编码看日志/内部状态（H265Support.effectiveCodec），面板仅供外人看。
                         HStack(spacing: 4) {
                             Circle()
-                                .fill(h265.effectiveCodec == .h265 ? Color.orange : Color.gray)
+                                .fill(Color.orange)
                                 .frame(width: 7, height: 7)
-                            Text("编码:\(h265.effectiveCodec.title)")
+                            Text("编码:H265")
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(h265.effectiveCodec == .h265 ? .orange : .gray)
+                                .foregroundColor(.orange)
                         }
                     }
                     .padding(.horizontal, 7)
