@@ -107,6 +107,15 @@ class APIConfig {
         static let loginAd = "/config/login-ad"          // 广告配置（公开接口）
         static let loginAdPage = "/config/login-ad/page" // 广告 HTML 页（WKWebView 直接加载）
     }
+
+    // 🔥 §60 邀请活动 + PC 下载入口（2026-08-13）
+    struct Referral {
+        static let variant = ""                          // 变体：iOS 属主版 ""（android-otg 为 "otg"），后端两套配置独立
+        static let status = "/referral/status"           // 登录弹层三态+打卡+档位（需 JWT）
+        static let bind = "/referral/bind"               // 试用用户填写邀请人（终身一次）
+        static let claim = "/referral/claim"             // 会员领取档位奖励
+        static let pcdl = "/config/pcdl"                 // PC 端下载入口配置（公开接口）
+    }
     
     // MARK: - 完整URL生成方法
     

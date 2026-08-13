@@ -114,6 +114,11 @@ struct ProfileView: View {
    @State private var showingActivation = false
    @State private var startWithScanner = false  // 是否直接进入扫码模式
 
+   // ⭐ §60（2026-08-13）：当前等级剩余天数（邀请活动接口下发）+ PC 端下载入口
+   @State private var referralRemainingDays: Int64 = 0
+   @State private var pcdlConfig: APIService.PcdlConfig?
+   @State private var showingPcdlAlert = false
+
     private var appVersionText: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
@@ -127,6 +132,33 @@ struct ProfileView: View {
         .navigationViewStyle(StackNavigationViewStyle())
         .onAppear {
             viewModel.loadUserProfile()
+            // ⭐ §60：拉剩余天数（活动接口下发）+ PC 下载入口配置（失败均静默，不影响页面）
+            Task {
+                let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
+                if !token.isEmpty, let st = try? await APIService.shared.getReferralStatus(token: token) {
+                    await MainActor.run { referralRemainingDays = st.remainingDays ?? 0 }
+                }
+                if let cfg = try? await APIService.shared.getPcDownload() {
+                    await MainActor.run { pcdlConfig = cfg }
+                }
+            }
+        }
+        // ⭐ §60：PC 端下载弹框（主推「复制下载地址→电脑浏览器粘贴」；「浏览器打开」为次选）
+        .alert("电脑版下载", isPresented: $showingPcdlAlert) {
+            Button("复制下载地址") {
+                UIPasteboard.general.string = pcdlConfig?.url ?? ""
+            }
+            Button("浏览器打开") {
+                if let s = pcdlConfig?.url, let url = URL(string: s) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("关闭", role: .cancel) {}
+        } message: {
+            let tip = (pcdlConfig?.content?.isEmpty == false)
+                ? pcdlConfig!.content!
+                : "复制下载地址后，粘贴到电脑浏览器地址栏，即可直接下载安装程序。"
+            Text(tip + "\n\n" + (pcdlConfig?.url ?? ""))
         }
         .alert("错误", isPresented: $showingAlert) {
             Button("确定") { }
@@ -573,6 +605,15 @@ struct ProfileView: View {
             }
             Divider().padding(.leading, 60)
             
+            // ⭐ §60：当前等级剩余天数（activationExpireAt 换算，活动接口下发；未开通/接口未回不显示）
+            if isMemberActivated && referralRemainingDays > 0 {
+                ProfileRowView(icon: "hourglass",
+                               title: "剩余天数",
+                               subtitle: "\(referralRemainingDays) 天",
+                               showArrow: false) { }
+                Divider().padding(.leading, 60)
+            }
+            
             // 🔥 到期时间（已隐藏）
             // if isActivated {
             //     ProfileRowView(icon: "calendar.badge.clock", title: "到期时间", subtitle: formatExpireDate(), showArrow: false) {
@@ -675,6 +716,17 @@ struct ProfileView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
                 .background(Color.white)
+            }
+            
+            // ⭐ §60：PC 端下载入口（总后台开关+直链可配；所有用户可见，主推「复制下载地址→电脑浏览器粘贴」）
+            if pcdlConfig?.enabled == true, let url = pcdlConfig?.url, !url.isEmpty {
+                Divider().padding(.leading, 60)
+                ProfileRowView(icon: "desktopcomputer",
+                               title: "电脑版下载",
+                               subtitle: "复制下载地址，电脑浏览器粘贴即可下载",
+                               showArrow: true) {
+                    showingPcdlAlert = true
+                }
             }
         }
     }

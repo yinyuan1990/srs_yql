@@ -1620,6 +1620,141 @@ extension APIService {
         }
         return try JSONDecoder().decode(LoginAdConfig.self, from: inner)
     }
+
+    // MARK: - §60 邀请活动 + PC 下载入口（2026-08-13）
+
+    struct ReferralTier: Codable, Identifiable {
+        let count: Int?
+        let months: Int?
+        let cumulativeMonths: Int?
+        let status: String?           // LOCKED / ACHIEVED / CLAIMABLE / CLAIMED
+        var id: Int { count ?? 0 }
+    }
+
+    struct ReferralStatus: Codable {
+        let enabled: Bool?
+        let state: String?            // MEMBER / TRIAL_CAN_BIND / TRIAL_BOUND
+        let popupContent: String?
+        let trialHours: Int?
+        let remainingDays: Int64?     // 当前等级剩余天数（个人中心显示）
+        let level: Int?
+        let expireAt: String?
+        let referralTrialActive: Bool?
+        let boundCount: Int?
+        let successCount: Int?
+        let tiers: [ReferralTier]?
+    }
+
+    struct ReferralActionResult: Codable {
+        let success: Bool?
+        let message: String?
+        let trialLevel: Int?
+        let trialExpireAt: String?
+        let months: Int?
+        let expireAt: String?
+        let remainingDays: Int64?
+    }
+
+    struct PcdlConfig: Codable {
+        let enabled: Bool?
+        let url: String?
+        let content: String?
+    }
+
+    /// §60 从错误响应体提取 {"error": "..."} 消息
+    private func referralErrorMessage(from data: Data) -> String? {
+        if let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return (dict["error"] as? String) ?? (dict["message"] as? String)
+        }
+        return nil
+    }
+
+    /// §60 邀请活动状态（登录成功后调用，需 JWT）
+    /// state = TRIAL_CAN_BIND（试用未绑定→邀请人输入框）/ TRIAL_BOUND（已用过邀请）/ MEMBER（打卡+领取）
+    func getReferralStatus(token: String) async throws -> ReferralStatus {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Referral.status + "?variant=" + APIConfig.Referral.variant) else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.invalidResponse
+        }
+        if let s = String(data: data, encoding: .utf8) { print("🔵 [ReferralStatus] \(s)") }
+        return try JSONDecoder().decode(ReferralStatus.self, from: data)
+    }
+
+    /// §60 试用用户填写邀请人（终身一次，绑定成功解锁体验）
+    func referralBind(inviter: String, deviceId: String, token: String) async throws -> ReferralActionResult {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Referral.bind) else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "inviter": inviter,
+            "deviceId": deviceId,
+            "variant": APIConfig.Referral.variant
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let s = String(data: data, encoding: .utf8) { print("🔵 [ReferralBind] \(s)") }
+        guard let httpResponse = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard httpResponse.statusCode == 200 else {
+            throw APIError.serverErrorWithMessage(referralErrorMessage(from: data) ?? "绑定失败")
+        }
+        return try JSONDecoder().decode(ReferralActionResult.self, from: data)
+    }
+
+    /// §60 会员领取档位奖励（延长当前等级到期时间）
+    func referralClaim(milestone: Int, token: String) async throws -> ReferralActionResult {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Referral.claim) else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "milestone": milestone,
+            "variant": APIConfig.Referral.variant
+        ] as [String: Any])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let s = String(data: data, encoding: .utf8) { print("🔵 [ReferralClaim] \(s)") }
+        guard let httpResponse = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard httpResponse.statusCode == 200 else {
+            throw APIError.serverErrorWithMessage(referralErrorMessage(from: data) ?? "领取失败")
+        }
+        return try JSONDecoder().decode(ReferralActionResult.self, from: data)
+    }
+
+    /// §60 PC 端下载入口配置（公开接口，「我的」页入口用）
+    func getPcDownload() async throws -> PcdlConfig {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Referral.pcdl + "?variant=" + APIConfig.Referral.variant) else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.invalidResponse
+        }
+        if let s = String(data: data, encoding: .utf8) { print("🔵 [Pcdl] \(s)") }
+        return try JSONDecoder().decode(PcdlConfig.self, from: data)
+    }
     
     // MARK: - 🔥 图片上传相关
     
