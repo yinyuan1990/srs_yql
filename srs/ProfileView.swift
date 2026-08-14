@@ -598,18 +598,19 @@ struct ProfileView: View {
         UserDefaults.standard.bool(forKey: "activated")
     }
     /// ⭐ §53.15：等级名**不带"会员"二字**（超高清会员 → 超高清），只显示等级本身。
+    /// ⭐ §62.4：剩余天数直接跟在等级名后（「<等级>（剩余 N 天）」），数据=活动接口 remainingDays，
+    ///   领取奖励后刷新即对应；原 §60 独立行删除。
     private var membershipRowTitle: String {
-        isMemberActivated ? levelDisplayText : "注册时间"
+        if isMemberActivated && referralRemainingDays > 0 {
+            return "\(levelDisplayText)（剩余 \(referralRemainingDays) 天）"
+        }
+        return isMemberActivated ? levelDisplayText : "注册时间"
     }
     /// ⭐ §53.15：已开通时副标题是「注册成功时间 <注册日期>」。
     ///   **刻意不显示"开通时间"**：App Store 审核对"开通/付费"类信息敏感，这里只呈现账号注册时间，
     ///   不暴露任何与购买/激活时点相关的内容。未开通时保持原样（纯注册时间）。
-    ///   ⭐ §62：剩余天数并入等级行（数据=活动接口 remainingDays，领取奖励后刷新即对应），原 §60 独立行删除。
     private var membershipRowSubtitle: String {
         let created = formatDate(viewModel.userProfile?.createdAt)
-        if isMemberActivated && referralRemainingDays > 0 {
-            return "剩余 \(referralRemainingDays) 天 · 注册成功时间 " + created
-        }
         return isMemberActivated ? "注册成功时间 " + created : created
     }
     private var membershipRowIcon: String {
