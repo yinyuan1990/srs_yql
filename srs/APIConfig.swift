@@ -114,6 +114,7 @@ class APIConfig {
         static let status = "/referral/status"           // 登录弹层三态+打卡+档位（需 JWT）
         static let bind = "/referral/bind"               // 试用用户填写邀请人（终身一次）
         static let claim = "/referral/claim"             // 会员领取档位奖励
+        static let trialUse = "/referral/trial/use"      // §62 使用日卡（「我的」页二级确认后调用，从确定那一刻起生效）
         static let pcdl = "/config/pcdl"                 // PC 端下载入口配置（公开接口）
     }
     

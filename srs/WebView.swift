@@ -298,6 +298,16 @@ struct ReferralView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    // ⭐ §62：固定三句话（① 红色加大 ② 绿色 ③ 默认色）
+                    Text("邀请奖励(邀请人必须解锁等级才可以参加以下奖励)")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.red)
+                    Text("新用户 输入当前手机端账号前8位 即可完成邀请。")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.green)
+                    Text("邀请成功新用户即可领取日卡一张(可稍后使用)")
+                        .font(.system(size: 14))
+
                     if let content = status.popupContent, !content.isEmpty {
                         Text(content)
                             .font(.system(size: 13))
@@ -306,9 +316,9 @@ struct ReferralView: View {
 
                     switch status.state {
                     case "TRIAL_CAN_BIND":
-                        Text("填写邀请人（会员的昵称或完整账号），即可解锁全部功能体验 \(status.trialHours ?? 24) 小时")
+                        Text("填写邀请人（手机端账号前8位 / 昵称 / 完整账号），邀请成功可领取日卡一张（全部功能体验 \(status.trialHours ?? 24) 小时，可稍后到「我的」页使用）")
                             .font(.system(size: 14))
-                        TextField("邀请人昵称 / 完整账号", text: $inviterInput)
+                        TextField("邀请人账号前8位 / 昵称 / 完整账号", text: $inviterInput)
                             .textFieldStyle(.roundedBorder)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
@@ -373,10 +383,11 @@ struct ReferralView: View {
                             }
                             ForEach(tiers) { tier in
                                 HStack {
-                                    Text("邀请成功 \(tier.count ?? 0) 人")
+                                    // §62 文字口径：档位=邀请解锁成功、奖励显示累计月数（cumulativeMonths），领取逻辑不变
+                                    Text("邀请解锁成功 \(tier.count ?? 0) 人")
                                         .font(.system(size: 14))
                                     Spacer()
-                                    Text((tier.months ?? 0) > 0 ? "+\(tier.months ?? 0) 个月" : "已封顶")
+                                    Text((tier.months ?? 0) > 0 ? "奖励时长 增加至\(tier.cumulativeMonths ?? 0)个月" : "已封顶")
                                         .font(.system(size: 13))
                                         .foregroundColor((tier.months ?? 0) > 0 ? .orange : .secondary)
                                     switch tier.status ?? "LOCKED" {
@@ -414,7 +425,7 @@ struct ReferralView: View {
 
     private func bind() {
         let input = inviterInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { errorText = "请输入邀请人的昵称或完整账号"; return }
+        guard !input.isEmpty else { errorText = "请输入邀请人的账号前8位、昵称或完整账号"; return }
         busy = true
         errorText = nil
         Task {

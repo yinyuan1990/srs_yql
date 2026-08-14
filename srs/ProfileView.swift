@@ -119,6 +119,13 @@ struct ProfileView: View {
    @State private var pcdlConfig: APIService.PcdlConfig?
    @State private var showingPcdlAlert = false
 
+   // ⭐ §62（2026-08-14）：日卡（邀请奖励，已领未用时显示；二级确认后生效，从确定那一刻起算）
+   @State private var trialCardPending = false
+   @State private var trialCardHours: Int = 24
+   @State private var showingTrialCardConfirm = false
+   @State private var trialCardBusy = false
+   @State private var trialCardResultMessage: String?
+
     private var appVersionText: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
@@ -136,7 +143,12 @@ struct ProfileView: View {
             Task {
                 let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
                 if !token.isEmpty, let st = try? await APIService.shared.getReferralStatus(token: token) {
-                    await MainActor.run { referralRemainingDays = st.remainingDays ?? 0 }
+                    await MainActor.run {
+                        referralRemainingDays = st.remainingDays ?? 0
+                        // §62 日卡待用标记 + 生效时长
+                        trialCardPending = st.trialCardPending ?? false
+                        trialCardHours = st.trialHours ?? 24
+                    }
                 }
                 if let cfg = try? await APIService.shared.getPcDownload() {
                     await MainActor.run { pcdlConfig = cfg }
@@ -159,6 +171,22 @@ struct ProfileView: View {
                 ? pcdlConfig!.content!
                 : "复制下载地址后，粘贴到电脑浏览器地址栏，即可直接下载安装程序。"
             Text(tip + "\n\n" + (pcdlConfig?.url ?? ""))
+        }
+        // ⭐ §62：日卡二级确认弹框（确定那一刻起生效；自行开通会员则以开通为准）
+        .alert("使用日卡", isPresented: $showingTrialCardConfirm) {
+            Button("确定使用") { useTrialCard() }
+            Button("暂不使用", role: .cancel) {}
+        } message: {
+            Text("确定后立即生效，自确定那一刻起可体验全部功能 \(trialCardHours) 小时。\n若您已自行开通会员，以开通等级为准，未使用完的日使用将被直接覆盖。")
+        }
+        // ⭐ §62：日卡结果提示
+        .alert("日卡", isPresented: Binding(
+            get: { trialCardResultMessage != nil },
+            set: { if !$0 { trialCardResultMessage = nil } }
+        )) {
+            Button("确定", role: .cancel) { trialCardResultMessage = nil }
+        } message: {
+            Text(trialCardResultMessage ?? "")
         }
         .alert("错误", isPresented: $showingAlert) {
             Button("确定") { }
@@ -576,8 +604,12 @@ struct ProfileView: View {
     /// ⭐ §53.15：已开通时副标题是「注册成功时间 <注册日期>」。
     ///   **刻意不显示"开通时间"**：App Store 审核对"开通/付费"类信息敏感，这里只呈现账号注册时间，
     ///   不暴露任何与购买/激活时点相关的内容。未开通时保持原样（纯注册时间）。
+    ///   ⭐ §62：剩余天数并入等级行（数据=活动接口 remainingDays，领取奖励后刷新即对应），原 §60 独立行删除。
     private var membershipRowSubtitle: String {
         let created = formatDate(viewModel.userProfile?.createdAt)
+        if isMemberActivated && referralRemainingDays > 0 {
+            return "剩余 \(referralRemainingDays) 天 · 注册成功时间 " + created
+        }
         return isMemberActivated ? "注册成功时间 " + created : created
     }
     private var membershipRowIcon: String {
@@ -605,12 +637,16 @@ struct ProfileView: View {
             }
             Divider().padding(.leading, 60)
             
-            // ⭐ §60：当前等级剩余天数（activationExpireAt 换算，活动接口下发；未开通/接口未回不显示）
-            if isMemberActivated && referralRemainingDays > 0 {
-                ProfileRowView(icon: "hourglass",
-                               title: "剩余天数",
-                               subtitle: "\(referralRemainingDays) 天",
-                               showArrow: false) { }
+            // ⭐ §62：日卡（邀请奖励，已领未用才显示；点击弹二级确认，确定那一刻起生效）
+            //   剩余天数已并入等级行副标题（原 §60 独立「剩余天数」行删除）
+            if trialCardPending {
+                ProfileRowView(icon: "giftcard",
+                               title: "日卡（邀请奖励）",
+                               subtitle: "未使用，点击立即使用（生效 \(trialCardHours) 小时）",
+                               titleColor: .red,
+                               showArrow: true) {
+                    if !trialCardBusy { showingTrialCardConfirm = true }
+                }
                 Divider().padding(.leading, 60)
             }
             
@@ -643,6 +679,34 @@ struct ProfileView: View {
     // 🔥 是否已激活会员
     private var isActivated: Bool {
         return UserDefaults.standard.bool(forKey: "activated")
+    }
+    
+    // ⭐ §62：使用日卡（二级确认「确定使用」后调用，从确定那一刻起生效）
+    private func useTrialCard() {
+        trialCardBusy = true
+        Task {
+            let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
+            do {
+                let r = try await APIService.shared.referralTrialUse(token: token)
+                await MainActor.run {
+                    trialCardBusy = false
+                    trialCardResultMessage = r.message ?? "日卡已生效！"
+                }
+            } catch {
+                await MainActor.run {
+                    trialCardBusy = false
+                    trialCardResultMessage = (error as? APIError)?.localizedDescription ?? "使用日卡失败，请重试"
+                }
+            }
+            // 刷新邀请状态（隐藏日卡行、剩余天数更新）
+            if let st = try? await APIService.shared.getReferralStatus(token: token) {
+                await MainActor.run {
+                    referralRemainingDays = st.remainingDays ?? 0
+                    trialCardPending = st.trialCardPending ?? false
+                    trialCardHours = st.trialHours ?? 24
+                }
+            }
+        }
     }
     
     // 🔥 格式化到期时间
@@ -724,6 +788,7 @@ struct ProfileView: View {
                 ProfileRowView(icon: "desktopcomputer",
                                title: "电脑版下载",
                                subtitle: "复制下载地址，电脑浏览器粘贴即可下载",
+                               titleColor: .red,   // §62 标红
                                showArrow: true) {
                     showingPcdlAlert = true
                 }
@@ -874,13 +939,15 @@ struct ProfileRowView: View {
     let icon: String
     let title: String
     let subtitle: String?
+    let titleColor: Color   // §62：支持标红（电脑版下载/日卡；问题反馈是手写 Button 本就红）
     let showArrow: Bool
     let action: () -> Void
     
-    init(icon: String, title: String, subtitle: String? = nil, showArrow: Bool = false, action: @escaping () -> Void) {
+    init(icon: String, title: String, subtitle: String? = nil, titleColor: Color = .primary, showArrow: Bool = false, action: @escaping () -> Void) {
         self.icon = icon
         self.title = title
         self.subtitle = subtitle
+        self.titleColor = titleColor
         self.showArrow = showArrow
         self.action = action
     }
@@ -898,7 +965,7 @@ struct ProfileRowView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 16))
-                        .foregroundColor(.primary)
+                        .foregroundColor(titleColor)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     
                     if let subtitle = subtitle {

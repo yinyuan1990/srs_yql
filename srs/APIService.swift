@@ -1636,6 +1636,7 @@ extension APIService {
         let state: String?            // MEMBER / TRIAL_CAN_BIND / TRIAL_BOUND
         let popupContent: String?
         let trialHours: Int?
+        let trialCardPending: Bool?   // §62 日卡已领未用（「我的」页显示「日卡」行）
         let remainingDays: Int64?     // 当前等级剩余天数（个人中心显示）
         let level: Int?
         let expireAt: String?
@@ -1734,6 +1735,29 @@ extension APIService {
         guard let httpResponse = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard httpResponse.statusCode == 200 else {
             throw APIError.serverErrorWithMessage(referralErrorMessage(from: data) ?? "领取失败")
+        }
+        return try JSONDecoder().decode(ReferralActionResult.self, from: data)
+    }
+
+    /// §62 使用日卡（「我的」页二级确认后调用，从确定那一刻起生效 trialHours 小时）
+    func referralTrialUse(token: String) async throws -> ReferralActionResult {
+        guard let requestURL = APIConfig.shared.url(for: APIConfig.Referral.trialUse) else {
+            throw APIError.invalidURL
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = APIConfig.shared.requestTimeout
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "variant": APIConfig.Referral.variant
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let s = String(data: data, encoding: .utf8) { print("🔵 [ReferralTrialUse] \(s)") }
+        guard let httpResponse = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard httpResponse.statusCode == 200 else {
+            throw APIError.serverErrorWithMessage(referralErrorMessage(from: data) ?? "使用日卡失败")
         }
         return try JSONDecoder().decode(ReferralActionResult.self, from: data)
     }
