@@ -51,9 +51,19 @@ struct ChangePasswordView: View {
                         }
                         .padding(.bottom, 30)
                         
-                        // ⭐ 需求#2（2026-07-31）：不再要求输入原绑定码（管理密码）——
-                        //   已登录 + 原登录密码自动校验足够，后端已同步改为可选。
+                        // ⭐ §64（2026-08-15）：恢复「原绑定码」必填输入行（2026-07-31 需求#2曾移除）——
+                        //   后端 /user/password/all 对非空原绑定码照旧强校验，传错拦截。
                         VStack(spacing: 0) {
+                            // 原绑定码
+                            PasswordInputRow(
+                                title: "原绑定码",
+                                placeholder: "请输入原绑定码",
+                                text: $oldSecondaryPassword
+                            )
+                            
+                            Divider()
+                                .padding(.leading, 96)
+                            
                             // 新登录密码
                             PasswordInputRow(
                                 title: "新登录密码",
@@ -149,7 +159,11 @@ struct ChangePasswordView: View {
             return
         }
         
-        // ⭐ 需求#2：原绑定码不再要求输入（oldSecondaryPassword 恒为空串，后端跳过校验）
+        // ⭐ §64：原绑定码恢复必填（后端对非空值强校验）
+        guard !oldSecondaryPassword.isEmpty else {
+            showError("请输入原绑定码")
+            return
+        }
         
         // 🔥 验证新登录密码
         guard !newPassword.isEmpty else {
