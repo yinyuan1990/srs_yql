@@ -339,6 +339,10 @@ struct ReferralView: View {
                                 .cornerRadius(10)
                         }
                         .disabled(busy)
+                        // ⭐ §64.2：确认绑定下方红色大号提示（奖励归属说明）
+                        Text("邀请人填谁账号 以下奖励赠送给谁")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.red)
                     case "TRIAL_BOUND":
                         Text("✅ 您已使用过邀请（终身一次）")
                             .font(.system(size: 14, weight: .medium))
@@ -383,11 +387,12 @@ struct ReferralView: View {
                             }
                             ForEach(tiers) { tier in
                                 HStack {
-                                    // §62 文字口径：档位=邀请解锁成功、奖励显示累计月数（cumulativeMonths），领取逻辑不变
+                                    // §62 文字口径：档位=邀请解锁成功、奖励显示累计值（cumulativeMonths）
+                                    // §64.2：单位从"月"改"天"（后端 plusDays，字段名不变、数值即天数）
                                     Text("邀请解锁成功 \(tier.count ?? 0) 人")
                                         .font(.system(size: 14))
                                     Spacer()
-                                    Text((tier.months ?? 0) > 0 ? "奖励时长 增加至\(tier.cumulativeMonths ?? 0)个月" : "已封顶")
+                                    Text((tier.months ?? 0) > 0 ? "奖励时长 增加至\(tier.cumulativeMonths ?? 0)天" : "已封顶")
                                         .font(.system(size: 13))
                                         .foregroundColor((tier.months ?? 0) > 0 ? .orange : .secondary)
                                     switch tier.status ?? "LOCKED" {
