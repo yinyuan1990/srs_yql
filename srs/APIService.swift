@@ -347,6 +347,10 @@ class APIService {
             loginData["hwPub"] = hwPub
             loginData["hwSign"] = hwSign
             loginData["hwTs"] = hwTs
+            // ⭐ §75 自报私钥存放位置（se/software），总后台「芯片密钥」列据此区分真芯片与静默降级
+            if let hwLevel = HwKeyManager.shared.securityLevel() {
+                loginData["hwLevel"] = hwLevel
+            }
         }
         
         print("🔐 [登录] 接口: /auth/login/device")

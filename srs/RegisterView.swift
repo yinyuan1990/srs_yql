@@ -1295,6 +1295,19 @@ class HwKeyManager {
         return data.base64EncodedString()
     }
 
+    /// ⭐ §75 私钥到底有没有落在 Secure Enclave（总后台「芯片密钥」列展示用）。
+    /// SE 创建失败会静默回退成普通 Keychain 密钥，不查就分不出来，后台会误以为防克隆已生效。
+    /// @return "se" / "software"，查不到返回 nil（不上报）
+    func securityLevel() -> String? {
+        guard let key = loadKey(),
+              let attrs = SecKeyCopyAttributes(key) as? [String: Any] else { return nil }
+        if let tokenID = attrs[kSecAttrTokenID as String] as? String,
+           tokenID == (kSecAttrTokenIDSecureEnclave as String) {
+            return "se"
+        }
+        return "software"
+    }
+
     func sign(_ payload: String) -> String? {
         guard let key = loadKey(), let data = payload.data(using: .utf8) else { return nil }
         var error: Unmanaged<CFError>?
