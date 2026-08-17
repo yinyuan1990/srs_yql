@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import CommonCrypto  // 🔥 用于 SHA256 哈希
+import Security
 
 // MARK: - 数据模型
 
@@ -1150,6 +1151,99 @@ class DeviceIDManager {
         SecItemDelete(query as CFDictionary)
         cachedDeviceID = nil
         print("🗑️ [DeviceID] 已清除 Keychain 中的设备ID")
+    }
+
+    // ⭐ §71 安装实例ID：首启随机 UUID，存 UserDefaults。
+    //   deviceId 可被克隆党改成一样，两台手机的 installId 必然不同——后端按此做同 deviceId 单活互踢。
+    //   注意：UserDefaults 可被整机克隆抄走，治本靠 §72 硬件密钥。
+    private var cachedInstallID: String?
+    private let installIDKey = "install_instance_id"
+
+    func getInstallID() -> String {
+        if let cached = cachedInstallID, !cached.isEmpty { return cached }
+        if let existing = UserDefaults.standard.string(forKey: installIDKey), !existing.isEmpty {
+            cachedInstallID = existing
+            return existing
+        }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: installIDKey)
+        cachedInstallID = fresh
+        print("📱 [InstallID] 生成新安装实例ID: \(fresh.prefix(8))...")
+        return fresh
+    }
+}
+
+// MARK: - ⭐ §72 硬件级设备指纹（方案三·治本）
+/// 在 Secure Enclave（芯片安全区）生成**不可导出**的 EC P-256 密钥对：
+/// - 私钥永远锁在芯片里，越狱/整机克隆都复制不走（§71 的 installId 存 UserDefaults，可被抄）；
+/// - 登录时用私钥对 "deviceId|installId|时间戳" 签名，后端用注册过的公钥验签。
+/// 公钥导出为 X9.63 裸格式（0x04‖X‖Y，65字节），后端 DeviceKeyService 已兼容解析。
+/// 模拟器/极老设备无 Secure Enclave → 回退普通 Keychain 密钥（仍不可同步迁移）。
+/// 任何异常返回 nil（登录降级为不带签名，由后端开关 device.hwkey.required 决定拦不拦）。
+class HwKeyManager {
+    static let shared = HwKeyManager()
+    private let tag = "com.yql.hwdevicekey".data(using: .utf8)!
+    private var cachedKey: SecKey?
+    private init() {}
+
+    private func loadKey() -> SecKey? {
+        if let k = cachedKey { return k }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true
+        ]
+        var item: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, item != nil {
+            let key = item as! SecKey
+            cachedKey = key
+            return key
+        }
+        return createKey()
+    }
+
+    private func createKey() -> SecKey? {
+        var attrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: tag
+            ]
+        ]
+        #if !targetEnvironment(simulator)
+        attrs[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
+        #endif
+        var error: Unmanaged<CFError>?
+        if let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
+            print("🔑 [HwKey] 已在 Secure Enclave 生成硬件密钥对")
+            cachedKey = key
+            return key
+        }
+        attrs.removeValue(forKey: kSecAttrTokenID as String)
+        let fallback = SecKeyCreateRandomKey(attrs as CFDictionary, nil)
+        if fallback != nil { print("🔑 [HwKey] Secure Enclave 不可用，回退普通 Keychain 密钥") }
+        cachedKey = fallback
+        return fallback
+    }
+
+    func publicKeyB64() -> String? {
+        guard let key = loadKey(),
+              let pub = SecKeyCopyPublicKey(key),
+              let data = SecKeyCopyExternalRepresentation(pub, nil) as Data? else { return nil }
+        return data.base64EncodedString()
+    }
+
+    func sign(_ payload: String) -> String? {
+        guard let key = loadKey(), let data = payload.data(using: .utf8) else { return nil }
+        var error: Unmanaged<CFError>?
+        guard let sig = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256,
+                                              data as CFData, &error) as Data? else {
+            print("⚠️ [HwKey] 签名失败: \(error?.takeRetainedValue().localizedDescription ?? "未知")")
+            return nil
+        }
+        return sig.base64EncodedString()
     }
 }
 

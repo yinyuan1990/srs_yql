@@ -331,11 +331,23 @@ class APIService {
         }
         
         // 🔥 一机一码：请求体加上deviceId（后端验证是否是注册时的设备）
+        // ⭐ §71 加 installId（安装实例ID）：后端按 deviceId 记录活跃安装，克隆机单活互踢
         let deviceId = DeviceIDManager.shared.getDeviceID()
-        let loginData: [String: String] = [
+        let installId = DeviceIDManager.shared.getInstallID()
+        var loginData: [String: String] = [
             "data": encryptedData,
-            "deviceId": deviceId
+            "deviceId": deviceId,
+            "installId": installId
         ]
+        // ⭐ §72 硬件密钥签名（Secure Enclave）：payload=deviceId|installId|时间戳，与后端约定一致。
+        //   签名失败（极端情况）则不带字段，由后端开关 device.hwkey.required 决定拦不拦
+        let hwTs = String(Int64(Date().timeIntervalSince1970 * 1000))
+        if let hwPub = HwKeyManager.shared.publicKeyB64(),
+           let hwSign = HwKeyManager.shared.sign("\(deviceId)|\(installId)|\(hwTs)") {
+            loginData["hwPub"] = hwPub
+            loginData["hwSign"] = hwSign
+            loginData["hwTs"] = hwTs
+        }
         
         print("🔐 [登录] 接口: /auth/login/device")
         print("🔐 [登录] username: \(username)")
