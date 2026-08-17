@@ -1153,29 +1153,71 @@ class DeviceIDManager {
         print("🗑️ [DeviceID] 已清除 Keychain 中的设备ID")
     }
 
-    // ⭐ §71 安装实例ID：首启随机 UUID，存 UserDefaults。
-    //   deviceId 可被克隆党改成一样，两台手机的 installId 必然不同——后端按此做同 deviceId 单活互踢。
-    //   注意：UserDefaults 可被整机克隆抄走，治本靠 §72 硬件密钥。
+    // ⭐ §71 安装实例ID：首启随机 UUID。deviceId 可被克隆党改成一样，两台手机的 installId
+    //   必然不同——后端按此做同 deviceId 单活互踢。
+    //   存 Keychain 且用 **ThisDeviceOnly**（不是 UserDefaults）：UserDefaults 会随 iTunes/iCloud
+    //   备份恢复到新手机，两台机器 installId 就一样了，互踢直接失效。
     private var cachedInstallID: String?
-    private let installIDKey = "install_instance_id"
+    private let installAccount = "persistent_install_identifier"
 
     func getInstallID() -> String {
         if let cached = cachedInstallID, !cached.isEmpty { return cached }
-        if let existing = UserDefaults.standard.string(forKey: installIDKey), !existing.isEmpty {
+
+        if let existing = readInstallIDFromKeychain(), !existing.isEmpty {
             cachedInstallID = existing
             return existing
         }
+
         let fresh = UUID().uuidString
-        UserDefaults.standard.set(fresh, forKey: installIDKey)
+        saveInstallIDToKeychain(fresh)
         cachedInstallID = fresh
         print("📱 [InstallID] 生成新安装实例ID: \(fresh.prefix(8))...")
         return fresh
+    }
+
+    private func readInstallIDFromKeychain() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: installAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data,
+           let value = String(data: data, encoding: .utf8) {
+            return value
+        }
+        return nil
+    }
+
+    private func saveInstallIDToKeychain(_ value: String) {
+        guard let data = value.data(using: .utf8) else { return }
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: installAccount
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: installAccount,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        if SecItemAdd(addQuery as CFDictionary, nil) != errSecSuccess {
+            print("⚠️ [InstallID] Keychain 保存失败，本次运行仅内存缓存")
+        }
     }
 }
 
 // MARK: - ⭐ §72 硬件级设备指纹（方案三·治本）
 /// 在 Secure Enclave（芯片安全区）生成**不可导出**的 EC P-256 密钥对：
-/// - 私钥永远锁在芯片里，越狱/整机克隆都复制不走（§71 的 installId 存 UserDefaults，可被抄）；
+/// - 私钥永远锁在芯片里，越狱/整机克隆都复制不走（§71 的 installId 虽然也在 Keychain，
+///   但越狱环境下 Keychain 明文可读可抄，私钥不行）；
 /// - 登录时用私钥对 "deviceId|installId|时间戳" 签名，后端用注册过的公钥验签。
 /// 公钥导出为 X9.63 裸格式（0x04‖X‖Y，65字节），后端 DeviceKeyService 已兼容解析。
 /// 模拟器/极老设备无 Secure Enclave → 回退普通 Keychain 密钥（仍不可同步迁移）。
@@ -1203,27 +1245,45 @@ class HwKeyManager {
         return createKey()
     }
 
+    /// 两条路径都必须标 **ThisDeviceOnly**（与 DeviceIDManager 的 deviceId 属性一致）：
+    /// 否则密钥会随 iTunes/iCloud 备份恢复到另一台手机，防克隆强度直接退化。
+    /// SE 密钥要用 SecAccessControl 表达（`.privateKeyUsage` 是 Secure Enclave 密钥的必需用途标记）。
     private func createKey() -> SecKey? {
-        var attrs: [String: Any] = [
+        #if !targetEnvironment(simulator)
+        if let access = SecAccessControlCreateWithFlags(nil,
+                                                       kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                                       .privateKeyUsage, nil) {
+            let seAttrs: [String: Any] = [
+                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                kSecAttrKeySizeInBits as String: 256,
+                kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+                kSecPrivateKeyAttrs as String: [
+                    kSecAttrIsPermanent as String: true,
+                    kSecAttrApplicationTag as String: tag,
+                    kSecAttrAccessControl as String: access
+                ]
+            ]
+            var seError: Unmanaged<CFError>?
+            if let key = SecKeyCreateRandomKey(seAttrs as CFDictionary, &seError) {
+                print("🔑 [HwKey] 已在 Secure Enclave 生成硬件密钥对（不可导出+不可迁移）")
+                cachedKey = key
+                return key
+            }
+            print("⚠️ [HwKey] Secure Enclave 生成失败: \(seError?.takeRetainedValue().localizedDescription ?? "未知")")
+        }
+        #endif
+
+        let fallbackAttrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecPrivateKeyAttrs as String: [
                 kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: tag
+                kSecAttrApplicationTag as String: tag,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             ]
         ]
-        #if !targetEnvironment(simulator)
-        attrs[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
-        #endif
-        var error: Unmanaged<CFError>?
-        if let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) {
-            print("🔑 [HwKey] 已在 Secure Enclave 生成硬件密钥对")
-            cachedKey = key
-            return key
-        }
-        attrs.removeValue(forKey: kSecAttrTokenID as String)
-        let fallback = SecKeyCreateRandomKey(attrs as CFDictionary, nil)
-        if fallback != nil { print("🔑 [HwKey] Secure Enclave 不可用，回退普通 Keychain 密钥") }
+        let fallback = SecKeyCreateRandomKey(fallbackAttrs as CFDictionary, nil)
+        if fallback != nil { print("🔑 [HwKey] Secure Enclave 不可用，回退普通 Keychain 密钥（ThisDeviceOnly）") }
         cachedKey = fallback
         return fallback
     }
