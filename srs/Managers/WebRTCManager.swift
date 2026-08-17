@@ -2839,6 +2839,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
 
         let want: AVCaptureVideoOrientation = .landscapeRight
+        // ⭐ 2026-08-16 修「切分辨率画面闪转」：把期望方向/镜像同步给 capturer，
+        //   configureSession 重建连接时直接生效，不再有竖屏过渡帧。
+        capturer?.desiredOrientation = want
+        capturer?.desiredMirrored = streamMirrored
         var applied = 0
         for conn in session.connections {
             if conn.isVideoOrientationSupported {
@@ -5169,11 +5173,17 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
         }
 
+        // ⭐ 2026-08-16 修「后置视野比前置小」：同一分辨率后置常有多个格式——
+        //   Binned 全视野 vs 传感器中心裁切（高帧读出，FOV 窄 10°+）。原排序只看
+        //   fps/面积不看 FOV，后置 @60 常选中裁切版。现在 fps 档相同时优先选 FOV 最大的。
         func choose(_ formats: [AVCaptureDevice.Format]) -> AVCaptureDevice.Format? {
             formats.sorted { lhs, rhs in
                 let lFps = maxFps(lhs)
                 let rFps = maxFps(rhs)
                 if lFps != rFps { return lFps < rFps }
+                let lFov = lhs.videoFieldOfView
+                let rFov = rhs.videoFieldOfView
+                if abs(lFov - rFov) > 0.5 { return lFov > rFov }  // 同fps档：视野大的优先
                 let lDims = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
                 let rDims = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
                 return Int(lDims.width * lDims.height) < Int(rDims.width * rDims.height)
@@ -5186,7 +5196,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         for (idx, fmt) in base.enumerated() {
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
             let binned = fmt.isVideoBinned ? "Binned" : "NonBinned"
-            print("      [\(idx)] \(dims.width)x\(dims.height) @\(maxFps(fmt))fps \(pixelFormatString(fmt)) \(binned)")
+            print("      [\(idx)] \(dims.width)x\(dims.height) @\(maxFps(fmt))fps \(pixelFormatString(fmt)) \(binned) FOV=\(String(format: "%.1f", fmt.videoFieldOfView))°")
         }
 
         let strict = base.filter { matchesRange($0) && matchesBinning($0) && maxFps($0) >= requiredFps }
@@ -5220,7 +5230,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         if let selected {
             let dims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
             let binned = selected.isVideoBinned ? "Binned" : "NonBinned"
-            print("   ✅ 格式选中(\(reason)): \(dims.width)x\(dims.height) @\(maxFps(selected))fps \(pixelFormatString(selected)) \(binned)")
+            print("   ✅ 格式选中(\(reason)): \(dims.width)x\(dims.height) @\(maxFps(selected))fps \(pixelFormatString(selected)) \(binned) FOV=\(String(format: "%.1f", selected.videoFieldOfView))°")
         }
         return selected
     }

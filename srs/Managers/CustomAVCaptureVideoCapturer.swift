@@ -38,6 +38,10 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     private var lastConfigFps: Int = 30
     private var configureRetryCount = 0
     private let maxConfigureRetries = 3
+    // ⭐ 2026-08-16 修「切分辨率画面闪转」：重配会话时直接套用的期望方向/镜像，
+    //   由 WebRTCManager.applyMountTransform 保持同步（App 强制横屏，默认 landscapeRight）。
+    var desiredOrientation: AVCaptureVideoOrientation = .landscapeRight
+    var desiredMirrored: Bool = false
     private var wbTemperature: Float = 0
     private var wbTint: Float = 0
     private var wbRed: Float = 0
@@ -678,8 +682,17 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 }
             }
 
-            if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
-                connection.videoOrientation = .portrait
+            // ⭐ 2026-08-16 修「切分辨率画面先旋转一下再正」：原来这里把新连接方向写死
+            //   .portrait，要等 WebRTCManager.applyMountTransform 在采集启动完成的异步
+            //   回调里才改回横屏，中间几帧就是竖屏方向 → 每次切档画面闪转。
+            //   现在重配会话时直接套用期望方向/镜像（由 applyMountTransform 保持同步）。
+            if let connection = videoOutput.connection(with: .video) {
+                if connection.isVideoOrientationSupported {
+                    connection.videoOrientation = desiredOrientation
+                }
+                if connection.isVideoMirroringSupported {
+                    connection.isVideoMirrored = desiredMirrored
+                }
             }
 
             currentDevice = device
