@@ -316,6 +316,32 @@ class APIService {
     private init() {}
     
     
+    // MARK: - §76 领取一次性安全挑战值（登录前调用，无需 token）
+    /// GET /auth/hw-challenge?deviceId=xxx → {challenge, expiresIn}
+    /// 任何失败都返回 nil：调用方退回不带挑战值的旧签名格式（灰度期后端放行），不阻断登录。
+    private func fetchHwChallenge(deviceId: String) async -> String? {
+        let urlStr = APIConfig.shared.fullURL(for: APIConfig.Auth.hwChallenge)
+            + "?deviceId=" + (deviceId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? deviceId)
+        guard let url = URL(string: urlStr) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("iPhone/iOS", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                print("⚠️ [§76挑战值] 领取失败，降级为旧签名格式")
+                return nil
+            }
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let chal = obj["challenge"] as? String, !chal.isEmpty else { return nil }
+            return chal
+        } catch {
+            print("⚠️ [§76挑战值] 领取异常: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // MARK: - 用户登录
     func login(username: String, password: String) async throws -> LoginResponse {
         
@@ -339,14 +365,20 @@ class APIService {
             "deviceId": deviceId,
             "installId": installId
         ]
-        // ⭐ §72 硬件密钥签名（Secure Enclave）：payload=deviceId|installId|时间戳，与后端约定一致。
-        //   签名失败（极端情况）则不带字段，由后端开关 device.hwkey.required 决定拦不拦
+        // ⭐ §72/§76 硬件密钥签名（Secure Enclave）：先领一次性挑战值，
+        //   payload=deviceId|installId|时间戳|挑战值（挑战值验签后被服务端焚毁，抓包重放无效）。
+        //   领取失败则退回不带挑战值的旧格式，由后端开关决定放不放行，不因一次网络抖动登不上。
+        //   签名失败（极端情况）则整组字段都不带。
+        let hwChal = await fetchHwChallenge(deviceId: deviceId)
         let hwTs = String(Int64(Date().timeIntervalSince1970 * 1000))
+        var hwPayload = "\(deviceId)|\(installId)|\(hwTs)"
+        if let chal = hwChal, !chal.isEmpty { hwPayload += "|\(chal)" }
         if let hwPub = HwKeyManager.shared.publicKeyB64(),
-           let hwSign = HwKeyManager.shared.sign("\(deviceId)|\(installId)|\(hwTs)") {
+           let hwSign = HwKeyManager.shared.sign(hwPayload) {
             loginData["hwPub"] = hwPub
             loginData["hwSign"] = hwSign
             loginData["hwTs"] = hwTs
+            if let chal = hwChal, !chal.isEmpty { loginData["hwChal"] = chal }
             // ⭐ §75 自报私钥存放位置（se/software），总后台「芯片密钥」列据此区分真芯片与静默降级
             if let hwLevel = HwKeyManager.shared.securityLevel() {
                 loginData["hwLevel"] = hwLevel

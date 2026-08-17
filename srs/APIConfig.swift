@@ -46,6 +46,7 @@ class APIConfig {
     struct Auth {
         static let registerDevice = "/auth/register/device"  // 设备端注册
         static let login = "/auth/login/device"  // 🔥 一机一码登录（带deviceId验证）
+        static let hwChallenge = "/auth/hw-challenge"  // §76 硬件密钥一次性挑战值（登录前领，防重放）
         static let verifyToken = "/auth/verify-token"
         static let refreshToken = "/auth/refresh-token"
         static let streamToken = "/auth/stream/token/simple"  // 获取推流Token
