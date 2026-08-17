@@ -442,9 +442,9 @@ class APIService {
             // 🔥 关键修改：直接解析LoginResponse，不是APIResponse包装
             let loginResponse = try JSONDecoder().decode(LoginResponse.self, from: data)
             print("✅ [登录] 成功, userId=\(loginResponse.userId ?? -1)")
+            let rawLoginJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             // 🎨 解析 iosPipeline（三链路开关 + 滤镜/硬件/LUT 默认值）→ 内存静态变量（宽松解析，缺失保留兜底）
-            if let rawJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let pipeline = rawJson["iosPipeline"] as? [String: Any] {
+            if let pipeline = rawLoginJson?["iosPipeline"] as? [String: Any] {
                 print("[登录] 收到 iosPipeline keys=\(pipeline.keys.sorted())")
                 IOSPipelineConfig.shared.update(fromLoginJSON: pipeline)
             } else {
@@ -452,6 +452,9 @@ class APIService {
                 print("[登录] ⚠️ 未返回 iosPipeline，使用内置兜底 filter=\(cfg.switchFilter) hw=\(cfg.switchHardware) lut=\(cfg.switchLut)")
                 print("ℹ️ [登录] 未返回 iosPipeline，使用内置默认值")
             }
+            // ⭐ §77 解析 videoLadder（5 档分辨率/帧率/码率）→ 落盘 UserDefaults，下次算档位生效。
+            //   字段缺省（后端没配/老后端）传 nil，Store 会清掉本地覆盖回内置默认值。
+            LadderConfigStore.shared.update(fromLoginJSON: rawLoginJson?["videoLadder"] as? [String: Any])
             return loginResponse
             
         } catch {

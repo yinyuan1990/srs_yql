@@ -865,6 +865,135 @@ struct LadderPreset {
     }
 }
 
+/// ⭐ §77：自带摄像头 5 档「分辨率 / 帧率 / 码率」的**唯一取值处**。
+///
+/// ## 为什么要有这个类
+/// 这些数值原来硬编码在 `calculateLadderForDevice()` 里，运营想调码率
+/// （典型场景：客户反馈某档糊/马赛克，或要压带宽成本）就得改代码重新发版，
+/// iOS 还得再等 App Store 审核。现在改成后端 `video.ladder.config` 下发、登录响应带回来，
+/// 落盘后下次算档位即生效，**不用发版**。
+///
+/// ## 取值优先级
+/// `后端下发值 > 本地内置默认值`，且**逐字段**判断——后端某项没配/给 0 就用默认值那一项，
+/// 不是整档回退。所以运营可以只调 max/min，分辨率和帧率照旧走本地的机型适配逻辑。
+///
+/// ## 分辨率/帧率默认「不覆盖」是有意的
+/// iOS 的档位分辨率跟机型强绑定（p4k 在 iPhone 15+ 采 1920x1080、更早机型采 1920x1440），
+/// ultra 的帧率还分前后置（240 / 120）。这些分支是实测出来的，后台留空（=0）就继续走它们；
+/// 只有明确要改时才在后台填具体值。
+///
+/// ## 与 Android 的关系
+/// 两端同档数值本来就不同（iOS p4k 上限 7000，Android 5500），所以后端按平台分开存，
+/// 登录时只下发本平台那份，这里拿到的就是 iOS 子树。
+///
+/// ⚠️ 放在本文件而不是单独建 .swift：工程是 objectVersion 56 的老式 pbxproj，
+/// 新增文件不会自动进编译目标，独立文件得手动在 Xcode 里 Add Files 才行。
+final class LadderConfigStore {
+
+    static let shared = LadderConfigStore()
+
+    /// 一档的完整参数。w/h/fps 为 0 = 该项不覆盖，沿用代码里的机型适配结果
+    struct Entry {
+        let w: Int
+        let h: Int
+        let fps: Int
+        let maxKbps: Int
+        let minKbps: Int
+    }
+
+    /// 后台 JSON 里的档位名（与 Android、后端三方约定一致，别改）
+    static let p4k = "p4k"
+    static let high = "high"
+    static let ultra = "ultra"
+    static let standard = "standard"
+    static let low = "low"
+
+    private static let storageKey = "video_ladder_config"
+
+    /// 内置默认值：与 2026-08-18 之前硬编码的数值完全一致（不改变现有行为）。
+    /// w/h/fps 全给 0 = 分辨率与帧率继续由 calculateLadderForDevice 的机型分支决定。
+    private let builtin: [String: Entry] = [
+        LadderConfigStore.p4k:      Entry(w: 0, h: 0, fps: 0, maxKbps: 7000, minKbps: 4500),
+        LadderConfigStore.high:     Entry(w: 0, h: 0, fps: 0, maxKbps: 6500, minKbps: 4200),
+        LadderConfigStore.ultra:    Entry(w: 0, h: 0, fps: 0, maxKbps: 5000, minKbps: 3300),
+        LadderConfigStore.standard: Entry(w: 0, h: 0, fps: 0, maxKbps: 4000, minKbps: 2700),
+        LadderConfigStore.low:      Entry(w: 0, h: 0, fps: 0, maxKbps: 2000, minKbps: 1500)
+    ]
+
+    /// 后端下发值（登录时落盘，App 启动时从磁盘读回）
+    private var remote: [String: Entry] = [:]
+
+    /// 后端是否配了「统一采集帧率」（0=不覆盖，各档用自己的 fps 逻辑）
+    private(set) var remoteCaptureFps: Int = 0
+
+    private init() {
+        loadFromDisk()
+    }
+
+    /// 登录响应里拿到 videoLadder 后调用：落盘 + 立即生效。
+    /// 传 nil = 后端没配 → 清掉本地覆盖回内置默认（便于后台把值改回默认）
+    func update(fromLoginJSON json: [String: Any]?) {
+        guard let json = json, !json.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: LadderConfigStore.storageKey)
+            remote = [:]
+            remoteCaptureFps = 0
+            print("📐 [§77档位配置] 后端未配置，使用内置默认值")
+            return
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: json) {
+            UserDefaults.standard.set(data, forKey: LadderConfigStore.storageKey)
+        }
+        apply(json)
+    }
+
+    private func loadFromDisk() {
+        guard let data = UserDefaults.standard.data(forKey: LadderConfigStore.storageKey),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        apply(json)
+    }
+
+    private func apply(_ json: [String: Any]) {
+        remoteCaptureFps = min(max(intOf(json["captureFps"]), 0), 240)
+        var parsed: [String: Entry] = [:]
+        for name in [LadderConfigStore.p4k, LadderConfigStore.high, LadderConfigStore.ultra,
+                     LadderConfigStore.standard, LadderConfigStore.low] {
+            guard let node = json[name] as? [String: Any], let def = builtin[name] else { continue }
+            // 逐字段兜底：后端缺项/给 0 就用默认值那一项
+            let maxKbps = intOf(node["max"]) > 0 ? intOf(node["max"]) : def.maxKbps
+            let rawMin = intOf(node["min"]) > 0 ? intOf(node["min"]) : Int(Double(maxKbps) * 0.6)
+            parsed[name] = Entry(
+                w: intOf(node["w"]),
+                h: intOf(node["h"]),
+                fps: min(max(intOf(node["fps"]), 0), 240),
+                maxKbps: maxKbps,
+                // min 不能超过 max，否则编码器参数自相矛盾
+                minKbps: min(rawMin, maxKbps)
+            )
+        }
+        remote = parsed
+        print("📐 [§77档位配置] 已应用后端下发: \(parsed.count)档, 采集帧率覆盖=\(remoteCaptureFps)")
+        for (k, v) in parsed {
+            let res = (v.w > 0 && v.h > 0) ? " 分辨率\(v.w)x\(v.h)" : " 分辨率不覆盖"
+            let fps = v.fps > 0 ? " @\(v.fps)fps" : ""
+            print("📐   \(k) → \(v.minKbps)-\(v.maxKbps)kbps\(res)\(fps)")
+        }
+    }
+
+    /// JSON 里数字可能被解析成 NSNumber / String，统一转 Int（转不了给 0=不覆盖）
+    private func intOf(_ any: Any?) -> Int {
+        if let n = any as? NSNumber { return n.intValue }
+        if let s = any as? String { return Int(s) ?? 0 }
+        return 0
+    }
+
+    /// 取某档最终参数（后端优先，逐字段回退默认）
+    func entry(_ name: String) -> Entry {
+        remote[name] ?? builtin[name] ?? Entry(w: 0, h: 0, fps: 0, maxKbps: 4000, minKbps: 2700)
+    }
+}
+
 final class WebRTCManager: NSObject, ObservableObject {
     
     /// 全局冗余日志开关（自适应/SRT/采集等模块的高频诊断 print 受此 gate）。
@@ -977,55 +1106,80 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         let needP4kSeparateCapture = isIPhone15OrNewer()
 
+        // ⭐ §77：档位数值改由后端「运营配置→App配置→视频码率档位」下发（登录响应 videoLadder），
+        //   后台没配 = 内置默认值 = 与本行以下注释描述的历史数值完全一致，行为不变。
+        //   分辨率/帧率后台留空(0)时继续走下面的机型分支（p4k 的 15+ 判断、ultra 的前后置 240/120）。
+        let store = LadderConfigStore.shared
+        let cfgP4k = store.entry(LadderConfigStore.p4k)
+        let cfgHigh = store.entry(LadderConfigStore.high)
+        let cfgUltra = store.entry(LadderConfigStore.ultra)
+        let cfgStd = store.entry(LadderConfigStore.standard)
+        let cfgLow = store.entry(LadderConfigStore.low)
+        // 采集帧率：后台「统一采集帧率」优先 → 该档配置的 fps → 代码默认 60
+        func fpsOf(_ e: LadderConfigStore.Entry, _ fallback: Int) -> Int {
+            if store.remoteCaptureFps > 0 { return store.remoteCaptureFps }
+            return e.fps > 0 ? e.fps : fallback
+        }
+
         // 🔥 超高清档位：iPhone 15+ 直接采集1920x1080 (16:9)，scaleDown=1.0
         //              iPhone 13/14 采集1920x1440 (4:3) → 原始输出1920x1440，scaleDown=1.0
         // ⭐ 2026-07-09 用户要求：全档位码率上限统一下调 500（min 不动）
         let p4kPreset: LadderPreset
-        if needP4kSeparateCapture {
-            p4kPreset = LadderPreset(width: 1920, height: 1080, fps: 60, maxKbps: 7000, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
-        } else {
-            p4kPreset = LadderPreset(width: 1920, height: 1440, fps: 60, maxKbps: 7000, minKbps: 4500, maxPushFps: 60, scaleDown: 1.0)
-        }
+        let p4kDefaultHeight = needP4kSeparateCapture ? 1080 : 1440
+        p4kPreset = LadderPreset(width: cfgP4k.w > 0 ? cfgP4k.w : 1920,
+                                 height: cfgP4k.h > 0 ? cfgP4k.h : p4kDefaultHeight,
+                                 fps: fpsOf(cfgP4k, 60),
+                                 maxKbps: cfgP4k.maxKbps, minKbps: cfgP4k.minKbps,
+                                 maxPushFps: 60, scaleDown: 1.0)
 
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
         // ⭐ 除 640x480(low) 外，其他档位最大码率再 +1000kbps
         // ⭐ minKbps 约为 max 的 60%，码率可向下波动
         // 🔥 2026-07-02: high 档码率上调 5500→7000（min 60%）。原与 ultra(1280x720) 同区间 3300-5500，
         //   但 high 像素多 68%（1440x1080≈1.55M vs 0.92M px），同码率必然先糊先卡（编码器 underbitrate）。
-        let highPreset     = LadderPreset(width: 1440, height: 1080, fps: 60, maxKbps: 6500, minKbps: 4200, maxPushFps: 60, scaleDown: 1.0)
-        let standardPreset = LadderPreset(width: 1024, height: 768,  fps: 60, maxKbps: 4000, minKbps: 2700, maxPushFps: 60, scaleDown: 1.0)
-        let lowPreset      = LadderPreset(width: 640,  height: 480,  fps: 60, maxKbps: 2000, minKbps: 1500, maxPushFps: 60, scaleDown: 1.0)  // 低清 1500~2000
+        let highPreset     = LadderPreset(width: cfgHigh.w > 0 ? cfgHigh.w : 1440, height: cfgHigh.h > 0 ? cfgHigh.h : 1080, fps: fpsOf(cfgHigh, 60), maxKbps: cfgHigh.maxKbps, minKbps: cfgHigh.minKbps, maxPushFps: 60, scaleDown: 1.0)
+        let standardPreset = LadderPreset(width: cfgStd.w > 0 ? cfgStd.w : 1024, height: cfgStd.h > 0 ? cfgStd.h : 768, fps: fpsOf(cfgStd, 60), maxKbps: cfgStd.maxKbps, minKbps: cfgStd.minKbps, maxPushFps: 60, scaleDown: 1.0)
+        let lowPreset      = LadderPreset(width: cfgLow.w > 0 ? cfgLow.w : 640, height: cfgLow.h > 0 ? cfgLow.h : 480, fps: fpsOf(cfgLow, 60), maxKbps: cfgLow.maxKbps, minKbps: cfgLow.minKbps, maxPushFps: 60, scaleDown: 1.0)
 
         let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
         
         if device.position == .back {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 240, maxKbps: 5000, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
+                // ⭐ §77 后置 ultra 默认 240fps（后台留空即维持），码率同样可后台调
+                .ultra:    LadderPreset(width: cfgUltra.w > 0 ? cfgUltra.w : 1280, height: cfgUltra.h > 0 ? cfgUltra.h : 720, fps: fpsOf(cfgUltra, 240), maxKbps: cfgUltra.maxKbps, minKbps: cfgUltra.minKbps, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 后置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7000kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @240fps → 3300-5000kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 4200-6500kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 1024x768  @60fps  → 2700-4000kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 1500-2000kbps (采集1920x1440缩放)")
+            printLadderDetail(p4kInfo: p4kInfo)
         } else {
             currentLadder = [
                 .p4k:      p4kPreset,
-                .ultra:    LadderPreset(width: 1280, height: 720, fps: 120, maxKbps: 5000, minKbps: 3300, maxPushFps: 60, scaleDown: 1.0),
+                // ⭐ §77 前置 ultra 默认 120fps（前置硬件上限比后置低，后台留空即维持）
+                .ultra:    LadderPreset(width: cfgUltra.w > 0 ? cfgUltra.w : 1280, height: cfgUltra.h > 0 ? cfgUltra.h : 720, fps: fpsOf(cfgUltra, 120), maxKbps: cfgUltra.maxKbps, minKbps: cfgUltra.minKbps, maxPushFps: 60, scaleDown: 1.0),
                 .high:     highPreset,
                 .standard: standardPreset,
                 .low:      lowPreset
             ]
             print("📐 前置摄像头 - 档位配置：")
-            print("   超高清(p4k)   = \(p4kPreset.width)x\(p4kPreset.height) @60fps → 4500-7000kbps [\(p4kInfo)]")
-            print("   超高帧(ultra) = 1280x720  @120fps → 3300-5000kbps (16:9单独采集)")
-            print("   超清(high)    = 1440x1080 @60fps  → 4200-6500kbps (采集1920x1440缩放)")
-            print("   高清(standard)= 1024x768  @60fps  → 2700-4000kbps (采集1920x1440缩放)")
-            print("   低清(low)     = 640x480   @60fps  → 1500-2000kbps (采集1920x1440缩放)")
+            printLadderDetail(p4kInfo: p4kInfo)
+        }
+    }
+
+    /// ⭐ §77 打印各档**实际生效**值。
+    /// 原来这里是写死的数字（"4500-7000kbps"），档位可后台配置之后就不能这么写了——
+    /// 后台改了码率而日志还印旧数字，排查时会被直接带偏。
+    private func printLadderDetail(p4kInfo: String) {
+        let order: [(LadderProfile, String)] = [
+            (.p4k, "超高清(p4k)   "), (.ultra, "超高帧(ultra) "),
+            (.high, "超清(high)    "), (.standard, "高清(standard)"), (.low, "低清(low)     ")
+        ]
+        for (profile, name) in order {
+            guard let p = currentLadder[profile] else { continue }
+            let extra = profile == .p4k ? " [\(p4kInfo)]" : ""
+            print("   \(name)= \(p.width)x\(p.height) @\(p.fps)fps → \(p.minKbps)-\(p.maxKbps)kbps\(extra)")
         }
     }
     
