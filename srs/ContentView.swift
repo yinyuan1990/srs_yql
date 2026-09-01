@@ -653,10 +653,7 @@ struct ContentView: View {
     @State private var loginAdTitle: String = "公告"
     @State private var loginAdVersion: Int = 0
     @State private var loginAdChecked: Bool = false
-    // ⭐ §60（2026-08-13）：邀请活动弹层（登录后三态：试用未绑定=填邀请人 / 试用已绑定=已用过邀请 / 会员=打卡+档位领取）
-    @State private var showReferralSheet: Bool = false
-    @State private var referralStatus: APIService.ReferralStatus? = nil
-    @State private var referralChecked: Bool = false
+    // ⭐ §95（2026-09-01）：§60 邀请活动弹层从推流页搬到「我的」页（ProfileView：打开即弹 +「时长奖励」入口），本页相关状态/弹层全部移除。
 
     /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
     private let showCaptureExperimentPanel = false
@@ -1109,26 +1106,7 @@ struct ContentView: View {
                 }
             }
 
-            // ⭐ §60：登录后拉邀请活动状态（需 JWT，一次会话只查一次）——活动开启则弹三态弹层
-            if !referralChecked {
-                referralChecked = true
-                Task {
-                    do {
-                        let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
-                        if !token.isEmpty {
-                            let st = try await APIService.shared.getReferralStatus(token: token)
-                            if st.enabled == true && st.state != nil {
-                                await MainActor.run {
-                                    self.referralStatus = st
-                                    self.showReferralSheet = true
-                                }
-                            }
-                        }
-                    } catch {
-                        print("⚠️ [Referral] 拉取失败: \(error)")
-                    }
-                }
-            }
+            // ⭐ §95（2026-09-01）：原 §60「登录后拉邀请活动状态并弹层」已搬到「我的」页（ProfileView 打开即弹），推流页不再触发。
             
             // 延迟启动摄像头
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1366,12 +1344,7 @@ struct ContentView: View {
                 }
             )
         }
-        // ⭐ §60：邀请活动弹层（三态；活动开关/文案/档位全部总后台可配）
-        .sheet(isPresented: $showReferralSheet) {
-            if let st = referralStatus {
-                ReferralView(status: st, onClose: { showReferralSheet = false })
-            }
-        }
+        // ⭐ §95（2026-09-01）：邀请活动弹层 sheet 已搬到 ProfileView（打开「我的」页即弹）。
         // 激活页面
         .sheet(isPresented: $showingActivation, onDismiss: {
             AppDelegate.orientationLock = .portrait

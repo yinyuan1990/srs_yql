@@ -298,21 +298,11 @@ struct ReferralView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    // ⭐ §62：固定三句话（① 红色加大 ② 绿色 ③ 默认色）
-                    Text("邀请奖励(邀请人必须解锁等级才可以参加以下奖励)")
+                    // ⭐ §95（2026-09-01）文字口径：固定头部两行红字
+                    //   （原「邀请奖励(...)/新用户前8位/日卡一张」三句与后台 popupContent 均不再展示）
+                    Text("在未开通账号的推荐人入口中\n输入自己的金凤凰账号即可完成奖励")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.red)
-                    Text("新用户 输入当前手机端账号前8位 即可完成邀请。")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.green)
-                    Text("邀请成功新用户即可领取日卡一张(可稍后使用)")
-                        .font(.system(size: 14))
-
-                    if let content = status.popupContent, !content.isEmpty {
-                        Text(content)
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-                    }
 
                     switch status.state {
                     case "TRIAL_CAN_BIND":
@@ -387,13 +377,14 @@ struct ReferralView: View {
                             }
                             ForEach(tiers) { tier in
                                 HStack {
-                                    // §62 文字口径：档位=邀请解锁成功、奖励显示累计值（cumulativeMonths）
+                                    // ⭐ §95 文字口径：「邀请解锁成功」→「推荐解锁成功」（"推荐"红色）；领取逻辑不变
                                     // §64.2：单位从"月"改"天"（后端 plusDays，字段名不变、数值即天数）
-                                    Text("邀请解锁成功 \(tier.count ?? 0) 人")
+                                    (Text("推荐").foregroundColor(.red) + Text("解锁成功 \(tier.count ?? 0) 人"))
                                         .font(.system(size: 14))
                                     Spacer()
-                                    Text((tier.months ?? 0) > 0 ? "奖励时长 增加至\(tier.cumulativeMonths ?? 0)天" : "已封顶")
-                                        .font(.system(size: 13))
+                                    // ⭐ §95：「奖励时长」→「奖励账号时长」，字号缩小（13→10）不然放不下
+                                    Text((tier.months ?? 0) > 0 ? "奖励账号时长 增加至\(tier.cumulativeMonths ?? 0)天" : "已封顶")
+                                        .font(.system(size: 10))
                                         .foregroundColor((tier.months ?? 0) > 0 ? .orange : .secondary)
                                     switch tier.status ?? "LOCKED" {
                                     case "CLAIMED":

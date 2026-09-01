@@ -119,6 +119,10 @@ struct ProfileView: View {
    @State private var pcdlConfig: APIService.PcdlConfig?
    @State private var showingPcdlAlert = false
 
+   // ⭐ §95（2026-09-01）：邀请/时长奖励活动弹层（从推流页 §60 搬来：打开「我的」页即弹；「时长奖励」入口可随时再看）
+   @State private var referralStatus: APIService.ReferralStatus?
+   @State private var showingReferralSheet = false
+
    // ⭐ §62（2026-08-14）：日卡（邀请奖励，已领未用时显示；二级确认后生效，从确定那一刻起算）
    @State private var trialCardPending = false
    @State private var trialCardHours: Int = 24
@@ -148,6 +152,9 @@ struct ProfileView: View {
                         // §62 日卡待用标记 + 生效时长
                         trialCardPending = st.trialCardPending ?? false
                         trialCardHours = st.trialHours ?? 24
+                        // ⭐ §95：打开「我的」页即弹活动弹层（原推流页登录后弹，按需求搬到这里）
+                        referralStatus = st
+                        if st.enabled == true && st.state != nil { showingReferralSheet = true }
                     }
                 }
                 if let cfg = try? await APIService.shared.getPcDownload() {
@@ -171,6 +178,12 @@ struct ProfileView: View {
                 ? pcdlConfig!.content!
                 : "复制下载地址后，粘贴到电脑浏览器地址栏，即可直接下载安装程序。"
             Text(tip + "\n\n" + (pcdlConfig?.url ?? ""))
+        }
+        // ⭐ §95：邀请/时长奖励活动弹层（打开本页即弹；「时长奖励」入口可再次打开查看活动进度）
+        .sheet(isPresented: $showingReferralSheet) {
+            if let st = referralStatus {
+                ReferralView(status: st, onClose: { showingReferralSheet = false })
+            }
         }
         // ⭐ §62：日卡二级确认弹框（确定那一刻起生效；自行开通会员则以开通为准）
         .alert("使用日卡", isPresented: $showingTrialCardConfirm) {
@@ -792,6 +805,18 @@ struct ProfileView: View {
                                titleColor: .red,   // §62 标红
                                showArrow: true) {
                     showingPcdlAlert = true
+                }
+            }
+
+            // ⭐ §95：时长奖励入口（电脑版下载下方；活动开启即显示，点击查看推广活动与奖励进度）
+            if referralStatus?.enabled == true, referralStatus?.state != nil {
+                Divider().padding(.leading, 60)
+                ProfileRowView(icon: "gift",
+                               title: "时长奖励",
+                               subtitle: "查看推广活动与奖励进度",
+                               titleColor: .red,
+                               showArrow: true) {
+                    showingReferralSheet = true
                 }
             }
         }
