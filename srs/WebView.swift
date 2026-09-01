@@ -275,6 +275,7 @@ struct ReferralView: View {
     @State private var busy: Bool = false
     @State private var errorText: String?
     @State private var noticeText: String?
+    @State private var bindAlertText: String?
 
     private var isMember: Bool { status.state == "MEMBER" }
 
@@ -298,23 +299,23 @@ struct ReferralView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    // ⭐ §95（2026-09-01）文字口径：固定头部两行红字
-                    //   （原「邀请奖励(...)/新用户前8位/日卡一张」三句与后台 popupContent 均不再展示）
-                    Text("在未开通账号的推荐人入口中\n输入自己的金凤凰账号即可完成奖励")
+                    // ⭐ §95：会员 / 非会员头部文案分开（逻辑不动）
+                    Text(isMember
+                         ? "在未开通账号的推荐人入口中\n输入自己的金凤凰账号即可完成奖励"
+                         : "填写推荐人账号即可领取日卡一张")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.red)
 
                     switch status.state {
                     case "TRIAL_CAN_BIND":
-                        Text("填写邀请人（手机端账号前8位 / 昵称 / 完整账号），邀请成功可领取日卡一张（全部功能体验 \(status.trialHours ?? 24) 小时，可稍后到「我的」页使用）")
-                            .font(.system(size: 14))
-                        TextField("邀请人账号前8位 / 昵称 / 完整账号", text: $inviterInput)
+                        TextField("推荐人的金凤凰账号前8位或完整账号", text: $inviterInput)
                             .textFieldStyle(.roundedBorder)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             .disabled(busy)
-                        Text("⚠️ 邀请号终身只能选择一次，提交后不可更改")
-                            .font(.system(size: 13, weight: .medium))
+                        (Text("⚠️ ")
+                         + Text("账号").font(.system(size: 15, weight: .bold))
+                         + Text("终身只能选择一次，提交后不可更改").font(.system(size: 13, weight: .medium)))
                             .foregroundColor(.red)
                         if let err = errorText {
                             Text(err).font(.system(size: 13)).foregroundColor(.red)
@@ -408,6 +409,14 @@ struct ReferralView: View {
                 .padding(16)
             }
         }
+        .alert("提示", isPresented: Binding(
+            get: { bindAlertText != nil },
+            set: { if !$0 { bindAlertText = nil } }
+        )) {
+            Button("确定", role: .cancel) { bindAlertText = nil }
+        } message: {
+            Text(bindAlertText ?? "")
+        }
     }
 
     private func refresh() {
@@ -421,23 +430,23 @@ struct ReferralView: View {
 
     private func bind() {
         let input = inviterInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { errorText = "请输入邀请人的账号前8位、昵称或完整账号"; return }
+        guard !input.isEmpty else { errorText = "请输入推荐人的金凤凰账号前8位或完整账号"; return }
         busy = true
         errorText = nil
         Task {
             do {
                 let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
                 let deviceId = UserDefaults.standard.string(forKey: "device_id") ?? ""
-                let r = try await APIService.shared.referralBind(inviter: input, deviceId: deviceId, token: token)
+                _ = try await APIService.shared.referralBind(inviter: input, deviceId: deviceId, token: token)
                 await MainActor.run {
                     busy = false
-                    noticeText = r.message ?? "绑定成功！"
+                    bindAlertText = "领取成功可在我的页面使用"
                 }
                 refresh()
             } catch {
                 await MainActor.run {
                     busy = false
-                    errorText = (error as? APIError)?.localizedDescription ?? "绑定失败，请重试"
+                    bindAlertText = "请输入已开通的账号或正确的账号才可领取日卡奖励"
                 }
             }
         }
