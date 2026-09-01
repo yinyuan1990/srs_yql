@@ -653,7 +653,11 @@ struct ContentView: View {
     @State private var loginAdTitle: String = "公告"
     @State private var loginAdVersion: Int = 0
     @State private var loginAdChecked: Bool = false
-    // ⭐ §95（2026-09-01）：§60 邀请活动弹层从推流页搬到「我的」页（ProfileView：打开即弹 +「时长奖励」入口），本页相关状态/弹层全部移除。
+    // ⭐ §95.2（2026-09-01）：活动弹层按身份分流——非会员（试用）仍在本页登录后自动弹（ReferralView 复用，新文案）；
+    //   会员的自动弹已搬到「我的」页（ProfileView §95）。
+    @State private var showReferralSheet: Bool = false
+    @State private var referralStatus: APIService.ReferralStatus? = nil
+    @State private var referralChecked: Bool = false
 
     /// 采集实验面板（format/颜色滑块）— 隐藏 UI，保留代码
     private let showCaptureExperimentPanel = false
@@ -1106,7 +1110,27 @@ struct ContentView: View {
                 }
             }
 
-            // ⭐ §95（2026-09-01）：原 §60「登录后拉邀请活动状态并弹层」已搬到「我的」页（ProfileView 打开即弹），推流页不再触发。
+            // ⭐ §95.2：登录后拉邀请活动状态（需 JWT，一次会话只查一次）——仅【非会员】(TRIAL_CAN_BIND/TRIAL_BOUND)
+            //   在本页弹层；会员不在此弹（会员的自动弹在「我的」页，见 ProfileView §95）。
+            if !referralChecked {
+                referralChecked = true
+                Task {
+                    do {
+                        let token = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
+                        if !token.isEmpty {
+                            let st = try await APIService.shared.getReferralStatus(token: token)
+                            if st.enabled == true && st.state != nil && st.state != "MEMBER" {
+                                await MainActor.run {
+                                    self.referralStatus = st
+                                    self.showReferralSheet = true
+                                }
+                            }
+                        }
+                    } catch {
+                        print("⚠️ [Referral] 拉取失败: \(error)")
+                    }
+                }
+            }
             
             // 延迟启动摄像头
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1344,7 +1368,12 @@ struct ContentView: View {
                 }
             )
         }
-        // ⭐ §95（2026-09-01）：邀请活动弹层 sheet 已搬到 ProfileView（打开「我的」页即弹）。
+        // ⭐ §95.2：非会员活动弹层（登录后自动弹；ReferralView 与「我的」页共用，文案/绑定逻辑一致）
+        .sheet(isPresented: $showReferralSheet) {
+            if let st = referralStatus {
+                ReferralView(status: st, onClose: { showReferralSheet = false })
+            }
+        }
         // 激活页面
         .sheet(isPresented: $showingActivation, onDismiss: {
             AppDelegate.orientationLock = .portrait
