@@ -152,10 +152,10 @@ struct ProfileView: View {
                         // §62 日卡待用标记 + 生效时长
                         trialCardPending = st.trialCardPending ?? false
                         trialCardHours = st.trialHours ?? 24
-                        // ⭐ §95/§95.2：打开「我的」页自动弹活动弹层——仅限【会员】；
-                        //   非会员的自动弹留在推流页（ContentView §95.2），进本页不弹（「时长奖励」入口仍可手动打开）。
+                        // ⭐ §98（2026-09-20）：打开「我的」页自动弹活动弹层——会员与非会员一律在本页弹
+                        //   （推流页 ContentView 不再弹）；「时长奖励」入口仍可手动再看。
                         referralStatus = st
-                        if st.enabled == true && st.state == "MEMBER" { showingReferralSheet = true }
+                        if st.enabled == true && st.state != nil { showingReferralSheet = true }
                     }
                 }
                 if let cfg = try? await APIService.shared.getPcDownload() {

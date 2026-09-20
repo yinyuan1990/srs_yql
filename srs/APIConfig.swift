@@ -12,26 +12,26 @@ class APIConfig {
     // 基础URL - 可以根据环境切换
     public var baseURL: String {
         #if DEBUG
-        return "https://api.147258yql.cn" // 开发环境
+        return "https://api.jinfenghuang.vip" // 开发环境
         #else
-        return "https://api.147258yql.cn" // 生产环境
+        return "https://api.jinfenghuang.vip" // 生产环境
         #endif
     }
     
     
     private var baseWsURL: String {
         #if DEBUG
-        return "wss://ws.147258yql.cn/native-ws"
+        return "wss://ws.jinfenghuang.vip/native-ws"
         #else
-        return "wss://ws.147258yql.cn/native-ws"
+        return "wss://ws.jinfenghuang.vip/native-ws"
         #endif
     }
     
     public var baseStompWsURL: String {
         #if DEBUG
-        return "wss://ws.147258yql.cn/ws"
+        return "wss://ws.jinfenghuang.vip/ws"
         #else
-        return "wss://ws.147258yql.cn/ws"
+        return "wss://ws.jinfenghuang.vip/ws"
         #endif
     }
     
