@@ -57,6 +57,10 @@ struct ThinRemoteConfig: Codable {
     //   由 WebRTCManager.getCaptureResolutionForProfile 统一收口应用（详见该函数注释）。
     var lowPowerCapture: Bool?
 
+    // ⭐ §104 自动对焦开关（PC「相机设定」对焦行「手动/自动」胶囊）。
+    //   true=连续自动对焦；false=按 focus 值手动锁定。默认手动；收到 ptype=focus 也会自动切回手动。
+    var autoFocus: Bool?
+
     let lastUpdated: String?
     let updatedBy: String?
 
@@ -100,6 +104,7 @@ struct ThinRemoteConfig: Codable {
         case wbWhite = "white"
         case wbAmber = "amber"
         case lowPowerCapture
+        case autoFocus
         case lastUpdated = "last_updated"
         case updatedBy = "updated_by"
     }
@@ -170,6 +175,7 @@ struct ThinRemoteConfig: Codable {
         wbWhite = try container.decodeIfPresent(Float.self, forKey: .wbWhite)
         wbAmber = try container.decodeIfPresent(Float.self, forKey: .wbAmber)
         lowPowerCapture = try container.decodeIfPresent(Bool.self, forKey: .lowPowerCapture)
+        autoFocus = try container.decodeIfPresent(Bool.self, forKey: .autoFocus)
         lastUpdated = try container.decodeIfPresent(String.self, forKey: .lastUpdated)
         updatedBy = try container.decodeIfPresent(String.self, forKey: .updatedBy)
     }
@@ -217,6 +223,7 @@ struct ThinRemoteConfig: Codable {
         self.wbWhite = nil
         self.wbAmber = nil
         self.lowPowerCapture = nil
+        self.autoFocus = nil
         self.lastUpdated = nil
         self.updatedBy = nil
     }

@@ -423,6 +423,25 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         }
     }
 
+    /// §104 连续自动对焦（PC「自动」胶囊）。不支持 continuousAutoFocus 的机型退到单次 autoFocus；都不支持则不动。
+    func applyContinuousAutoFocus() {
+        guard let device = currentDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            } else if device.isFocusModeSupported(.autoFocus) {
+                device.focusMode = .autoFocus
+            } else {
+                print("⚠️ [CustomCapture] 该摄像头不支持自动对焦，保持当前对焦")
+            }
+            device.unlockForConfiguration()
+            vlog("🔍 [CustomCapture] focus=AUTO(\(device.focusMode.rawValue))")
+        } catch {
+            print("❌ [CustomCapture] 自动对焦设置失败: \(error.localizedDescription)")
+        }
+    }
+
     func applyFocus(_ distance: Float) {
         guard let device = currentDevice else { return }
         let clamped = max(0.0, min(1.0, distance))

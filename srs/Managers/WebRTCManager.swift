@@ -2212,6 +2212,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                 print("⚠️ ptype=focus 缺少值，忽略")
             }
 
+        case "autoFocus":
+            // §104 自动对焦开关
+            if let on = cfg.autoFocus {
+                setAutoFocus(on)
+            } else {
+                print("⚠️ ptype=autoFocus 缺少值，忽略")
+            }
+
         case "lutName":
             applyLutName("lookup")
 
@@ -2442,6 +2450,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 切换摄像头后调用，确保对焦恢复到后端设置的值
     func reapplyFocusFromConfig() {
         // print("🔍 [reapplyFocusFromConfig] 开始")
+
+        // §104 自动对焦模式下不锁焦距，重新下连续 AF 即可
+        if autoFocusEnabled {
+            print("📸 [reapplyFocusFromConfig] 自动对焦模式，重新下发连续 AF")
+            capturer?.applyContinuousAutoFocus()
+            return
+        }
         
         // 🔥 用户手动调整的值优先于后端配置
         if userHasManuallyAdjustedFocus, let savedFocus = savedUserFocusDistance {
@@ -4048,6 +4063,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         applyEffectiveBitrateToWebRTC()
 
         // ⭐ 交给 SRSManager 建立连接（Offer→/rtc/v1/publish→Answer + ICE重连）
+        //   start() 内部已幂等（换流/重入会先 teardown 旧会话并 unpublish 旧流名），此处无需再手动 stop。
         srsManager.dataSource = self
         srsManager.start()
     }
@@ -4505,6 +4521,17 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - 相机控制
     private func configureCameraAutoModes(_ device: AVCaptureDevice) {
+        // §104 自动对焦模式：不锁焦距，其它基础调参照常，最后下连续 AF
+        if autoFocusEnabled {
+            print("📸 对焦模式: 连续自动对焦 (§104)")
+            capturer?.applyBaseCameraTuning(focus: nil,
+                                            shutterSpeed: cjfpsValue,
+                                            captureFps: max(currentCaptureFPS, 15),
+                                            preserveCurrentISO: autoIsoEnabled)
+            capturer?.applyContinuousAutoFocus()
+            applyHardwareBrightnessEVIfReady()
+            return
+        }
         let backendFocus = ConfigManager.shared.getCurrentConfig()?.focus
         let focusValue: Float
         if userHasManuallyAdjustedFocus, let saved = savedUserFocusDistance {
@@ -4526,12 +4553,47 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     
+    // ⭐ §104 自动对焦开关（默认 false=手动）。PC 下发 ptype=autoFocus 控制；
+    //   任何手动焦距设置（setFocus）都会把它关掉——"手动更改后变成手动对焦"。
+    //   切档/切摄像头/唤醒后的恢复路径（configureCameraAutoModes / reapplyFocusFromConfig）先看这个标志，
+    //   为 true 时重新下连续自动对焦而不是锁焦距。
+    @Published var autoFocusEnabled: Bool = false
+
+    func setAutoFocus(_ on: Bool) {
+        autoFocusEnabled = on
+        print("🔍 [setAutoFocus] → \(on ? "自动" : "手动")")
+        if on {
+            guard capturer?.currentDevice != nil else {
+                print("📸 [setAutoFocus] capturer未就绪，相机就绪后由 configureCameraAutoModes 落地")
+                return
+            }
+            capturer?.applyContinuousAutoFocus()
+        } else {
+            // 切回手动：PC 会紧接着下发一条 focus；这里先用已保存/当前值锁一次，避免中间态
+            let target = savedUserFocusDistance ?? focusDistance
+            applyManualFocusInternal(target)
+        }
+    }
+
+    /// 仅锁焦距，不改 autoFocusEnabled（供 setAutoFocus(false) 使用）
+    private func applyManualFocusInternal(_ distance: Float) {
+        let clamped = max(0.0, min(1.0, distance))
+        savedUserFocusDistance = clamped
+        focusDistance = clamped
+        capturer?.applyFocus(clamped)
+    }
+
     // ✅ 手动对焦距离（0.0=近处，1.0=无穷远）
     func setFocus(_ distance: Float) {
         guard capturer?.currentDevice != nil else {
             pendingFocus = distance
             print("📸 [setFocus] capturer未就绪，保存到pendingFocus: \(distance)")
             return
+        }
+
+        if autoFocusEnabled {
+            autoFocusEnabled = false   // §104 手动更改 → 手动对焦
+            print("🔍 [setFocus] 收到手动焦距，自动对焦关闭")
         }
 
         if !userHasManuallyAdjustedFocus {

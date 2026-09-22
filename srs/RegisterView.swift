@@ -77,8 +77,9 @@ struct RegisterView: View {
     // 用户输入
     @State private var username = ""
     @State private var nickname = ""  // 🔥 新增昵称字段
-    @State private var password = ""
-    @State private var secondaryPassword = ""
+    // §104 登录密码 / 二级密码默认预填 888888（与后台「重置密码」默认值一致），用户可改
+    @State private var password = "888888"
+    @State private var secondaryPassword = "888888"
     @State private var isPasswordVisible = false  // 密码可见性
     
     // 密保问题和答案（默认答案为1、2、3）
