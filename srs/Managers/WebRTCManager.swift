@@ -2877,11 +2877,11 @@ final class WebRTCManager: NSObject, ObservableObject {
                         let initialCamera: AVCaptureDevice?
                         
                         if wantFront {
-                            initialCamera = devices.first(where: { $0.position == .front }) ?? devices.first
+                            initialCamera = self.preferredCaptureDevice(position: .front, zoom: cfg?.zoom) ?? devices.first
                             print("🎬 配置要求前置摄像头(direction=1)，使用前置启动")
                         } else {
-                            initialCamera = devices.first(where: { $0.position == .back }) ?? devices.first
-                            print("🎬 配置要求后置摄像头(direction=-1)，使用后置启动")
+                            initialCamera = self.preferredCaptureDevice(position: .back, zoom: cfg?.zoom) ?? devices.first
+                            print("🎬 配置要求后置摄像头(direction=-1)，使用后置启动 (\(initialCamera?.deviceType.rawValue ?? "nil"))")
                         }
                         
                         if let camera = initialCamera {
@@ -3387,8 +3387,28 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var savedUserFocusDistance: Float?  // 🔥 保存用户设置的对焦距离（用于自动对焦后恢复）
     
     // 🔥 本地保存的变焦值（用于切换档位/摄像头时恢复）
-    // 🔥 默认 1.0 标准焦距（范围 1.0-3.0）
+    // 🔥 默认 1.0 标准焦距（范围 0.5-3.0；<1 走后置超广角，§106）
     private var currentZoomFactor: CGFloat = 1.0
+
+    // §106 换摄像头会话进行中（切前后置/切镜头）：期间收到的 zoom 只记值，切完由 reapplyConfigExceptFocus 收尾。
+    //       超过 3s 视为已结束，防止异常路径漏清导致再也切不了镜头。
+    private var cameraSwitchStartedAt: Date?
+    private var isCameraSwitchInProgress: Bool {
+        guard let t = cameraSwitchStartedAt else { return false }
+        return Date().timeIntervalSince(t) < 3.0
+    }
+
+    /// §106 按朝向 + 倍数选物理镜头：后置且倍数 <1 且有超广角 → 超广角，否则主摄（物理广角）。
+    func preferredCaptureDevice(position: AVCaptureDevice.Position, zoom: CGFloat? = nil) -> AVCaptureDevice? {
+        let devices = CustomAVCaptureVideoCapturer.captureDevices()
+        let z = zoom ?? currentZoomFactor
+        if position == .back, z < 1.0,
+           let ultraWide = devices.first(where: { $0.position == .back && $0.deviceType == .builtInUltraWideCamera }) {
+            return ultraWide
+        }
+        return devices.first(where: { $0.position == position && $0.deviceType == .builtInWideAngleCamera })
+            ?? devices.first(where: { $0.position == position })
+    }
     
     // 🔥 对外暴露的当前 zoom 值（用于 UI 显示，范围 1.0-3.0）
     @Published var currentZoom: CGFloat = 1.0
@@ -4001,10 +4021,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             let initialCamera: AVCaptureDevice?
             
             if wantFront {
-                initialCamera = devices.first(where: { $0.position == .front }) ?? devices.first
+                initialCamera = preferredCaptureDevice(position: .front, zoom: cfg?.zoom) ?? devices.first
                 //print("🎬 推流配置要求前置摄像头(direction=1)，使用前置启动")
             } else {
-                initialCamera = devices.first(where: { $0.position == .back }) ?? devices.first
+                initialCamera = preferredCaptureDevice(position: .back, zoom: cfg?.zoom) ?? devices.first
                 //print("🎬 推流配置要求后置摄像头(direction=-1)，使用后置启动")
             }
             
@@ -4887,14 +4907,29 @@ final class WebRTCManager: NSObject, ObservableObject {
         let position = dev.position == .front ? "前置" : "后置"
         
         print("🔍 [setZoom] 设备: \(position) (\(deviceType))")
-        
-        // 🔥 使用设备实际支持的最小/最大 zoom 值，支持超广角
-        let minZoom = dev.minAvailableVideoZoomFactor  // iPhone 11+ 后置约 0.5
+
+        if isCameraSwitchInProgress {
+            print("🔍 [setZoom] 摄像头切换中，zoom=\(factor) 已记录，切完统一应用")
+            return
+        }
+
+        // §106 主摄(1x) ↔ 超广角(0.5x)：物理镜头不对就换会话，切完 reapplyConfigExceptFocus 会再进来设倍数
+        if dev.position == .back,
+           let want = preferredCaptureDevice(position: .back, zoom: factor),
+           want.uniqueID != dev.uniqueID {
+            print("🔍 [setZoom] 切换镜头: \(deviceType) → \(want.deviceType.rawValue)（zoom=\(factor)）")
+            toggleCamera(to: want)
+            return
+        }
+
+        // 超广角镜头原生视野记作 0.5 倍：PC 下发的倍数 ÷0.5 才是它的 videoZoomFactor
+        let lensScale: CGFloat = dev.deviceType == .builtInUltraWideCamera ? 0.5 : 1.0
+        let minZoom = dev.minAvailableVideoZoomFactor
         let maxZoom = dev.activeFormat.videoMaxZoomFactor
         let currentZoom = dev.videoZoomFactor
-        let safe = max(minZoom, min(factor, maxZoom))
+        let safe = max(minZoom, min(factor / lensScale, maxZoom))
 
-        print("🔍 [setZoom] 当前zoom=\(currentZoom), 请求=\(factor), 范围=\(minZoom)~\(maxZoom), 最终=\(safe)")
+        print("🔍 [setZoom] 当前zoom=\(currentZoom), 请求=\(factor), 镜头系数=\(lensScale), 范围=\(minZoom)~\(maxZoom), 最终=\(safe)")
 
         // 🔥 直接设置zoom（UI 已保证每次只变0.1步进，不会卡死）
         do {
@@ -4906,7 +4941,8 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
     
-    func toggleCamera() {
+    /// - Parameter target: 指定目标镜头（§106 同朝向切主摄/超广角）；nil = 切前后置
+    func toggleCamera(to target: AVCaptureDevice? = nil) {
         // ... existing code ...
         guard let curInput = capturer?.currentVideoInput else {
             //print("❌ toggleCamera: 无法获取当前输入设备")
@@ -4914,14 +4950,15 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
         
         let currentPos = curInput.device.position
-        let newPos: AVCaptureDevice.Position = (currentPos == .back) ? .front : .back
+        let newPos: AVCaptureDevice.Position = target?.position ?? ((currentPos == .back) ? .front : .back)
         
         //print("🔄 toggleCamera: 从 \(currentPos == .back ? "后置" : "前置") 切换到 \(newPos == .back ? "后置" : "前置")")
         
-        guard let dev = CustomAVCaptureVideoCapturer.captureDevices().first(where: { $0.position == newPos }) else {
+        guard let dev = target ?? preferredCaptureDevice(position: newPos) else {
             //print("❌ toggleCamera: 找不到目标摄像头设备")
             return
         }
+        cameraSwitchStartedAt = Date()
 
         let allFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: dev)
         
@@ -5032,7 +5069,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let diff0 = abs(max0 - targetFps)
             let diff1 = abs(max1 - targetFps)
             return diff0 < diff1
-        }).first else { return }
+        }).first else { cameraSwitchStartedAt = nil; return }
 
         let maxFps = Int(best.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
         let dims = CMVideoFormatDescriptionGetDimensions(best.formatDescription)
@@ -5070,6 +5107,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                                                         targetHeight: newCaptureRes.height,
                                                         targetFps: newCaptureRes.fps) else {
                    print("❌ [toggleCamera] 新摄像头未找到合适格式: \(newCaptureRes.width)x\(newCaptureRes.height)@\(newCaptureRes.fps)")
+                   self.cameraSwitchStartedAt = nil
                    return
                }
                let newMaxFps = Int(newBest.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30)
@@ -5087,6 +5125,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                self.capturer.setDelegate(self.frameThrottler!)
                self.capturer.switchCapture(to: dev, format: newBest, fps: finalFps) { [weak self] in
                    guard let self else { return }
+                   self.cameraSwitchStartedAt = nil
                    self.applyEffectiveBitrateToWebRTC()
                    self.enforceBitrateImmediately()
                    self.configureCameraAutoModes(dev)
@@ -5173,8 +5212,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         
         // 2️⃣ 获取当前摄像头设备
         let isFront = isFrontCameraActive()
-        let devices = CustomAVCaptureVideoCapturer.captureDevices()
-        guard let device = devices.first(where: { $0.position == (isFront ? .front : .back) }) else {
+        guard let device = preferredCaptureDevice(position: isFront ? .front : .back) else {
             print("   ❌ 无可用摄像头设备")
             return
         }
