@@ -2220,6 +2220,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 print("⚠️ ptype=autoFocus 缺少值，忽略")
             }
 
+        case "queryLensCaps":
+            // §106 PC 询问当前镜头能否 0.5 倍
+            reportLensCaps()
+
+        case "lensCaps":
+            break  // §106 本机上报的回声
+
         case "lutName":
             applyLutName("lookup")
 
@@ -4888,8 +4895,18 @@ final class WebRTCManager: NSObject, ObservableObject {
     // - zoom = 0.5 表示使用超广角镜头的全视野
     // - zoom = 1.0 表示标准广角（主摄）
     // - zoom > 1.0 表示数码变焦（裁剪放大）
-    func setZoom(_ factor: CGFloat) {
-        print("🔍 [setZoom] 收到请求: factor=\(factor)")
+    func setZoom(_ requested: CGFloat) {
+        print("🔍 [setZoom] 收到请求: factor=\(requested)")
+        var factor = requested
+        // §106 当前镜头到不了 0.5（前置/无超广角）→ 连记忆值一起回 1.0，免得切回后置又跳回 0.5 而 PC 显示 1.0
+        if factor < 1.0, let dev = capturer?.currentDevice, !ultraWideAvailable(for: dev) {
+            factor = 1.0
+            if var cfg = ConfigManager.shared.currentThinConfig, cfg.zoom < 1.0 {
+                cfg.zoom = 1.0
+                ConfigManager.shared.currentThinConfig = cfg
+            }
+            print("🔍 [setZoom] 当前摄像头不支持 0.5 倍，按 1.0")
+        }
         
         // 🔥 先保存到本地变量（即使 capturer 不存在也保存，用于后续恢复）
         currentZoomFactor = factor
@@ -4939,6 +4956,21 @@ final class WebRTCManager: NSObject, ObservableObject {
         } catch {
             print("❌ [setZoom] 变焦失败：\(error.localizedDescription)")
         }
+        reportLensCaps()
+    }
+
+    /// §106 当前镜头能否到 0.5：后置且本机有超广角
+    private func ultraWideAvailable(for dev: AVCaptureDevice) -> Bool {
+        dev.position == .back
+            && CustomAVCaptureVideoCapturer.captureDevices().contains { $0.deviceType == .builtInUltraWideCamera }
+    }
+
+    /// §106 回传 PC：当前朝向能否 0.5 + 实际倍数（超广角上 videoZoomFactor×0.5）
+    func reportLensCaps() {
+        guard let dev = capturer?.currentDevice, !isCameraSwitchInProgress else { return }
+        let lensScale: CGFloat = dev.deviceType == .builtInUltraWideCamera ? 0.5 : 1.0
+        let zoom = (dev.videoZoomFactor * lensScale * 10).rounded() / 10
+        WebSocketManager.shared.sendLensCaps(ultraWide: ultraWideAvailable(for: dev), zoom: zoom, front: dev.position == .front)
     }
     
     /// - Parameter target: 指定目标镜头（§106 同朝向切主摄/超广角）；nil = 切前后置

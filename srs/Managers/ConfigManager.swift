@@ -175,7 +175,8 @@ class ConfigManager: ObservableObject {
         }
         
         do {
-            let config = try JSONDecoder().decode(ThinRemoteConfig.self, from: data)
+            var config = try JSONDecoder().decode(ThinRemoteConfig.self, from: data)
+            config.zoom = 1.0  // §106 每次启动从主摄 1 倍开始
             self.currentThinConfig = config
             print("✅ 从本地加载简化配置成功")
         } catch {

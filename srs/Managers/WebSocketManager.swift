@@ -304,6 +304,31 @@ class WebSocketManager: ObservableObject {
         }
     }
 
+    /// §106 镜头能力回传：当前朝向能否 0.5 倍 + 实际倍数，PC 据此灰掉/点亮「0.5x 广角」。
+    /// 字段不用 `zoom`：本机也会收到这条回声，用 zoom 会被当成变焦值解码进 ConfigManager。
+    func sendLensCaps(ultraWide: Bool, zoom: CGFloat, front: Bool) {
+        guard let deviceId = deviceId else { return }
+        let destination = "/topic/device/\(deviceId)/config"
+        let config: [String: Any] = [
+            "ptype": "lensCaps",
+            "ultraWide": ultraWide,
+            "lensZoom": Double(zoom),
+            "front": front,
+            "device_id": deviceId
+        ]
+        let payloadDict: [String: Any] = [
+            "type": "CONFIG_UPDATE",
+            "deviceId": deviceId,
+            "config": config,
+            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payloadDict, options: []),
+           let payload = String(data: data, encoding: .utf8) {
+            swiftStomp?.send(body: payload, to: destination)
+            print("📤 [镜头能力] ultraWide=\(ultraWide) zoom=\(zoom) front=\(front)")
+        }
+    }
+
     // MARK: - 连接
     func connect(deviceId: String) {
         self.deviceId = deviceId
