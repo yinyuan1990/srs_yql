@@ -2402,7 +2402,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             if let pct = cfg.bitrate { setQualityPercentage(pct) }
             
             // 6) 对焦距离 0.0~1.0
-            if let f = cfg.focus {
+            if let f = cfg.focus, autoFocusEnabled {
+                // 初始配置里的 focus 是上次存的值，不是用户这次的手动操作：自动模式下只记下来，不关 AF
+                focusDistance = max(0.0, min(1.0, f))
+                print("📸 [applyThinRemoteConfigInit] 后端焦距: \(f)，自动对焦模式下仅记录")
+            } else if let f = cfg.focus {
                 print("📸 [applyThinRemoteConfigInit] 后端焦距: \(f)，准备应用")
                 setFocus(f)
             } else {
@@ -2515,8 +2519,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("   ✅ 码率恢复: 默认 → \(targetMinBitrateKbps)-\(targetBitrateKbps)kbps")
         }
         
-        // 4) 对焦 - 唤醒后直接恢复保存的焦距（不执行自动对焦）
-        if let savedFocus = savedUserFocusDistance {
+        // 4) 对焦 - 自动模式重新下连续 AF；手动模式恢复保存的焦距
+        if autoFocusEnabled {
+            print("   ✅ 对焦恢复: 连续自动对焦")
+            capturer?.applyContinuousAutoFocus()
+        } else if let savedFocus = savedUserFocusDistance {
             print("   ✅ 对焦恢复: \(savedFocus)")
             setFocus(savedFocus)
         } else {
@@ -4580,11 +4587,11 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     
-    // ⭐ §104 自动对焦开关（默认 false=手动）。PC 下发 ptype=autoFocus 控制；
+    // ⭐ §104 自动对焦开关（§107 起默认 true=自动）。PC 下发 ptype=autoFocus 控制；
     //   任何手动焦距设置（setFocus）都会把它关掉——"手动更改后变成手动对焦"。
-    //   切档/切摄像头/唤醒后的恢复路径（configureCameraAutoModes / reapplyFocusFromConfig）先看这个标志，
+    //   切档/切摄像头/唤醒后的恢复路径（configureCameraAutoModes / reapplyFocusFromConfig / reapplyConfigForWake）先看这个标志，
     //   为 true 时重新下连续自动对焦而不是锁焦距。
-    @Published var autoFocusEnabled: Bool = false
+    @Published var autoFocusEnabled: Bool = true
 
     func setAutoFocus(_ on: Bool) {
         autoFocusEnabled = on

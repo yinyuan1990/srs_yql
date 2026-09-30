@@ -80,7 +80,7 @@ struct RegisterView: View {
     // §104 登录密码 / 二级密码默认预填 888888（与后台「重置密码」默认值一致），用户可改
     @State private var password = "888888"
     @State private var secondaryPassword = "888888"
-    @State private var isPasswordVisible = false  // 密码可见性
+    @State private var isPasswordVisible = true   // 密码可见性（§107 默认明文，登录密码/绑定密码共用）
     
     // 密保问题和答案（默认答案为1、2、3）
     @State private var question1 = "您的出生年月日是？"
@@ -239,8 +239,13 @@ struct RegisterView: View {
                                         .frame(width: 24, height: 24)
                                         
                                         // ⭐ 需求#6（2026-07-31）：统一叫「绑定密码」
-                                        SecureField("请输入绑定密码", text: $secondaryPassword)
-                                            .font(.system(size: 16))
+                                        if isPasswordVisible {
+                                            TextField("请输入绑定密码", text: $secondaryPassword)
+                                                .font(.system(size: 16))
+                                        } else {
+                                            SecureField("请输入绑定密码", text: $secondaryPassword)
+                                                .font(.system(size: 16))
+                                        }
                                     }
                                     .padding(.vertical, 16)
                                     
