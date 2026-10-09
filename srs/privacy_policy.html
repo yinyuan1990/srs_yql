@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>隐私权政策</title>
+    <title>Privacy Policy</title>
     <style>
         * {
             margin: 0;
@@ -61,9 +61,142 @@
         li {
             margin-bottom: 8px;
         }
+        .lang-bar {
+            text-align: right;
+            margin-bottom: 10px;
+        }
+        .lang-bar label {
+            display: inline-block;
+            font-size: 14px;
+            padding: 4px 12px;
+            border: 1px solid #ccc;
+            background: #f7f7f7;
+            color: #333;
+            border-radius: 14px;
+        }
+        /* 纯 CSS 切换：Android 这个 WebView 关了 JavaScript，按钮也得能用 */
+        #langToggle { display: none; }
+        .lang-zh, .t-zh { display: none; }
+        #langToggle:checked ~ .lang-zh,
+        #langToggle:checked ~ .lang-bar .t-zh { display: block; }
+        #langToggle:checked ~ .lang-bar .t-zh { display: inline; }
+        #langToggle:checked ~ .lang-en,
+        #langToggle:checked ~ .lang-bar .t-en { display: none; }
     </style>
 </head>
 <body>
+    <input type="checkbox" id="langToggle">
+    <div class="lang-bar"><label for="langToggle"><span class="t-en">中文</span><span class="t-zh">English</span></label></div>
+
+    <!-- ==================== English (default) ==================== -->
+    <div class="lang-en">
+    <h1>User Privacy Policy</h1>
+
+    <div class="section">
+        <h2>Important Notice</h2>
+        <p>Our company (hereinafter "Golden Phoenix", "we" or "us") attaches great importance to protecting the privacy of users of Golden Phoenix products and services (hereinafter "users" or "you"). We understand how important your personal information is to you. In accordance with applicable laws and regulations, we take appropriate security measures and do our best to keep your personal information secure and under control. For this purpose, Golden Phoenix has formulated this Privacy Policy (hereinafter "this Policy") and reminds you that:</p>
+        <p>This Policy applies to Golden Phoenix products and services. Where products or services of our affiliates use products or services provided by Golden Phoenix but do not have a separate legal statement or privacy policy, this Policy also applies to those products or services.</p>
+        <p class="warning">Before using any Golden Phoenix product or service, please read this Policy carefully and make sure you fully understand it, paying particular attention to the terms marked in bold or bold underline. Please start using our products or services only after you have fully understood and agreed to this Policy.</p>
+    </div>
+
+    <div class="section">
+        <h2>Part 1 Definitions</h2>
+        <p><strong>1. "Golden Phoenix" or "Golden Phoenix Software":</strong> refers to the websites, mobile clients and other new technologies and channels through which our company provides supporting products and services. At present, the Golden Phoenix software available to you includes the Golden Phoenix app, among others.</p>
+        <p><strong>2. "Golden Phoenix Services":</strong> refers to the retail of Golden Phoenix products or services and related supporting services provided to consumers through the Golden Phoenix software.</p>
+        <p><strong>3. "Personal Information":</strong> refers to any information recorded electronically or by other means that, alone or in combination with other information, can identify a specific natural person or reflect the activities of a specific natural person.</p>
+        <p><strong>4. "Sensitive Personal Information":</strong> refers to personal information that, once leaked, illegally provided or abused, may endanger personal or property safety, or easily lead to damage to personal reputation, physical or mental health, or discriminatory treatment.</p>
+        <p><strong>5. "Children":</strong> refers to minors under the age of fourteen.</p>
+    </div>
+
+    <div class="section">
+        <h2>Part 2 Privacy Policy</h2>
+        <p>This Policy will help you understand the following:</p>
+        <ul>
+            <li>How we collect and use your personal information</li>
+            <li>How we use cookies and similar technologies</li>
+            <li>How we share, transfer or publicly disclose your personal information</li>
+            <li>How we protect your personal information</li>
+            <li>How you can manage your personal information</li>
+            <li>How we handle children's personal information</li>
+            <li>How your personal information is transferred globally</li>
+            <li>How this Policy is updated</li>
+            <li>How to contact us</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>I. How We Collect and Use Your Personal Information</h2>
+        <h3>(1) Principles of Collection</h3>
+        <p>We follow the principles of legitimacy, lawfulness and necessity when collecting and obtaining your personal information. When you use our services, the personal information we may need to collect and use falls into the following two categories:</p>
+        <p>1. To provide you with the basic functions of our products or services, you must authorize us to collect and use the necessary information. If you refuse to provide such information, you will not be able to use our products or services normally;</p>
+        <p>2. To provide you with additional functions of our services, you may choose to authorize us to collect and use the corresponding information.</p>
+
+        <h3>(2) Purposes of Use</h3>
+        <p><strong>1. To help you complete registration</strong></p>
+        <p>When you register, you need to provide us with at least your own mobile phone number. We will verify your identity by sending an SMS verification code.</p>
+
+        <p><strong>2. To provide you with products or services</strong></p>
+        <p>To deliver products or services to you, you need to provide the recipient's identity information, name, delivery address, contact phone number and other information.</p>
+
+        <p><strong>3. To send you messages</strong></p>
+        <p>We may use your information to send you marketing messages and to provide or promote our products and services.</p>
+
+        <p><strong>4. To provide security protection</strong></p>
+        <p>To provide you with better security, we may use your information for identity verification, customer service, security prevention, fraud monitoring and similar purposes.</p>
+    </div>
+
+    <div class="section">
+        <h2>II. How We Use Cookies and Similar Technologies</h2>
+        <p>To keep the software running properly, give you an easier browsing experience and recommend content that may interest you, we store small data files called cookies on your device or system. A cookie usually contains an identifier, a site name and some numbers and characters.</p>
+        <p>You can manage or delete cookies according to your preferences. You can clear all cookies saved on your computer, and most browsers provide a function to block cookies.</p>
+    </div>
+
+    <div class="section">
+        <h2>III. How We Share, Transfer or Publicly Disclose Your Personal Information</h2>
+        <p>Except in the following cases, we will not share your personal information with any third party outside Golden Phoenix without your consent:</p>
+        <ul>
+            <li>Sharing required by law</li>
+            <li>Providing our services to you</li>
+            <li>Maintaining and improving our services</li>
+            <li>Sharing based on your explicit consent</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>IV. How We Protect Your Personal Information</h2>
+        <p>We adopt security measures that meet industry standards, including reasonable rules and policies and security technologies, to prevent unauthorized access, use or modification of your information and to avoid data damage or loss.</p>
+        <p>Our network services use a variety of encryption technologies. For example, in some services we use encryption (such as SSL) to protect your information, store your information in encrypted form, and isolate it using isolation technologies.</p>
+    </div>
+
+    <div class="section">
+        <h2>V. How You Can Manage Your Personal Information</h2>
+        <p>You have the right to access your personal information, except as otherwise provided by laws and regulations. You can access it yourself in the following ways:</p>
+        <ul>
+            <li>Account information - if you want to view or edit the profile information in your account</li>
+            <li>Search information - you can view or clear your search history</li>
+            <li>Order information - you can view and manage your orders and records</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>VI. How We Handle Children's Personal Information</h2>
+        <p>We attach great importance to protecting the personal information of minors. If you are a minor under the age of 18, you should obtain the consent of your parents or other guardians before using our products or services.</p>
+        <p>We do not actively collect personal information directly from minors. Where personal information of minors is collected with the consent of a guardian, we will only use, share, transfer or disclose it when permitted by law, consented to by the guardian, or necessary to protect the minor.</p>
+    </div>
+
+    <div class="section">
+        <h2>VII. How This Policy Is Updated</h2>
+        <p>We may revise the terms of this Policy from time to time, and such revisions form part of this Policy. For material changes, we will provide a prominent notice, and you may choose to stop using Golden Phoenix services. If you continue to use Golden Phoenix services in that case, you agree to be bound by the revised Policy.</p>
+    </div>
+
+    <div class="section">
+        <h2>VIII. How to Contact Us</h2>
+        <p>If you have any complaints or reports about network information security, or any questions, comments or suggestions about this Policy or matters relating to your personal information, we will reply to you as soon as possible after receiving them and verifying your identity.</p>
+    </div>
+    </div>
+
+    <!-- ==================== 中文 ==================== -->
+    <div class="lang-zh">
     <h1>用户隐私权政策</h1>
     
     <div class="section">
@@ -167,6 +300,24 @@
         <h2>八、如何联系我们</h2>
         <p>如您有关于网络信息安全的投诉和举报，或您对本政策内容、您的个人信息的相关事宜有任何问题、意见或建议，我们会在收到您的意见及建议后，在验证您用户身份后会尽快向您回复。</p>
     </div>
+    </div>
+
+    <script>
+        // 有 JS 时额外记住上次选的语言并同步 lang/title；存储不可用就每次回到英文
+        (function () {
+            var box = document.getElementById('langToggle');
+            function sync() {
+                document.documentElement.lang = box.checked ? 'zh-CN' : 'en';
+                document.title = box.checked ? '隐私权政策' : 'Privacy Policy';
+            }
+            try { box.checked = localStorage.getItem('privacy_lang') === 'zh'; } catch (e) {}
+            sync();
+            box.addEventListener('change', function () {
+                try { localStorage.setItem('privacy_lang', box.checked ? 'zh' : 'en'); } catch (e) {}
+                sync();
+                window.scrollTo(0, 0);
+            });
+        })();
+    </script>
 </body>
 </html>
-
