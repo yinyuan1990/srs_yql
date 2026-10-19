@@ -20,6 +20,9 @@ class WebSocketManager: ObservableObject {
     static var networkQuality: String = "unknown"  // 网络质量: excellent/good/fair/poor/unknown
     /// ⭐ §53.4.5：本次会话链路/编码的决策原因（人话），随 CONFIG_STATE 上报给 PC 顶栏显示
     static var connectReason: String = ""
+    /// SRT直推（connectstype=3）：PC 去哪台 MediaMTX 拉 srt://host:port?streamid=read:<streamKey>
+    static var srtPlayHost: String = ""
+    static var srtPlayPort: Int = 0
     static var packetLoss: Double = 0.0  // 丢包率 0.0~1.0
     static var rtt: Int = 0  // RTT往返时延(ms)
     // 设备状态推送
@@ -151,6 +154,7 @@ class WebSocketManager: ObservableObject {
         switch connectstype {
         case 1:  connectMode = "p2p"
         case 2:  connectMode = "srt"   // 方案 B：PC 直接拉 SRT（connectstype=2 → PC playSRT）
+        case 3:  connectMode = "srt-direct"   // SRT直推到 MediaMTX（PC srtsrc 直拉 srtPlayHost:srtPlayPort）
         default: connectMode = "srs"
         }
         let p2pViewerCount = P2PManager.currentViewerCount
@@ -171,6 +175,10 @@ class WebSocketManager: ObservableObject {
         // 🔥 日试用相关（新增）
         let isDailyTrial = UserDefaults.standard.bool(forKey: "is_daily_trial")
         let activationRemainingSeconds = UserDefaults.standard.integer(forKey: "activation_remaining_seconds")
+        let srtPlayHost: String = connectstype == 3 ? WebSocketManager.srtPlayHost : ""
+        let srtPlayPort: Int = connectstype == 3 ? WebSocketManager.srtPlayPort : 0
+        let srtFull = UserDefaults.standard.bool(forKey: "srt_full")
+        let srtPoints = UserDefaults.standard.integer(forKey: "srt_points")
         
         let state: [String: Any] = [
             "networkType": network,
@@ -215,7 +223,12 @@ class WebSocketManager: ObservableObject {
             "usedSeconds": usedSeconds,
             // 🔥 日试用相关（新增）
             "isDailyTrial": isDailyTrial,
-            "activationRemainingSeconds": activationRemainingSeconds
+            "activationRemainingSeconds": activationRemainingSeconds,
+            "srtPlayHost": srtPlayHost,
+            "srtPlayPort": srtPlayPort,
+            // SRT全码/积分：后端 TryDisconnect 下发时存入，透传给 PC（PC 据此判断 1920 以上档能不能选）
+            "srtFull": srtFull,
+            "srtPoints": srtPoints
         ]
         let payloadDict: [String: Any] = [
             "type": "CONFIG_STATE",
@@ -326,6 +339,29 @@ class WebSocketManager: ObservableObject {
            let payload = String(data: data, encoding: .utf8) {
             swiftStomp?.send(body: payload, to: destination)
             print("📤 [镜头能力] ultraWide=\(ultraWide) zoom=\(zoom) front=\(front)")
+        }
+    }
+
+    /// SRT直推相机状态回传（PC「SRT设置」每秒 srt_cam_query 时回一次）：
+    /// 曝光能力范围、实际快门/ISO、请求值、编码分辨率/帧率/码率、SRT 延迟/RTT/发送缓冲、各档生效参数
+    func sendSrtCamState(_ state: [String: Any]) {
+        guard let deviceId = deviceId else { return }
+        var config = state
+        config["ptype"] = "srtCamState"
+        config["device_id"] = deviceId
+        let payloadDict: [String: Any] = [
+            "type": "CONFIG_UPDATE",
+            "deviceId": deviceId,
+            "config": config,
+            "operator": deviceId,
+            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
+        ]
+        if JSONSerialization.isValidJSONObject(payloadDict),
+           let data = try? JSONSerialization.data(withJSONObject: payloadDict, options: []),
+           let payload = String(data: data, encoding: .utf8) {
+            swiftStomp?.send(body: payload, to: "/topic/device/\(deviceId)/config")
+        } else {
+            print("❌ [SRT直推] srtCamState 序列化失败")
         }
     }
 
@@ -836,6 +872,18 @@ extension WebSocketManager: SwiftStompDelegate {
                     }
                 }
                 
+                // SRT直推指令字段不在 ThinRemoteConfig 里（解码会丢字段/覆盖缓存配置）→ 原始字典直接转给 WebRTCManager；
+                // srtCamState 是本机回传 PC 的回声，忽略
+                if let cfg = json["config"] as? [String: Any], let ptype = cfg["ptype"] as? String,
+                   ["srt_params", "srt_exposure", "srt_cam_query", "srtCamState"].contains(ptype) {
+                    if ptype != "srtCamState" {
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(name: .srtDirectCommand, object: nil, userInfo: cfg)
+                        }
+                    }
+                    return
+                }
+
                 let webSocketMessage = WebSocketMessage(
                     type: json["type"] as? String ?? "CONFIG_UPDATE",
                     deviceId: json["deviceId"] as? String,
@@ -1139,6 +1187,13 @@ extension WebSocketManager: SwiftStompDelegate {
             UserDefaults.standard.set(used, forKey: "used_seconds")
         }
         
+        if let srtFull = msgDict["srtFull"] as? Bool {
+            UserDefaults.standard.set(srtFull, forKey: "srt_full")
+        }
+        if let srtPoints = msgDict["srtPoints"] as? NSNumber {
+            UserDefaults.standard.set(srtPoints.intValue, forKey: "srt_points")
+        }
+
         // 🔥 日试用相关（新增）
         UserDefaults.standard.set(isDailyTrial, forKey: "is_daily_trial")
         if let activationRemaining = activationRemainingSeconds {

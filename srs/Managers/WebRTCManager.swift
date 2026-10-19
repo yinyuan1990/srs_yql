@@ -383,6 +383,8 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     // 滤镜后帧旁路给 SRT 推流（与 WebRTC 推送同节流、同时间戳）。
     // 为 nil 时完全无开销；设置后每「推送帧」回调一次。删除本闭包即可回退。
     var srtFrameSink: ((_ pixelBuffer: CVPixelBuffer, _ timeStampNs: Int64) -> Void)?
+    /// SRT直推：推送节流后的帧（直推时滤镜只剩锐化，未开锐化即相机原始帧）+ 相机主机时钟时间戳（ns）
+    var srtDirectSink: ((_ pixelBuffer: CVPixelBuffer, _ cameraHostNs: Int64) -> Void)?
     var videoFilter: VideoFilterPipeline?               // ⭐ 参数管理（UserDefaults / 服务端推送）
     // ⭐ A：处理器跨线程安全 —— process() 在采集队列，替换/改 LUT 在主线程，统一用 processorLock 互斥
     private let processorLock = NSLock()
@@ -735,6 +737,10 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
                 if let sink = srtFrameSink,
                    let cvBuffer = (filtered.buffer as? RTCCVPixelBuffer)?.pixelBuffer {
                     sink(cvBuffer, timestampNs)
+                }
+                if let sink = srtDirectSink,
+                   let cvBuffer = (filtered.buffer as? RTCCVPixelBuffer)?.pixelBuffer {
+                    sink(cvBuffer, videoFrame.timeStampNs)
                 }
             }
         }
@@ -1222,6 +1228,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // ⭐ SRT：把最新目标码率（连同当前推送帧率/分辨率）即时同步给 HaishinKit 编码器，
         //   与 P2P/SRS 的即时性对齐（修复「SRT 后端下发码率不起作用」）。
         if currentConnMode == .srt { syncSRTEncodeParamsFromCurrentState() }
+        applySrtEncoding(reason: "码率")
     }
 
     /// ⭐ SRT 编码参数同步（修复「SRT 后端下发码率/fps 不起作用」）。
@@ -1316,6 +1323,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         //   与 P2P/SRS 即时性对齐（修复「SRT 后端下发 fps 不起作用」）。实际喂帧由 frameThrottler
         //   节流，这里同步编码器 expectedFrameRate 使其与推送帧率一致。
         syncSRTEncodeParamsFromCurrentState()
+        applySrtEncoding(reason: "推送帧率")
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1620,6 +1628,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         guard let userInfo = notification.userInfo else { return }
         let enabled = userInfo["enabled"] as? Bool ?? false
         let serverFps = userInfo["fps"] as? Int ?? 80
+        if srtDirectMode {
+            srtDirectAntiFlicker(enabled: enabled, serverFps: serverFps)
+            return
+        }
         let actualFps = serverFps / 4
 
         antiFlickerEnabled = enabled
@@ -1635,6 +1647,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     @objc private func onTestModeCommand(_ notification: Notification) {
+        guard !srtDirectMode else { return }   // 直推：LUT 关，颜色在 PC 本地调
         guard let userInfo = notification.userInfo else { return }
         let enabled = userInfo["enabled"] as? Bool ?? false
         lutModeEnabled = enabled
@@ -1675,6 +1688,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     /// 登录后 / 预览初始化前：只同步三链路开关，不运用默认值（默认值等相机就绪后 applyPipelineDefaults）
     func syncPipelineSwitchesFromConfig(source: String) {
+        if srtDirectMode { enforceSrtDirectFilterState(source: source); return }
         let cfg = IOSPipelineConfig.shared
         print("[syncPipelineSwitches] source=\(source) iosPipeline filter=\(cfg.switchFilter) lut=\(cfg.switchLut) hw=\(cfg.switchHardware) | 当前 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled)")
         applyFilterMode(cfg.switchFilter)
@@ -1700,6 +1714,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     /// 推流启动时同步滤镜/LUT 开关到 FrameThrottler
     private func applyPipelineModes() {
+        if srtDirectMode { enforceSrtDirectFilterState(source: "pipelineModes"); return }
         applyFilterMode(filterModeEnabled)
         applyLutMode(lutModeEnabled)
     }
@@ -1709,6 +1724,11 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 仅在「第一次（相机就绪）」和「切换档位（ptype="type"）」时调用。
     /// 运行期 PC 的 STOMP 推送（其它 ptype）会在此之后覆盖这些值 —— 两者不冲突。
     func applyPipelineDefaults(source: String = "manual") {
+        if srtDirectMode {
+            enforceSrtDirectFilterState(source: source)
+            capturer?.applyContinuousWhiteBalance()
+            return
+        }
         let cfg = IOSPipelineConfig.shared
         print("[applyPipelineDefaults] source=\(source) 开始 iosPipeline filter=\(cfg.switchFilter) lut=\(cfg.switchLut) hw=\(cfg.switchHardware) shouldUseDefaults=\(shouldUsePipelineDefaults) | 当前 filterMode=\(filterModeEnabled) lutMode=\(lutModeEnabled)")
 
@@ -1763,6 +1783,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// PC「增益」滑块（后台 test_brightness）：值是 0-100，只走硬件 ISO，不进滤镜链路。
     /// 注意：0-100 是 UI 抽象，真正运用要映射到设备实际 ISO 的 min..max。
     @objc private func onTestBrightnessCommand(_ notification: Notification) {
+        guard !srtDirectMode else { return }   // 直推：曝光走 PC「SRT设置」，不吃增益 ISO
         guard let userInfo = notification.userInfo else { return }
         let value = userInfo["value"] as? Int ?? 0
         applyHardwareBrightness(value)
@@ -2096,6 +2117,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     // WebRTCManager.applyThinRemoteConfig(_ cfg: ThinRemoteConfig)
     func applyThinRemoteConfig(_ cfg: ThinRemoteConfig) {
+        if srtDirectMode && srtDirectInterceptConfig(cfg) { return }
+        defer { if srtDirectMode { srtDirectAfterConfig(cfg.ptype) } }
         let startTime = Date()
         // print("⚡ [applyThinRemoteConfig] ptype=\(cfg.ptype)")
         
@@ -2334,10 +2357,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             //    这样下面 applyProfileBitrateOnly 触发的首次采集就直接按正确fps启动，不用再等一次 lockFrameRate。
             lowPowerCaptureEnabled = cfg.lowPowerCapture ?? false
 
-            // 1) 档位：5档固定配置 - low/standard/high/ultra/p4k
+            // 1) 档位：5档固定配置 - low/standard/high/ultra/p4k（SRT直推另有 srt2k/srt4k，采集按 p4k 走）
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
             case "p4k":
+                desiredProfile = .p4k
+            case "srt2k", "srt4k":
                 desiredProfile = .p4k
             case "ultra":
                 desiredProfile = .ultra
@@ -2350,6 +2375,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             default:
                 desiredProfile = .standard
                 print("⚠️ [Init] 未知档位 '\(cfg.type)'，使用默认 .standard")
+            }
+            if srtDirectMode {
+                srtHighResKey = srtHighResKeyOf(cfg.type)
+                srtSharpness = max(0, min(1, cfg.sharpness ?? srtSharpness))
             }
             
             // ✅ 初始化时只设置档位，不尝试切换（因为capturer还不存在）
@@ -2393,7 +2422,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 }
             
             // 4.5) 🔥 快门速度（后端直接下发 60-600）
-            if let cj = cfg.cjfps {
+            //   SRT直推：启动保持自动曝光（与 Android 一致），cjfps 只记录；快门在 PC「SRT设置」调
+            if let cj = cfg.cjfps, srtDirectMode {
+                cjfpsValue = max(60, min(1000, cj))
+                srtShutterNs = 0
+                srtIso = 0
+                srtExposureEv = 0
+            } else if let cj = cfg.cjfps {
                 print("📸 [快门速度设置-初始化] 后端: cjfps=\(cj) → 1/\(cj)s")
                 setCaptureFrameRate(shutterSpeed: cj)
                 }
@@ -3138,6 +3173,26 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// SRT 推流管理器（第三条独立链路，方案 A）。删除此属性 + 相关分区即可回退。
     let srtManager = SRTManager()
 
+    // MARK: - SRT直推（默认链路：相机原始帧 → VideoToolbox H.264 → TS → SRT → MediaMTX，connectstype=3）
+    let srtDirectEngine = SrtDirectEngine()
+    /// 新版 iOS 一律 SRT直推（P2P/SRS 代码保留不走）
+    var srtDirectMode: Bool { true }
+    /// 档位 srt2k / srt4k（PC 选 1920 以上档）；采集档位按 p4k 走，编码参数按它取
+    var srtHighResKey: String?
+    /// PC「SRT设置」曝光：快门/ISO 0=自动；EV 只在两项都自动时生效
+    var srtShutterNs: Int64 = 0
+    var srtIso: Int = 0
+    var srtExposureEv: Float = 0
+    /// PC「清晰度(P)」0..1：直推时手机只保留锐化这一项滤镜
+    var srtSharpness: Float = 0
+    var srtStatsTimer: Timer?
+    var srtPushHost: String = ""
+    var srtPushPort: Int = 0
+    var srtLastStateText: String = ""
+    /// 直推最近一次按档位请求的采集尺寸（档位/srtParams 变了与它比，决定是否重选采集格式）
+    var srtCaptureReqWidth: Int = 0
+    var srtCaptureReqHeight: Int = 0
+
     /// 后端开关："srs"=强制 SRS；其它(p2p/auto)=自动协商
     private var backendConnectMode: String { (UserDefaults.standard.string(forKey: "connect_mode") ?? "auto").lowercased() }
     private var backendForceSRS: Bool { backendConnectMode == "srs" }
@@ -3145,7 +3200,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 当前生效连接方式（0=SRS,1=P2P），供 WebSocketManager 心跳上报；PC 跟随此值
     static var effectiveConnectstype: Int = 0
     /// 当前会话实际模式
-    enum ConnMode { case none, p2p, srs, srt }
+    enum ConnMode { case none, p2p, srs, srt, srtDirect }
     private var currentConnMode: ConnMode = .none
 
     /// 观看者注册表：pcDeviceId → 最近心跳时间/网络类型（PC 每 ~1.5s 发 VIEWER_HEARTBEAT）
@@ -3514,6 +3569,14 @@ final class WebRTCManager: NSObject, ObservableObject {
                 object: nil
         )
 
+        // SRT直推：PC「SRT设置」/ 后台改参（srt_params / srt_exposure / srt_cam_query，原始字典）
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onSrtDirectCommand(_:)),
+                name: .srtDirectCommand,
+                object: nil
+        )
+
         // PC 拉流心跳监听
         NotificationCenter.default.addObserver(
                 self,
@@ -3616,6 +3679,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// ⭐ 视频滤镜热更新 — 服务端旧字段 brightness/sharpness/redBoost 与新字段 blackPoint/redGlow/highlightLift/gamma/exposure 都接受
     @objc private func onVideoFilterUpdated(_ notification: Notification) {
         guard let info = notification.userInfo else { return }
+        if srtDirectMode {
+            if let s = (info["sharpness"] as? NSNumber)?.floatValue {
+                srtSharpness = max(0, min(1, s))
+            }
+            enforceSrtDirectFilterState(source: "videoFilterUpdated")
+            return
+        }
         videoFilter.applyAll(
             brightness:    (info["brightness"]    as? NSNumber)?.floatValue,
             contrast:      (info["contrast"]      as? NSNumber)?.floatValue,
@@ -3877,6 +3947,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         guard !isPublishing else {
             //print("⚠️ 已在推流中，忽略重复调用")
             //print("========================================\n")
+            return
+        }
+
+        if srtDirectMode {
+            startSrtDirectPublish(initialProfile: initialProfile)
             return
         }
 
@@ -4228,6 +4303,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // MARK: - SRT (independent)
         frameThrottler?.srtFrameSink = nil
         if srtManager.isPublishing { srtManager.stop() }
+        stopSrtDirectPublish()
     }
 
     // MARK: - ⭐ P2P 直连推流（connect_mode == "p2p"）
@@ -4555,6 +4631,10 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - 相机控制
     private func configureCameraAutoModes(_ device: AVCaptureDevice) {
+        if srtDirectMode {
+            configureCameraForSrtDirect()
+            return
+        }
         // §104 自动对焦模式：不锁焦距，其它基础调参照常，最后下连续 AF
         if autoFocusEnabled {
             print("📸 对焦模式: 连续自动对焦 (§104)")
@@ -5427,6 +5507,9 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     /// 🔥 查找最佳匹配格式
     private func findBestFormat(for device: AVCaptureDevice, targetWidth: Int, targetHeight: Int, targetFps: Int) -> AVCaptureDevice.Format? {
+        if srtDirectMode, let fmt = srtDirectFormat(for: device, width: targetWidth, height: targetHeight, fps: targetFps) {
+            return fmt
+        }
         let allFormats = CustomAVCaptureVideoCapturer.supportedFormats(for: device)
         let requiredFps = max(30, targetFps)
 
@@ -5690,6 +5773,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     ///   不要再直接读 currentLadder[profile]?.fps，否则低功率开关在那个分支会失效。
     /// - Returns: (width, height, fps)
     func getCaptureResolutionForProfile(_ profile: LadderProfile) -> (width: Int, height: Int, fps: Int) {
+        if srtDirectMode { return srtDirectCaptureResolution(profile) }
         guard let preset = currentLadder[profile] else {
             return (1920, 1440, effectiveCaptureFps(60))  // 默认 4:3
         }
@@ -6020,6 +6104,10 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 因此「主动本地强制」沿用社区通行的码率微调（setParameters 触发编码器重配）作为兜底；
     /// 而干净的「按需」恢复主路仍是 RTCP PLI（PC 发，编码器自动响应）。
     func forceKeyframe() {
+        if currentConnMode == .srtDirect {
+            srtDirectEngine.requestKeyFrame()
+            return
+        }
         // 🔥 2026-07-02 P2P 断链修复：P2P 模式 sender 在 P2PManager.viewerSenders（videoSender 恒 nil），
         //   原实现直接空操作 → PLI 响应 / PC request_keyframe / 切档 IDR 在 P2P 全部失效，
         //   弱网花屏恢复只能赌 libwebrtc 内部机制。现按连接模式路由。
@@ -6796,6 +6884,487 @@ extension WebRTCManager: P2PManagerDataSource {
     func p2pScaleDown() -> Double {
         return currentLadder[currentProfile]?.scaleDown ?? 1.0
     }
+}
+
+// MARK: - ⭐ SRT直推（照 Android srtapp §134：相机原始帧 → VideoToolbox H.264 → TS → SRT → MediaMTX，connectstype=3）
+//
+// - 采集/预览/镜头/对焦沿用现有 CustomAVCaptureVideoCapturer + FrameThrottler；FrameThrottler 推送节流后的帧
+//   经 srtDirectSink 交给 SrtDirectEngine（颜色滤镜/LUT 关闭，只保留「清晰度(P)」锐化）。
+// - 采集格式按 srtParams 档位宽高选（不小于目标、同宽高比），采集帧率 = 推送帧率 = min(PC 设定, 档位 fps)。
+// - 曝光走 PC「SRT设置」srt_exposure（快门/ISO 0=自动，EV 只在自动时生效），cjfps / test_brightness 忽略。
+extension WebRTCManager: SrtDirectEngineHost {
+
+    // MARK: 档位 / 参数
+
+    func srtHighResKeyOf(_ type: String) -> String? {
+        let t = type.lowercased()
+        return (t == "srt2k" || t == "srt4k") ? t : nil
+    }
+
+    func srtProfileKey(_ p: LadderProfile, highRes: String?) -> String {
+        switch p {
+        case .low: return "low"
+        case .standard: return "standard"
+        case .high: return "high"
+        case .ultra: return "ultra"
+        case .p4k: return highRes ?? "p4k"
+        }
+    }
+
+    var srtPlan: SrtDirectParams.Plan {
+        SrtDirectParams.plan(srtProfileKey(currentProfile, highRes: srtHighResKey))
+    }
+
+    /// 推送帧率 = min(PC 设定, 档位 fps, 低功率上限)；码率 = 档位码率 × PC 清晰度%
+    func srtVideoReq() -> SrtDirectEngine.VideoReq {
+        let plan = srtPlan
+        let fps = max(1, min(targetOutputFPS, plan.fps, effectiveCaptureFps(plan.fps)))
+        let pct = lastQualityPercent ?? 100
+        let kbps = max(300, plan.bitrateKbps * pct / 100)
+        return SrtDirectEngine.VideoReq(plan: plan, fps: fps, kbps: kbps)
+    }
+
+    func srtDirectCaptureResolution(_ profile: LadderProfile) -> (width: Int, height: Int, fps: Int) {
+        let plan = SrtDirectParams.plan(srtProfileKey(profile, highRes: srtHighResKey))
+        let fps = max(1, min(targetOutputFPS, plan.fps, effectiveCaptureFps(plan.fps)))
+        return (plan.width, plan.height, fps)
+    }
+
+    /// 直推采集格式：同宽高比、不小于目标的最小格式（帧率够档位用）；没有就取同比例最大的
+    func srtDirectFormat(for device: AVCaptureDevice, width: Int, height: Int, fps: Int) -> AVCaptureDevice.Format? {
+        let required = max(30, fps, srtPlan.fps)
+        let ratio = Double(width) / Double(max(1, height))
+
+        func size(_ f: AVCaptureDevice.Format) -> (w: Int, h: Int) {
+            let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+            return (Int(max(d.width, d.height)), Int(min(d.width, d.height)))
+        }
+        func maxFps(_ f: AVCaptureDevice.Format) -> Int {
+            Int(f.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+        }
+        func pixelOk(_ f: AVCaptureDevice.Format) -> Bool {
+            let sub = CMFormatDescriptionGetMediaSubType(f.formatDescription)
+            switch captureRangeMode {
+            case .any:
+                return sub == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                    || sub == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            case .fullRange420f: return sub == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            case .videoRange420v: return sub == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            }
+        }
+        func better(_ a: AVCaptureDevice.Format, _ b: AVCaptureDevice.Format, smallest: Bool) -> Bool {
+            let pa = pixelOk(a), pb = pixelOk(b)
+            if pa != pb { return pa }
+            let sa = size(a), sb = size(b)
+            let aa = sa.w * sa.h, ab = sb.w * sb.h
+            if aa != ab { return smallest ? aa < ab : aa > ab }
+            if abs(a.videoFieldOfView - b.videoFieldOfView) > 0.5 { return a.videoFieldOfView > b.videoFieldOfView }
+            return maxFps(a) < maxFps(b)
+        }
+
+        let fast = device.formats.filter { maxFps($0) >= required }
+        let sameRatio = fast.filter {
+            let s = size($0)
+            return abs(Double(s.w) / Double(max(1, s.h)) - ratio) < 0.02
+        }
+        let pool = sameRatio.isEmpty ? fast : sameRatio
+        let covering = pool.filter { size($0).w >= width && size($0).h >= height }
+        let picked = covering.sorted { better($0, $1, smallest: true) }.first
+            ?? pool.sorted { better($0, $1, smallest: false) }.first
+        srtCaptureReqWidth = width
+        srtCaptureReqHeight = height
+        if let picked {
+            let s = size(picked)
+            SdLog.i("采集格式 目标\(width)x\(height)@\(fps) → \(s.w)x\(s.h) 最高\(maxFps(picked))fps" +
+                    "\(covering.isEmpty ? "（相机没有不小于目标的同比例格式，编码按采集等比缩）" : "")" +
+                    " \(device.position == .front ? "前置" : "后置") \(device.deviceType.rawValue)")
+        }
+        return picked
+    }
+
+    /// 档位 / srtParams 变化后采集尺寸要变 → 重选采集格式（SRT 不断，引擎下一帧自动换编码器）
+    func srtDirectEnsureCapture(reason: String) {
+        guard capturer?.currentDevice != nil else { return }
+        let want = srtDirectCaptureResolution(currentProfile)
+        guard want.width != srtCaptureReqWidth || want.height != srtCaptureReqHeight else { return }
+        SdLog.i("重选采集格式（\(reason)）\(srtCaptureReqWidth)x\(srtCaptureReqHeight) → \(want.width)x\(want.height)@\(want.fps)")
+        recaptureWithResolution(width: want.width, height: want.height, fps: want.fps)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.reapplyConfigExceptFocus()
+        }
+    }
+
+    /// 档位 / 清晰度 / 推送帧率 / srtParams → 节流器 + 采集帧率 + 引擎（引擎内判断换编码器还是只改码率）
+    func applySrtEncoding(reason: String) {
+        guard srtDirectMode else { return }
+        let r = srtVideoReq()
+        if let t = frameThrottler, t.targetSendFps != r.fps { t.targetSendFps = r.fps }
+        if let dev = capturer?.currentDevice {
+            let ranges = dev.activeFormat.videoSupportedFrameRateRanges
+            let maxF = Int(ranges.map(\.maxFrameRate).max() ?? 30)
+            let minF = Int((ranges.map(\.minFrameRate).min() ?? 1).rounded(.up))
+            let capFps = min(maxF, max(minF, r.fps))
+            if currentCaptureFPS != capFps {
+                capturer?.lockFrameRate(capFps)
+                currentCaptureFPS = capFps
+            }
+        }
+        srtDirectEngine.setVideo(r, reason: reason)
+    }
+
+    // MARK: 滤镜 / 曝光 / 对焦
+
+    /// 颜色在 PC 本地调：手机端滤镜参数归中性、LUT 关；只保留锐化（清晰度>0 才过一次 GPU）
+    func enforceSrtDirectFilterState(source: String) {
+        let s = max(0, min(1, srtSharpness))
+        videoFilter.noiseLevel = 0
+        videoFilter.applyAll(brightness: 0, contrast: 1, saturation: 1, sharpness: s,
+                             blackPoint: 0, redGlow: 0, highlightLift: 0, gamma: 1, exposure: 0,
+                             pixelLevel: 0, chroma: 0, enabled: s > 0, source: "SRT直推:\(source)")
+        applyFilterMode(s > 0)
+        applyLutMode(false)
+    }
+
+    /// 采集（重）启动后：对焦照原逻辑，曝光按 SRT设置（默认自动曝光），不走 cjfps 快门 / 增益 ISO
+    func configureCameraForSrtDirect() {
+        if autoFocusEnabled {
+            capturer?.applyContinuousAutoFocus()
+        } else {
+            let f: Float
+            if userHasManuallyAdjustedFocus, let saved = savedUserFocusDistance {
+                f = saved
+            } else if let backend = ConfigManager.shared.getCurrentConfig()?.focus {
+                f = backend
+            } else {
+                f = 0
+            }
+            focusDistance = f
+            capturer?.applyFocus(f)
+        }
+        applySrtDirectExposure()
+    }
+
+    func applySrtDirectExposure() {
+        capturer?.applySrtExposure(shutterNs: srtShutterNs, iso: srtIso, ev: srtExposureEv, fps: srtVideoReq().fps)
+    }
+
+    /// PC anti_flicker：80/100/160/200 → 20/25/40/50fps（160 档 40fps 原样）；关闭时推送帧率保持不变
+    func srtDirectAntiFlicker(enabled: Bool, serverFps: Int) {
+        antiFlickerEnabled = enabled
+        if enabled {
+            let want = (serverFps > 0 ? serverFps : 80) / 4
+            let fps = want == 40 ? 40 : ([50, 25, 20, 10, 5].first { $0 <= want } ?? 5)
+            antiFlickerFps = fps
+            targetOutputFPS = fps
+        }
+        applySrtEncoding(reason: enabled ? "防频闪开启" : "防频闪关闭")
+        applySrtDirectExposure()
+        SdLog.i("🔦 防频闪\(enabled ? "开启" : "关闭") 请求=\(serverFps)÷4 推送=\(srtVideoReq().fps)fps")
+    }
+
+    // MARK: PC 指令
+
+    /// 直推模式下先于原 switch 处理的 ptype；返回 true = 已处理完
+    func srtDirectInterceptConfig(_ cfg: ThinRemoteConfig) -> Bool {
+        switch cfg.ptype {
+        case "type":
+            let lower = cfg.type.lowercased()
+            let desired: LadderProfile
+            switch lower {
+            case "p4k", "4k", "srt2k", "srt4k": desired = .p4k
+            case "ultra": desired = .ultra
+            case "high": desired = .high
+            case "low": desired = .low
+            default: desired = .standard
+            }
+            let oldKey = srtProfileKey(currentProfile, highRes: srtHighResKey)
+            srtHighResKey = srtHighResKeyOf(lower)
+            if currentProfile != desired {
+                currentProfile = desired
+                frameThrottler?.currentProfileName = "\(desired)"
+            }
+            let newKey = srtProfileKey(currentProfile, highRes: srtHighResKey)
+            if let f = cfg.fps { setAverageOutputFPS(f) }
+            let reason = "切档 \(oldKey)→\(newKey)"
+            if oldKey != newKey { SdLog.i("\(reason) 参数[\(srtPlan.describe())]") }
+            srtDirectEnsureCapture(reason: reason)
+            applySrtEncoding(reason: reason)
+            return true
+        case "cjfps", "test_brightness":
+            SdLog.i("忽略 \(cfg.ptype)（SRT 曝光在 PC「SRT设置」调）")
+            return true
+        case "sharpness":
+            srtSharpness = max(0, min(1, cfg.sharpness ?? 0))
+            enforceSrtDirectFilterState(source: "stomp:sharpness")
+            return true
+        case "brightness", "contrast", "saturation", "redBoost", "blackPoint", "redGlow",
+             "highlightLift", "gamma", "exposure", "chroma", "filterEnabled", "lutName",
+             "pixelLevel", "pixel_level", "last_pixel_level":
+            print("🎨 [SRT直推] 忽略颜色类 ptype=\(cfg.ptype)（颜色在 PC 本地调）")
+            return true
+        default:
+            return false
+        }
+    }
+
+    func srtDirectAfterConfig(_ ptype: String) {
+        switch ptype {
+        case "lowPowerCapture":
+            srtDirectEnsureCapture(reason: "低功率开关")
+            applySrtEncoding(reason: "低功率开关")
+        case "fps", "bitrate":
+            applySrtEncoding(reason: ptype)
+        default:
+            break
+        }
+    }
+
+    @objc func onSrtDirectCommand(_ notification: Notification) {
+        guard srtDirectMode, let cfg = notification.userInfo as? [String: Any],
+              let ptype = cfg["ptype"] as? String else { return }
+        switch ptype {
+        case "srt_params":
+            let raw = cfg["params"] ?? cfg["srtParams"]
+            var patch: [String: Any] = [:]
+            if let s = raw as? String, let d = s.data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                patch = o
+            } else if let o = raw as? [String: Any] {
+                patch = o
+            } else {
+                let skip: Set<String> = ["ptype", "device_id", "deviceId", "operator", "cmd"]
+                patch = cfg.filter { !skip.contains($0.key) }
+            }
+            SrtDirectParams.mergeRemote(patch)
+            SdLog.i("后台改参 \(String(describing: patch).prefix(300)) → 生效 [\(srtPlan.describe())]")
+            srtDirectEnsureCapture(reason: "后台改参")
+            applySrtEncoding(reason: "后台改参")
+        case "srt_exposure":
+            let auto = srtBool(cfg["auto"]) ?? false
+            if let v = srtNumber(cfg["shutterNs"]) { srtShutterNs = max(0, Int64(v)) }
+            if let v = srtNumber(cfg["iso"]) { srtIso = max(0, Int(v)) }
+            if let v = srtNumber(cfg["ev"]) { srtExposureEv = Float(max(-4, min(4, v))) }
+            if auto { srtShutterNs = 0; srtIso = 0 }
+            applySrtDirectExposure()
+            SdLog.i("[SRT设置] 快门=\(srtShutterNs > 0 ? "1/\(1_000_000_000 / max(1, srtShutterNs))s" : "自动")" +
+                    " ISO=\(srtIso > 0 ? String(srtIso) : "自动") EV=\(srtExposureEv)")
+        case "srt_cam_query":
+            reportSrtCamState(pcT0: srtNumber(cfg["t0"]).map { Int64($0) })
+        default:
+            break
+        }
+    }
+
+    private func srtNumber(_ v: Any?) -> Double? {
+        if let n = v as? NSNumber { return n.doubleValue }
+        if let s = v as? String { return Double(s) }
+        return nil
+    }
+
+    private func srtBool(_ v: Any?) -> Bool? {
+        if let b = v as? Bool { return b }
+        if let n = v as? NSNumber { return n.intValue != 0 }
+        if let s = v as? String { return s.lowercased() == "true" || s == "1" }
+        return nil
+    }
+
+    /// 回 PC「SRT设置」：编码/链路 + 相机能力与实际曝光 + 当前请求值 + 各档生效参数
+    func reportSrtCamState(pcT0: Int64?) {
+        var st = srtDirectEngine.encoderState()
+        if let cam = capturer?.srtCameraState() {
+            st.merge(cam) { _, new in new }
+        }
+        if let dev = capturer?.currentDevice {
+            let lensScale: CGFloat = dev.deviceType == .builtInUltraWideCamera ? 0.5 : 1.0
+            st["zoomMin"] = ultraWideAvailable(for: dev) ? 0.5 : 1.0
+            st["zoomMax"] = Double(dev.activeFormat.videoMaxZoomFactor * lensScale)
+        }
+        if let t0 = pcT0 { st["t0"] = t0 }
+        st["phoneMs"] = Int64(Date().timeIntervalSince1970 * 1000)
+        st["reqShutterNs"] = srtShutterNs
+        st["reqIso"] = srtIso
+        st["ev"] = Double(srtExposureEv)
+        st["zoom"] = Double(currentZoomFactor)
+        var presets: [String: Any] = [:]
+        for k in SrtDirectParams.profiles {
+            let p = SrtDirectParams.plan(k)
+            presets[k] = ["width": p.width, "height": p.height, "fps": p.fps, "kbps": p.bitrateKbps]
+        }
+        st["presets"] = presets
+        WebSocketManager.shared.sendSrtCamState(st)
+    }
+
+    // MARK: 推流生命周期
+
+    func startSrtDirectPublish(initialProfile: LadderProfile?, attempt: Int = 0) {
+        if localVideoTrack == nil || capturer == nil || frameThrottler == nil {
+            guard attempt < 10 else {
+                SdLog.w("采集管线 3s 内没起来，推流中止")
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.startPreviewIfNeeded(initialProfile: initialProfile)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if !self.isPublishing { self.startSrtDirectPublish(initialProfile: initialProfile, attempt: attempt + 1) }
+            }
+            return
+        }
+        currentConnMode = .srtDirect
+        WebRTCManager.effectiveConnectstype = 3
+        H265Support.shared.forceH264ForNonP2P()
+        connectReason = "SRT直推"
+        WebSocketManager.connectReason = connectReason
+        if let serverFps = ConfigManager.shared.getCurrentConfig()?.fps {
+            setAverageOutputFPS(serverFps)
+        }
+        srtPushHost = SrtDirectParams.serverHost
+        srtPushPort = SrtDirectParams.serverPort
+        WebSocketManager.srtPlayHost = srtPushHost
+        WebSocketManager.srtPlayPort = srtPushPort
+        enforceSrtDirectFilterState(source: "开始推流")
+
+        let username = (UserDefaults.standard.string(forKey: "username") ?? "").replacingOccurrences(of: ":", with: "")
+        SrtLogReporter.shared.start(streamId: streamKey, account: username)
+        let r = srtVideoReq()
+        SdLog.i("═══ 开始推流 srt://\(srtPushHost):\(srtPushPort) 流=\(streamKey) 档位=\(r.plan.profile)" +
+                " 推送\(r.fps)fps \(r.kbps)kbps（清晰度\(lastQualityPercent ?? 100)%）参数[\(r.plan.describe())] ═══")
+
+        srtDirectEngine.host = self
+        srtDirectEnsureCapture(reason: "开始推流")
+        applySrtEncoding(reason: "开始推流")
+        let engine = srtDirectEngine
+        frameThrottler?.srtDirectSink = { pixelBuffer, hostNs in
+            engine.appendFrame(pixelBuffer, hostPtsNs: hostNs)
+        }
+        engine.startSender()
+        isPublishing = true
+        // publishStatus 等首个关键帧真正发出（onSrtLive）再置 1，PC 才不会去拉还不存在的流
+        WebSocketManager.isPublishingFlag = 0
+        WebSocketManager.publishingStreamKey = streamKey
+        srtLastStateText = "SRT连接中..."
+        startSrtStatsTimer()
+        startCaptureWatchdog()
+        applySrtDirectExposure()
+    }
+
+    func stopSrtDirectPublish() {
+        frameThrottler?.srtDirectSink = nil
+        srtStatsTimer?.invalidate()
+        srtStatsTimer = nil
+        srtDirectEngine.stop()
+        SrtLogReporter.shared.stop()
+        WebSocketManager.srtPlayHost = ""
+        WebSocketManager.srtPlayPort = 0
+        srtLastStateText = ""
+    }
+
+    // MARK: SrtDirectEngineHost
+
+    /// 连接线程调用：每次连接（含重连）都重新取一次性推流 token；username 必带（后端试用拦截按它判断）
+    func srtTarget(attempt: Int, plan: SrtDirectParams.Plan) -> SdSrtSender.Target? {
+        let key = streamKey
+        let host = srtPushHost
+        let port = srtPushPort
+        guard !key.isEmpty, !host.isEmpty else { return nil }
+        let username = (UserDefaults.standard.string(forKey: "username") ?? "").replacingOccurrences(of: ":", with: "")
+        let jwt = UserDefaults.standard.string(forKey: "jwt_token") ?? ""
+        let box = SrtTokenBox()
+        if !username.isEmpty && !jwt.isEmpty {
+            let sem = DispatchSemaphore(value: 0)
+            Task.detached {
+                do {
+                    let resp = try await APIService.shared.getStreamToken(username: username, streamName: key)
+                    box.set(resp.token)
+                } catch {
+                    SdLog.w("获取推流Token异常: \(error.localizedDescription)（按无Token连接）")
+                }
+                sem.signal()
+            }
+            if sem.wait(timeout: .now() + 8) == .timedOut {
+                SdLog.w("获取推流Token超时（按无Token连接）")
+            }
+        }
+        let token = box.get()
+        let streamId = username.isEmpty ? "publish:\(key)" : "publish:\(key):\(username):\(token)"
+        if streamId.utf8.count > 512 {
+            SdLog.w("streamid 长度 \(streamId.utf8.count) 超过 SRT 上限 512，服务器会拒绝")
+        }
+        SdLog.i("第\(attempt + 1)次连接 流名=\(key) 账号=\(username) token=\(token.isEmpty ? "无" : "已取到")")
+        return SdSrtSender.Target(host: host, port: port, streamId: streamId,
+                                  latencyMs: plan.latencyMs, maxBwKbps: plan.maxBwKbps)
+    }
+
+    /// 某次连接的首个关键帧已发出 → 流已在 MediaMTX 上，上报 publishStatus=1
+    func onSrtLive(attempt: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.currentConnMode == .srtDirect, self.isPublishing else { return }
+            WebSocketManager.publishingStreamKey = self.streamKey
+            WebSocketManager.isPublishingFlag = 1
+            self.srtLastStateText = "SRT直推中"
+            SdLog.i("✅ 出流（第\(attempt + 1)次连接）流名=\(self.streamKey)" +
+                    " 拉流=srt://\(self.srtPushHost):\(self.srtPushPort)?streamid=read:\(self.streamKey) → publishStatus=1")
+        }
+    }
+
+    func onSrtLost(reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.srtLastStateText = "SRT断线,重连中..."
+        }
+    }
+
+    // MARK: 每秒统计
+
+    func startSrtStatsTimer() {
+        srtStatsTimer?.invalidate()
+        srtStatsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.srtStatsTick()
+        }
+    }
+
+    private func srtStatsTick() {
+        guard currentConnMode == .srtDirect else { return }
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "正常"
+        case .fair: thermal = "微热"
+        case .serious: thermal = "过热"
+        case .critical: thermal = "严重过热"
+        @unknown default: thermal = "未知"
+        }
+        let s = srtDirectEngine.tick(extra: "温度\(thermal)")
+        WebSocketManager.publishingKbps = s.encKbps
+        WebSocketManager.publishingFps = s.encFps
+        WebSocketManager.publishingSendFps = s.live ? s.encFps : 0
+        WebSocketManager.packetLoss = s.lossRate
+        WebSocketManager.rtt = s.rttMs
+        let quality: String
+        if !s.connected {
+            quality = "poor"
+        } else if s.lossRate <= 0.01 && s.rttMs <= 100 {
+            quality = "excellent"
+        } else if s.lossRate <= 0.03 && s.rttMs <= 200 {
+            quality = "good"
+        } else if s.lossRate <= 0.05 && s.rttMs <= 400 {
+            quality = "fair"
+        } else {
+            quality = "poor"
+        }
+        WebSocketManager.networkQuality = quality
+        currentKbps = s.encKbps
+        currentFps = s.encFps
+        currentCaptureFps = s.capFps
+        currentSendFps = s.live ? s.encFps : 0
+        srtLastStateText = s.live ? "SRT直推中" : (s.connected ? "SRT已连接,等关键帧" : "SRT连接中...")
+    }
+}
+
+/// 连接线程同步等推流 token 用
+private final class SrtTokenBox {
+    private let lock = NSLock()
+    private var value = ""
+    func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
+    func get() -> String { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 

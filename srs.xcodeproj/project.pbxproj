@@ -40,6 +40,12 @@
 		2C5867CE2FE959F000624BF2 /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5867CD2FE959F000624BF2 /* HaishinKit */; };
 		2C5867D02FE959F000624BF2 /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5867CF2FE959F000624BF2 /* SRTHaishinKit */; };
 		2C5867D22FE95A0C00624BF2 /* SRTManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C5867D12FE95A0C00624BF2 /* SRTManager.swift */; };
+		2CDDDDDD2E0000000000F002 /* SrtDirectParams.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F001 /* SrtDirectParams.swift */; };
+		2CDDDDDD2E0000000000F004 /* SrtLogReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F003 /* SrtLogReporter.swift */; };
+		2CDDDDDD2E0000000000F006 /* SdTsMuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F005 /* SdTsMuxer.swift */; };
+		2CDDDDDD2E0000000000F008 /* SdH264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F007 /* SdH264Encoder.swift */; };
+		2CDDDDDD2E0000000000F00A /* SdSrtSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F009 /* SdSrtSender.swift */; };
+		2CDDDDDD2E0000000000F00C /* SrtDirectEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDDDDDD2E0000000000F00B /* SrtDirectEngine.swift */; };
 		2C596C582E58E22500C94789 /* srsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C572E58E22500C94789 /* srsApp.swift */; };
 		2C596C5A2E58E22500C94789 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C596C592E58E22500C94789 /* ContentView.swift */; };
 		2C596C5C2E58E22600C94789 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C596C5B2E58E22600C94789 /* Assets.xcassets */; };
@@ -95,6 +101,12 @@
 		2C4E72E62FC5502200BC4D30 /* lookup_soft_elegance_2.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_soft_elegance_2.png; sourceTree = "<group>"; };
 		2C4E72E72FC5502300BC4D30 /* lookup_miss_etikate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = lookup_miss_etikate.png; sourceTree = "<group>"; };
 		2C5867D12FE95A0C00624BF2 /* SRTManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SRTManager.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F001 /* SrtDirectParams.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SrtDirectParams.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F003 /* SrtLogReporter.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SrtLogReporter.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F005 /* SdTsMuxer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SdTsMuxer.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F007 /* SdH264Encoder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SdH264Encoder.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F009 /* SdSrtSender.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SdSrtSender.swift; sourceTree = "<group>"; };
+		2CDDDDDD2E0000000000F00B /* SrtDirectEngine.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SrtDirectEngine.swift; sourceTree = "<group>"; };
 		2C596C542E58E22500C94789 /* 金凤凰.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "金凤凰.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		2C596C572E58E22500C94789 /* srsApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = srsApp.swift; sourceTree = "<group>"; };
 		2C596C592E58E22500C94789 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -150,9 +162,23 @@
 			path = Models;
 			sourceTree = "<group>";
 		};
+		2CDDDDDD2E0000000000F000 /* SrtDirect */ = {
+			isa = PBXGroup;
+			children = (
+				2CDDDDDD2E0000000000F001 /* SrtDirectParams.swift */,
+				2CDDDDDD2E0000000000F003 /* SrtLogReporter.swift */,
+				2CDDDDDD2E0000000000F005 /* SdTsMuxer.swift */,
+				2CDDDDDD2E0000000000F007 /* SdH264Encoder.swift */,
+				2CDDDDDD2E0000000000F009 /* SdSrtSender.swift */,
+				2CDDDDDD2E0000000000F00B /* SrtDirectEngine.swift */,
+			);
+			path = SrtDirect;
+			sourceTree = "<group>";
+		};
 		2C25E1222E5FBB4200EA9245 /* Managers */ = {
 			isa = PBXGroup;
 			children = (
+				2CDDDDDD2E0000000000F000 /* SrtDirect */,
 				2C5867D12FE95A0C00624BF2 /* SRTManager.swift */,
 				2C4E72D72FC5501400BC4D30 /* NV12MetalProcessor.swift */,
 				2C4E72DD2FC5501900BC4D30 /* NV12LUTProcessor.swift */,
@@ -374,6 +400,12 @@
 				2CB8FA502E73D38100F90666 /* WebView.swift in Sources */,
 				2C25E1262E5FBBEB00EA9245 /* APIService.swift in Sources */,
 				2C5867D22FE95A0C00624BF2 /* SRTManager.swift in Sources */,
+				2CDDDDDD2E0000000000F002 /* SrtDirectParams.swift in Sources */,
+				2CDDDDDD2E0000000000F004 /* SrtLogReporter.swift in Sources */,
+				2CDDDDDD2E0000000000F006 /* SdTsMuxer.swift in Sources */,
+				2CDDDDDD2E0000000000F008 /* SdH264Encoder.swift in Sources */,
+				2CDDDDDD2E0000000000F00A /* SdSrtSender.swift in Sources */,
+				2CDDDDDD2E0000000000F00C /* SrtDirectEngine.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

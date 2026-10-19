@@ -23,6 +23,12 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     private var hardwareEV: Float = 0
     private var lockedDuration: CMTime?
     private var lockedISO: Float?
+    // SRT直推曝光：手动时的 ISO（会话重配沿用它，不走 hardwareEV 换算）+ 自动期间最近一次测光 + 回读状态
+    private var srtLockedISO: Float?
+    private var srtLastAutoExposureNs: Int64 = 0
+    private var srtLastAutoISO: Float = 0
+    private(set) var srtAeAuto = true
+    private(set) var srtExposureDesc = "自动"
     private var videoHDREnabled = false
     private var autoHDREnabled = false
     private var autoWhiteBalanceEnabled = false
@@ -579,6 +585,93 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         applyContinuousWhiteBalance()
     }
 
+    // MARK: - SRT直推曝光（照 Android SdCameraSource.applySrtExposure）
+
+    /// 快门/ISO 0=自动；只手动一项时另一项按切换前的测光折算（曝光×ISO 不变，亮度不跳），快门不超过一帧；
+    /// 两项都自动 → 连续自动曝光 + EV 补偿。手动值记进 lockedDuration/srtLockedISO，会话重配时自动带上。
+    func applySrtExposure(shutterNs: Int64, iso: Int, ev: Float, fps: Int) {
+        sessionQueue.async { [weak self] in
+            self?.applySrtExposureLocked(shutterNs: shutterNs, iso: iso, ev: ev, fps: fps)
+        }
+    }
+
+    private static func nanos(_ t: CMTime) -> Int64 {
+        let s = CMTimeGetSeconds(t)
+        return s.isFinite ? Int64(s * 1_000_000_000) : 0
+    }
+
+    private func applySrtExposureLocked(shutterNs: Int64, iso: Int, ev: Float, fps: Int) {
+        guard let device = currentDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if device.exposureMode != .custom {
+                srtLastAutoExposureNs = Self.nanos(device.exposureDuration)
+                srtLastAutoISO = device.iso.isFinite ? device.iso : 0
+            }
+            let manualOk = device.isExposureModeSupported(.custom)
+            if (shutterNs <= 0 && iso <= 0) || !manualOk {
+                lockedDuration = nil
+                lockedISO = nil
+                srtLockedISO = nil
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                let bias = max(device.minExposureTargetBias, min(ev, device.maxExposureTargetBias))
+                device.setExposureTargetBias(bias, completionHandler: nil)
+                srtAeAuto = true
+                srtExposureDesc = (shutterNs > 0 || iso > 0) ? "自动（该摄像头不支持手动曝光）" : "自动 EV\(String(format: "%+.1f", bias))"
+                return
+            }
+            let fmt = device.activeFormat
+            let frameNs = 1_000_000_000 / Int64(max(1, fps))
+            let minExpNs = Self.nanos(fmt.minExposureDuration)
+            let maxExpNs = min(Self.nanos(fmt.maxExposureDuration), frameNs)
+            let baseExp = srtLastAutoExposureNs > 0 ? srtLastAutoExposureNs : frameNs / 2
+            let baseIso = srtLastAutoISO > 0 ? Double(srtLastAutoISO) : 400
+            var exp: Int64
+            if shutterNs > 0 {
+                exp = shutterNs
+            } else {
+                exp = Int64(Double(baseExp) * baseIso / Double(iso))
+            }
+            exp = max(minExpNs, min(exp, max(minExpNs, maxExpNs)))
+            let isoWant = iso > 0 ? Float(iso) : Float(Double(baseExp) * baseIso / Double(max(1, exp)))
+            let isoVal = max(fmt.minISO, min(isoWant, fmt.maxISO))
+            let duration = CMTime(value: exp, timescale: 1_000_000_000)
+            device.setExposureModeCustom(duration: duration, iso: isoVal, completionHandler: nil)
+            lockedDuration = duration
+            lockedISO = isoVal
+            srtLockedISO = isoVal
+            srtAeAuto = false
+            let capDesc = isoWant > fmt.maxISO ? "（ISO已到上限\(Int(fmt.maxISO))，需要≈\(Int(isoWant))）" : ""
+            srtExposureDesc = "手动 快门 1/\(1_000_000_000 / max(1, exp))s ISO \(Int(isoVal))\(capDesc)" +
+                (shutterNs <= 0 ? "（快门按测光折算）" : "") + (iso <= 0 ? "（ISO 按测光折算）" : "")
+            print("[SRT直推] 曝光 \(srtExposureDesc)（帧间隔 \(frameNs / 1_000_000)ms）")
+        } catch {
+            print("❌ [CustomCapture] SRT曝光设置失败: \(error.localizedDescription)")
+        }
+    }
+
+    /// PC「SRT设置」回读：曝光能力范围 + 实际曝光
+    func srtCameraState() -> [String: Any] {
+        guard let device = currentDevice else { return [:] }
+        let fmt = device.activeFormat
+        return [
+            "manualSupported": device.isExposureModeSupported(.custom),
+            "expMinNs": Self.nanos(fmt.minExposureDuration),
+            "expMaxNs": Self.nanos(fmt.maxExposureDuration),
+            "isoMin": Int(fmt.minISO),
+            "isoMax": Int(fmt.maxISO),
+            "evMin": Double(device.minExposureTargetBias),
+            "evMax": Double(device.maxExposureTargetBias),
+            "curExpNs": Self.nanos(device.exposureDuration),
+            "curIso": device.iso.isFinite ? Int(device.iso) : 0,
+            "aeAuto": srtAeAuto,
+            "exposureDesc": srtExposureDesc,
+        ]
+    }
+
     func lockFrameRate(_ fps: Int) {
         guard let device = currentDevice else { return }
         do {
@@ -676,7 +769,8 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
                 //    部分机型概率性采集停摆/帧率异常 —— 切档卡死嫌疑之一。
                 let maxSafe = min(device.activeFormat.maxExposureDuration, frameDuration)
                 let safeDuration = clamp(duration, min: device.activeFormat.minExposureDuration, max: maxSafe)
-                let iso = isoForCurrentEV(device)
+                let iso = srtLockedISO.map { max(device.activeFormat.minISO, min($0, device.activeFormat.maxISO)) }
+                    ?? isoForCurrentEV(device)
                 lockedDuration = safeDuration
                 lockedISO = iso
                 device.exposureMode = .custom

@@ -455,6 +455,12 @@ class APIService {
             // ⭐ §77 解析 videoLadder（5 档分辨率/帧率/码率）→ 落盘 UserDefaults，下次算档位生效。
             //   字段缺省（后端没配/老后端）传 nil，Store 会清掉本地覆盖回内置默认值。
             LadderConfigStore.shared.update(fromLoginJSON: rawLoginJson?["videoLadder"] as? [String: Any])
+            // SRT直推：推流节点 + 编码参数（缺省 = 默认节点 118.178.33.144:8890 + 内置参数）；
+            //   srtFull/srtPoints 只透传给 PC（1920 以上档要 SRT全码），iOS 不拿它拦推流
+            SrtDirectParams.saveServer(rawLoginJson?["srtServer"])
+            SrtDirectParams.saveFromLogin(rawLoginJson?["srtParams"])
+            UserDefaults.standard.set((rawLoginJson?["srtFull"] as? Bool) ?? false, forKey: "srt_full")
+            UserDefaults.standard.set((rawLoginJson?["srtPoints"] as? NSNumber)?.intValue ?? 0, forKey: "srt_points")
             return loginResponse
             
         } catch {
