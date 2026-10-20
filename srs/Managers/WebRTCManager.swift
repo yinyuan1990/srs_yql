@@ -3199,6 +3199,9 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     /// 当前生效连接方式（0=SRS,1=P2P），供 WebSocketManager 心跳上报；PC 跟随此值
     static var effectiveConnectstype: Int = 0
+    /// SRT直推当前档位（srtParams presets 键，如 srt2k/srt4k）；非 SRT直推 = ""。
+    /// 随 CONFIG_STATE.profile 上报，后端按它判断 >1920 档按分钟扣积分
+    static var effectiveSrtProfile: String = ""
     /// 当前会话实际模式
     enum ConnMode { case none, p2p, srs, srt, srtDirect }
     private var currentConnMode: ConnMode = .none
@@ -6918,6 +6921,7 @@ extension WebRTCManager: SrtDirectEngineHost {
     /// 推送帧率 = min(PC 设定, 档位 fps, 低功率上限)；码率 = 档位码率 × PC 清晰度%
     func srtVideoReq() -> SrtDirectEngine.VideoReq {
         let plan = srtPlan
+        WebRTCManager.effectiveSrtProfile = plan.profile
         let fps = max(1, min(targetOutputFPS, plan.fps, effectiveCaptureFps(plan.fps)))
         let pct = lastQualityPercent ?? 100
         let kbps = max(300, plan.bitrateKbps * pct / 100)
@@ -7249,6 +7253,7 @@ extension WebRTCManager: SrtDirectEngineHost {
     }
 
     func stopSrtDirectPublish() {
+        WebRTCManager.effectiveSrtProfile = ""
         frameThrottler?.srtDirectSink = nil
         srtStatsTimer?.invalidate()
         srtStatsTimer = nil

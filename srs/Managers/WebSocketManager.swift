@@ -177,6 +177,8 @@ class WebSocketManager: ObservableObject {
         let activationRemainingSeconds = UserDefaults.standard.integer(forKey: "activation_remaining_seconds")
         let srtPlayHost: String = connectstype == 3 ? WebSocketManager.srtPlayHost : ""
         let srtPlayPort: Int = connectstype == 3 ? WebSocketManager.srtPlayPort : 0
+        // SRT直推当前档位：后端 SrtPointsService 按它判断 srt2k/srt4k（>1920）按分钟扣积分
+        let srtProfile: String = connectstype == 3 ? WebRTCManager.effectiveSrtProfile : ""
         let srtFull = UserDefaults.standard.bool(forKey: "srt_full")
         let srtPoints = UserDefaults.standard.integer(forKey: "srt_points")
         
@@ -188,6 +190,7 @@ class WebSocketManager: ObservableObject {
             // ⭐ 自动协商：连接方式 + P2P 状态，PC 跟随 connectstype 切换
             "connectstype": connectstype,
             "connectMode": connectMode,
+            "profile": srtProfile,
             // ⭐ H265：P2P 实际生效编码（"h264"/"h265"），PC 据此选择 H264/H265 解码管线
             "videoCodec": H265Support.shared.effectiveCodecString,
             // ⭐ §53.4.5「互相监督」：本次链路/编码是**怎么定下来的**（人话），PC 顶栏直接显示。
