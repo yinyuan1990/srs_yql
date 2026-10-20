@@ -40,23 +40,42 @@ final class SRSManager: NSObject {
     private var iceReconnectTimer: Timer?
     private var iceRestartAttempts = 0
     private let maxIceRestartAttempts = 3
+    /// 已成功 publish 到 SRS 的流名（带时间戳）。换流重推/停流时按它精确 unpublish，
+    /// 避免旧流名在 SRS 端残留为僵尸 rtc-publish（并让旧 pc 的 ICE 重连定时器一并清掉）。
+    private var activeStreamKey = ""
+    /// 会话代号：每次建连 / 拆连 +1。异步回调（Offer、向 SRS 发布、Answer、ICE Restart）回来时代号对不上 = 旧会话，直接丢弃，
+    /// 防止旧 Offer 晚到后用旧 SDP 再向 SRS 发布一路（SRS 上同一部手机出现两路 rtc-publish / RtcStreamBusy）
+    private var epoch = 0
 
     // MARK: - 生命周期
 
     func start() {
+        // 幂等：若上一路会话还在（换流重推 / 异常重入），先彻底清理旧连接与定时器，
+        // 否则旧 pc 会继续对旧 streamKey 做 ICE Restart / 请求 Token，在 SRS 留下僵尸会话。
+        if isActive || pc != nil || !activeStreamKey.isEmpty {
+            teardown()
+        }
         isActive = true
         establish(isRestart: false)
     }
 
     func stop() {
         isActive = false
+        teardown()
+    }
+
+    /// 统一拆连接：停 ICE 重连定时器 + 关闭 pc + unpublish 已 publish 的流名。
+    /// 优先用 activeStreamKey（实际 publish 成功的那路）；尚未记录时回退到当前 srsStreamKey。
+    private func teardown() {
+        epoch += 1
         iceReconnectTimer?.invalidate(); iceReconnectTimer = nil
         iceRestartAttempts = 0
-        let key = dataSource?.srsStreamKey ?? ""
         pc?.close()
         pc = nil
         videoSender = nil
-        if !key.isEmpty { deleteStream(streamKey: key) }
+        let keyToDelete = activeStreamKey.isEmpty ? (dataSource?.srsStreamKey ?? "") : activeStreamKey
+        activeStreamKey = ""
+        if !keyToDelete.isEmpty { deleteStream(streamKey: keyToDelete) }
     }
 
     // MARK: - 连接建立
@@ -68,8 +87,15 @@ final class SRSManager: NSObject {
             return
         }
 
-        // 清理旧连接
+        // 清理旧连接。换流重推（新 streamKey 与上一路不同）时，先把上一路从 SRS 上 unpublish，
+        // 否则旧流名会在 SRS 端残留为 0 kbps 僵尸 rtc-publish（isRestart=同流名 ICE 重建，不清）。
+        if !isRestart, !activeStreamKey.isEmpty, activeStreamKey != ds.srsStreamKey {
+            deleteStream(streamKey: activeStreamKey)
+            activeStreamKey = ""
+        }
         pc?.close(); pc = nil
+        epoch += 1
+        let myEpoch = epoch
 
         let cfg = RTCConfiguration()
         cfg.sdpSemantics = .unifiedPlan
@@ -98,12 +124,15 @@ final class SRSManager: NSObject {
             mandatoryConstraints: ["OfferToReceiveAudio": "false", "OfferToReceiveVideo": "false"],
             optionalConstraints: nil)
 
-        newPC.offer(for: sdpCons) { [weak self] sdp, err in
+        newPC.offer(for: sdpCons) { [weak self, weak newPC] sdp, err in
             guard let self = self, let sdp = sdp else {
                 self?.dataSource?.srsDidFail(reason: "生成 Offer 失败: \(err?.localizedDescription ?? "")")
                 return
             }
-            guard let pc = self.pc else { return }
+            guard self.epoch == myEpoch, let pc = self.pc, pc === newPC else {
+                print("⏭️ [SRS] 旧会话的 Offer 晚到，丢弃（不再向 SRS 发布）")
+                return
+            }
             pc.setLocalDescription(sdp) { _ in }
             Task {
                 do {
@@ -111,14 +140,19 @@ final class SRSManager: NSObject {
                         apiPath: "/rtc/v1/publish/",
                         streamurl: "webrtc://\(ds.srsIP)/\(ds.srsApp)/\(ds.srsStreamKey)",
                         offer: sdp.sdp)
-                    guard let pc = self.pc else { return }
+                    guard self.epoch == myEpoch, let pc = self.pc, pc === newPC else {
+                        print("⏭️ [SRS] 旧会话的 SRS 应答晚到，丢弃")
+                        return
+                    }
                     pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { [weak self] err in
                         guard let self = self else { return }
                         DispatchQueue.main.async {
+                            guard self.epoch == myEpoch else { return }
                             if let err = err {
                                 self.dataSource?.srsDidFail(reason: "设置 Answer 失败: \(err.localizedDescription)")
                             } else {
                                 self.iceRestartAttempts = 0
+                                self.activeStreamKey = ds.srsStreamKey  // 记录已成功 publish 的流名，供换流/停流精确 unpublish
                                 print("🟢 [SRS] 推流连接成功")
                                 self.dataSource?.srsDidConnect(pc: pc, sender: self.videoSender)
                             }
@@ -159,12 +193,14 @@ final class SRSManager: NSObject {
     }
 
     private func triggerICERestart() {
-        guard let ds = dataSource, let pc = self.pc else { return }
+        guard let ds = dataSource, let curPC = self.pc else { return }
+        let myEpoch = epoch
         let cons = RTCMediaConstraints(
             mandatoryConstraints: ["IceRestart": kRTCMediaConstraintsValueTrue],
             optionalConstraints: nil)
-        pc.offer(for: cons) { [weak self] sdp, _ in
-            guard let self = self, let sdp = sdp, let pc = self.pc else { return }
+        curPC.offer(for: cons) { [weak self, weak curPC] sdp, _ in
+            guard let self = self, let sdp = sdp,
+                  self.epoch == myEpoch, let pc = self.pc, pc === curPC else { return }
             pc.setLocalDescription(sdp) { _ in }
             Task {
                 do {
@@ -172,7 +208,7 @@ final class SRSManager: NSObject {
                         apiPath: "/rtc/v1/publish/",
                         streamurl: "webrtc://\(ds.srsIP)/\(ds.srsApp)/\(ds.srsStreamKey)",
                         offer: sdp.sdp)
-                    guard let pc = self.pc else { return }
+                    guard self.epoch == myEpoch, let pc = self.pc, pc === curPC else { return }
                     pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { _ in }
                 } catch {
                     print("❌ [SRS] ICE Restart 失败: \(error.localizedDescription)")
