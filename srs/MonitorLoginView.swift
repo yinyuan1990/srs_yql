@@ -46,6 +46,9 @@ struct MonitorLoginView: View {
     @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected
     @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected
     @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h265)
+    // 推流方式："srt" = SRT直推（默认，MediaMTX）；"srs" = 原 WebRTC（SRS/P2P，SessionPolicy 决定）。
+    //   存 UserDefaults `publish_mode`（与 Android 同名），退出登录不清；WebRTCManager.srtDirectMode 读它
+    @State private var publishMode: String = (UserDefaults.standard.string(forKey: "publish_mode") == "srs") ? "srs" : "srt"
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -234,6 +237,37 @@ struct MonitorLoginView: View {
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 16)
+
+                        // 分隔线
+                        Divider()
+                            .background(Color(hex: "F0F0F0"))
+                            .padding(.leading, 50)
+
+                        // 推流方式：SRS / SRT（与 Android 登录页一致）
+                        HStack(spacing: 8) {
+                            Text("推流方式")
+                                .font(.system(size: 16))
+                                .foregroundColor(Color(hex: "1A1A1A"))
+                            Spacer()
+                            ForEach(["srs", "srt"], id: \.self) { mode in
+                                let selected = (publishMode == mode)
+                                Button(action: {
+                                    publishMode = mode
+                                    UserDefaults.standard.set(mode, forKey: "publish_mode")
+                                }) {
+                                    Text(mode.uppercased())
+                                        .font(.system(size: 14, weight: selected ? .bold : .regular))
+                                        .foregroundColor(selected ? .white : Color(hex: "666666"))
+                                        .padding(.horizontal, 18)
+                                        .padding(.vertical, 5)
+                                        .background(Capsule().fill(selected ? Color(hex: "65AEF7") : Color.clear))
+                                        .overlay(Capsule().stroke(selected ? Color(hex: "65AEF7") : Color(hex: "B3B3B3"), lineWidth: 1))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
 
                         // 分隔线
                         Divider()

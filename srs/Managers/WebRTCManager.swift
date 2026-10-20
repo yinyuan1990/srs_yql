@@ -3175,8 +3175,8 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - SRT直推（默认链路：相机原始帧 → VideoToolbox H.264 → TS → SRT → MediaMTX，connectstype=3）
     let srtDirectEngine = SrtDirectEngine()
-    /// 新版 iOS 一律 SRT直推（P2P/SRS 代码保留不走）
-    var srtDirectMode: Bool { true }
+    /// 登录页「推流方式」：SRT（默认）= SRT直推；SRS = 原 WebRTC 链路（SessionPolicy 决定 SRS/P2P）
+    var srtDirectMode: Bool { UserDefaults.standard.string(forKey: "publish_mode") != "srs" }
     /// 档位 srt2k / srt4k（PC 选 1920 以上档）；采集档位按 p4k 走，编码参数按它取
     var srtHighResKey: String?
     /// PC「SRT设置」曝光：快门/ISO 0=自动；EV 只在两项都自动时生效
