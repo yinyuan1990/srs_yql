@@ -563,6 +563,7 @@ struct ProfileView: View {
         }
 
         switch level {
+        case 5: return level5DisplayName()   // 第 5 级（1920×1440 档），名字总后台可改
         case 4: return "超高清"   // ⭐ 故意：等级4 对外显示超高清（内部命名是超高帧）
         case 3: return "超高帧"   // ⭐ 故意：等级3 对外显示超高帧（内部命名是超高清）
         case 2: return "超清"
@@ -576,6 +577,7 @@ struct ProfileView: View {
     private var levelIcon: String {
         let level = UserDefaults.standard.integer(forKey: "activation_level")
         switch level {
+        case 5: return "sparkles"        // 第 5 级
         case 4: return "bolt.fill"       // 超高帧
         case 3: return "crown.fill"      // 超高清
         case 2: return "star.fill"       // 超清
@@ -595,6 +597,7 @@ struct ProfileView: View {
         }
 
         switch level {
+        case 5: return Color(hex: "E91E63")  // 第 5 级：玫红
         case 4: return Color(hex: "FF6B00")  // 超高帧：橙色
         case 3: return Color(hex: "FFD700")  // 超高清：金色
         case 2: return Color(hex: "007AFF")  // 超清：蓝色

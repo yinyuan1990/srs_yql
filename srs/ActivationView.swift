@@ -456,6 +456,7 @@ struct ActivationView: View {
                     if response.level >= 2 { access.append("超清") }
                     if response.level >= 3 { access.append("超高清") }
                     if response.level >= 4 { access.append("超高帧") }
+                    if response.level >= 5 { access.append(level5DisplayName()) }
                     UserDefaults.standard.set(access, forKey: "quality_access")
                     
                     print("✅ 激活成功: level=\(response.level), levelName=\(response.levelName)")

@@ -18,6 +18,12 @@ import Metal
 // iPhone16,1/2 = iPhone 15 Pro / Pro Max (majorVersion=16)
 // iPhone17,x   = iPhone 16 系列 (majorVersion=17)
 // iPhone15,2/3 = iPhone 14 Pro / Pro Max (majorVersion=15, minorVersion<=3) → 不包含
+/// 第 5 级会员 / 1920×1440 档（p1440）的名字：后端随 TryDisconnect 下发 level5Name（总后台可改），默认「超超高帧」
+func level5DisplayName() -> String {
+    let s = UserDefaults.standard.string(forKey: "level5_name") ?? ""
+    return s.isEmpty ? "超超高帧" : s
+}
+
 fileprivate func isIPhone15OrNewer() -> Bool {
     var systemInfo = utsname()
     uname(&systemInfo)
@@ -814,7 +820,8 @@ enum LadderProfile: Int, CaseIterable {
     case standard  // 标清
     case high      // 高清
     case ultra     // 超高帧
-    case p4k       // 超清（仅后置）
+    case p4k       // 超高清 1920×1080（10-22 起，原 1920×1440）
+    case p1440     // 第 5 级「超超高帧」1920×1440（iPhone 15+ 给不了 → 1920×1080）；放最后，档位上下步进不受影响
 }
 
 enum MountOrientation: Int, CaseIterable {
@@ -909,6 +916,7 @@ final class LadderConfigStore {
 
     /// 后台 JSON 里的档位名（与 Android、后端三方约定一致，别改）
     static let p4k = "p4k"
+    static let p1440 = "p1440"
     static let high = "high"
     static let ultra = "ultra"
     static let standard = "standard"
@@ -919,7 +927,8 @@ final class LadderConfigStore {
     /// 内置默认值：与 2026-08-18 之前硬编码的数值完全一致（不改变现有行为）。
     /// w/h/fps 全给 0 = 分辨率与帧率继续由 calculateLadderForDevice 的机型分支决定。
     private let builtin: [String: Entry] = [
-        LadderConfigStore.p4k:      Entry(w: 0, h: 0, fps: 0, maxKbps: 7000, minKbps: 4500),
+        LadderConfigStore.p1440:    Entry(w: 0, h: 0, fps: 0, maxKbps: 7000, minKbps: 4500),   // 原 p4k 的值
+        LadderConfigStore.p4k:      Entry(w: 0, h: 0, fps: 0, maxKbps: 6500, minKbps: 4200),   // 10-22 起 1920×1080
         LadderConfigStore.high:     Entry(w: 0, h: 0, fps: 0, maxKbps: 6500, minKbps: 4200),
         LadderConfigStore.ultra:    Entry(w: 0, h: 0, fps: 0, maxKbps: 5000, minKbps: 3300),
         LadderConfigStore.standard: Entry(w: 0, h: 0, fps: 0, maxKbps: 4000, minKbps: 2700),
@@ -963,7 +972,7 @@ final class LadderConfigStore {
     private func apply(_ json: [String: Any]) {
         remoteCaptureFps = min(max(intOf(json["captureFps"]), 0), 240)
         var parsed: [String: Entry] = [:]
-        for name in [LadderConfigStore.p4k, LadderConfigStore.high, LadderConfigStore.ultra,
+        for name in [LadderConfigStore.p1440, LadderConfigStore.p4k, LadderConfigStore.high, LadderConfigStore.ultra,
                      LadderConfigStore.standard, LadderConfigStore.low] {
             guard let node = json[name] as? [String: Any], let def = builtin[name] else { continue }
             // 逐字段兜底：后端缺项/给 0 就用默认值那一项
@@ -1117,6 +1126,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         //   分辨率/帧率后台留空(0)时继续走下面的机型分支（p4k 的 15+ 判断、ultra 的前后置 240/120）。
         let store = LadderConfigStore.shared
         let cfgP4k = store.entry(LadderConfigStore.p4k)
+        let cfgP1440 = store.entry(LadderConfigStore.p1440)
         let cfgHigh = store.entry(LadderConfigStore.high)
         let cfgUltra = store.entry(LadderConfigStore.ultra)
         let cfgStd = store.entry(LadderConfigStore.standard)
@@ -1130,13 +1140,19 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 🔥 超高清档位：iPhone 15+ 直接采集1920x1080 (16:9)，scaleDown=1.0
         //              iPhone 13/14 采集1920x1440 (4:3) → 原始输出1920x1440，scaleDown=1.0
         // ⭐ 2026-07-09 用户要求：全档位码率上限统一下调 500（min 不动）
-        let p4kPreset: LadderPreset
-        let p4kDefaultHeight = needP4kSeparateCapture ? 1080 : 1440
-        p4kPreset = LadderPreset(width: cfgP4k.w > 0 ? cfgP4k.w : 1920,
-                                 height: cfgP4k.h > 0 ? cfgP4k.h : p4kDefaultHeight,
-                                 fps: fpsOf(cfgP4k, 60),
-                                 maxKbps: cfgP4k.maxKbps, minKbps: cfgP4k.minKbps,
-                                 maxPushFps: 60, scaleDown: 1.0)
+        // ⭐ 10-22：超高清 p4k 改为所有机型 1920×1080（16:9 直接采集）；
+        //   原来的 1920×1440 变成第 5 级档位 p1440（「超超高帧」），沿用原机型分支：iPhone 15+ 给不了 → 1920×1080
+        let p4kPreset = LadderPreset(width: cfgP4k.w > 0 ? cfgP4k.w : 1920,
+                                     height: cfgP4k.h > 0 ? cfgP4k.h : 1080,
+                                     fps: fpsOf(cfgP4k, 60),
+                                     maxKbps: cfgP4k.maxKbps, minKbps: cfgP4k.minKbps,
+                                     maxPushFps: 60, scaleDown: 1.0)
+        let p1440DefaultHeight = needP4kSeparateCapture ? 1080 : 1440
+        let p1440Preset = LadderPreset(width: cfgP1440.w > 0 ? cfgP1440.w : 1920,
+                                       height: cfgP1440.h > 0 ? cfgP1440.h : p1440DefaultHeight,
+                                       fps: fpsOf(cfgP1440, 60),
+                                       maxKbps: cfgP1440.maxKbps, minKbps: cfgP1440.minKbps,
+                                       maxPushFps: 60, scaleDown: 1.0)
 
         // 其它档位所有设备统一，不区分机型（采集1920x1440，通过scaleDown缩放输出）
         // ⭐ 除 640x480(low) 外，其他档位最大码率再 +1000kbps
@@ -1147,10 +1163,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         let standardPreset = LadderPreset(width: cfgStd.w > 0 ? cfgStd.w : 1024, height: cfgStd.h > 0 ? cfgStd.h : 768, fps: fpsOf(cfgStd, 60), maxKbps: cfgStd.maxKbps, minKbps: cfgStd.minKbps, maxPushFps: 60, scaleDown: 1.0)
         let lowPreset      = LadderPreset(width: cfgLow.w > 0 ? cfgLow.w : 640, height: cfgLow.h > 0 ? cfgLow.h : 480, fps: fpsOf(cfgLow, 60), maxKbps: cfgLow.maxKbps, minKbps: cfgLow.minKbps, maxPushFps: 60, scaleDown: 1.0)
 
-        let p4kInfo = needP4kSeparateCapture ? "1920x1080(16:9直接采集)" : "1920x1440(4:3原始)"
+        let p4kInfo = needP4kSeparateCapture ? "p1440 因机型退到 1920x1080" : "p1440 = 1920x1440(4:3原始)"
         
         if device.position == .back {
             currentLadder = [
+                .p1440:    p1440Preset,
                 .p4k:      p4kPreset,
                 // ⭐ §77 后置 ultra 默认 240fps（后台留空即维持），码率同样可后台调
                 .ultra:    LadderPreset(width: cfgUltra.w > 0 ? cfgUltra.w : 1280, height: cfgUltra.h > 0 ? cfgUltra.h : 720, fps: fpsOf(cfgUltra, 240), maxKbps: cfgUltra.maxKbps, minKbps: cfgUltra.minKbps, maxPushFps: 60, scaleDown: 1.0),
@@ -1162,6 +1179,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             printLadderDetail(p4kInfo: p4kInfo)
         } else {
             currentLadder = [
+                .p1440:    p1440Preset,
                 .p4k:      p4kPreset,
                 // ⭐ §77 前置 ultra 默认 120fps（前置硬件上限比后置低，后台留空即维持）
                 .ultra:    LadderPreset(width: cfgUltra.w > 0 ? cfgUltra.w : 1280, height: cfgUltra.h > 0 ? cfgUltra.h : 720, fps: fpsOf(cfgUltra, 120), maxKbps: cfgUltra.maxKbps, minKbps: cfgUltra.minKbps, maxPushFps: 60, scaleDown: 1.0),
@@ -1179,12 +1197,12 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 后台改了码率而日志还印旧数字，排查时会被直接带偏。
     private func printLadderDetail(p4kInfo: String) {
         let order: [(LadderProfile, String)] = [
-            (.p4k, "超高清(p4k)   "), (.ultra, "超高帧(ultra) "),
+            (.p1440, "超超高帧(p1440)"), (.p4k, "超高清(p4k)   "), (.ultra, "超高帧(ultra) "),
             (.high, "超清(high)    "), (.standard, "高清(standard)"), (.low, "低清(low)     ")
         ]
         for (profile, name) in order {
             guard let p = currentLadder[profile] else { continue }
-            let extra = profile == .p4k ? " [\(p4kInfo)]" : ""
+            let extra = profile == .p1440 ? " [\(p4kInfo)]" : ""
             print("   \(name)= \(p.width)x\(p.height) @\(p.fps)fps → \(p.minKbps)-\(p.maxKbps)kbps\(extra)")
         }
     }
@@ -2130,6 +2148,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             // print("🔍 [档位] cfg.type = '\(cfg.type)'")
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
+            case "p1440":
+                desiredProfile = .p1440
             case "p4k":
                 desiredProfile = .p4k
                 // print("   → .p4k")
@@ -2360,10 +2380,13 @@ final class WebRTCManager: NSObject, ObservableObject {
             // 1) 档位：5档固定配置 - low/standard/high/ultra/p4k（SRT直推另有 srt2k/srt4k，采集按 p4k 走）
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
+            case "p1440":
+                desiredProfile = .p1440
             case "p4k":
                 desiredProfile = .p4k
             case "srt2k", "srt4k":
-                desiredProfile = .p4k
+                // 直推里 .p4k + srtHighResKey 取 2K/4K 预设；非直推没有 2K/4K，退到最高的 1920×1440
+                desiredProfile = srtDirectMode ? .p4k : .p1440
             case "ultra":
                 desiredProfile = .ultra
             case "high":
@@ -4046,6 +4069,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let serverType = serverCfg.type.lowercased()
             let initProfile: LadderProfile
             switch serverType {
+            case "p1440": initProfile = .p1440
             case "p4k": initProfile = .p4k
             case "ultra": initProfile = .ultra
             case "high": initProfile = .high
@@ -5785,8 +5809,10 @@ final class WebRTCManager: NSObject, ObservableObject {
         switch profile {
         case .ultra:
             return (1280, 720, fps)
-        case .p4k:
+        case .p1440:
             return isIPhone15OrNewer() ? (1920, 1080, fps) : (1920, 1440, fps)
+        case .p4k:
+            return (1920, 1080, fps)
         case .high:
             return (1440, 1080, fps)   // 直接采集 1440×1080，无缩放
         case .low:
@@ -6911,6 +6937,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         case .high: return "high"
         case .ultra: return "ultra"
         case .p4k: return highRes ?? "p4k"
+        case .p1440: return "p1440"
         }
     }
 
@@ -7075,6 +7102,7 @@ extension WebRTCManager: SrtDirectEngineHost {
             let lower = cfg.type.lowercased()
             let desired: LadderProfile
             switch lower {
+            case "p1440": desired = .p1440
             case "p4k", "4k", "srt2k", "srt4k": desired = .p4k
             case "ultra": desired = .ultra
             case "high": desired = .high

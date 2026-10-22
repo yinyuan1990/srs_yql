@@ -231,7 +231,9 @@ class WebSocketManager: ObservableObject {
             "srtPlayPort": srtPlayPort,
             // SRT全码/积分：后端 TryDisconnect 下发时存入，透传给 PC（PC 据此判断 1920 以上档能不能选）
             "srtFull": srtFull,
-            "srtPoints": srtPoints
+            "srtPoints": srtPoints,
+            // 支持第 5 级档位 p1440（1920×1440）：PC 据此才显示该档按钮（老版本 App 不认 p1440）
+            "supportsP1440": true
         ]
         let payloadDict: [String: Any] = [
             "type": "CONFIG_STATE",
@@ -1195,6 +1197,10 @@ extension WebSocketManager: SwiftStompDelegate {
         }
         if let srtPoints = msgDict["srtPoints"] as? NSNumber {
             UserDefaults.standard.set(srtPoints.intValue, forKey: "srt_points")
+        }
+        // 第 5 级（超超高帧 = 1920×1440 档）名字，总后台可改
+        if let n = msgDict["level5Name"] as? String, !n.isEmpty {
+            UserDefaults.standard.set(n, forKey: "level5_name")
         }
 
         // 🔥 日试用相关（新增）
