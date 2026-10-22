@@ -370,8 +370,13 @@ final class SrtDirectEngine {
 /// 峰值控制器（照 Android SdPeakController.kt）：每秒看编码实际 kbps 与 SRT 发送缓冲。
 /// - 超标：实际码率 > peakKbps，或发送缓冲 > 45% latency，连续 holdSec 秒 →
 ///   先 QP 上限 += qpStep（≤ qpCeil，iOS 15+ MaxAllowedFrameQP）；QP 到顶或不支持 → 目标码率降 10%/档（最多到 50%）。
+/// - 拥塞保护：上面两样到底后发送缓冲仍持续超标（上行真不够）→ QP 上限一步放到 jamQp，码率再降到最低 jamRateMin%。
+///   上行被视频挤满时 WebSocket 心跳/指令也过不去（PC 显示码率 0、调不了参数），拥塞久了 SRT 也会断。
 /// - 平稳：实际码率 ≤ 80% 峰值且发送缓冲 < 15% latency，连续 recoverSec 秒 → 撤销最近一步。
 final class SdPeakController {
+    static let jamQp = 45
+    static let jamRateMin = 20
+
     enum Step {
         case qp(from: Int, to: Int)
         case rate(fromPct: Int, toPct: Int)
@@ -430,20 +435,27 @@ final class SdPeakController {
         if bufOver { why += (why.isEmpty ? "" : " ") + "发送缓冲\(sndBufMs)ms>45%延迟" }
         if overSec >= p.holdSec {
             overSec = 0
+            let jamQp = max(Self.jamQp, p.qpCeil)
             let s: Step?
+            var jam = false
             if qpRuntime && curPMax < p.qpCeil {
                 s = .qp(from: curPMax, to: min(p.qpCeil, curPMax + p.qpStep))
             } else if ratePct > 50 {
                 s = .rate(fromPct: ratePct, toPct: ratePct - 10)
+            } else if bufOver && qpRuntime && curPMax < jamQp {
+                s = .qp(from: curPMax, to: jamQp); jam = true
+            } else if bufOver && ratePct > Self.jamRateMin {
+                s = .rate(fromPct: ratePct, toPct: ratePct - 10); jam = true
             } else {
                 s = nil
             }
             guard let step = s else {
-                return Result(step: nil, raised: true, reason: "\(why)（已到 QP 上限 \(p.qpCeil) 且码率 50%，无可再降）")
+                let floor = bufOver ? "QP 上限 \(jamQp) 且码率 \(Self.jamRateMin)%" : "QP 上限 \(p.qpCeil) 且码率 50%"
+                return Result(step: nil, raised: true, reason: "\(why)（已到 \(floor)，无可再降）")
             }
             apply(step)
             steps.append(step)
-            return Result(step: step, raised: true, reason: "\(why) 连续\(p.holdSec)s")
+            return Result(step: step, raised: true, reason: "\(why) 连续\(p.holdSec)s" + (jam ? "，上行不够 → 拥塞保护" : ""))
         }
         if calmSec >= p.recoverSec, let last = steps.popLast() {
             calmSec = 0
