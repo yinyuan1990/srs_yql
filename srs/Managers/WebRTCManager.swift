@@ -7245,7 +7245,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         currentConnMode = .srtDirect
         WebRTCManager.effectiveConnectstype = 3
         H265Support.shared.forceH264ForNonP2P()
-        connectReason = "SRT直推"
+        connectReason = "SRS直推"
         WebSocketManager.connectReason = connectReason
         if let serverFps = ConfigManager.shared.getCurrentConfig()?.fps {
             setAverageOutputFPS(serverFps)
@@ -7274,7 +7274,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         // publishStatus 等首个关键帧真正发出（onSrtLive）再置 1，PC 才不会去拉还不存在的流
         WebSocketManager.isPublishingFlag = 0
         WebSocketManager.publishingStreamKey = streamKey
-        srtLastStateText = "SRT连接中..."
+        srtLastStateText = "SRS连接中..."
         startSrtStatsTimer()
         startCaptureWatchdog()
         applySrtDirectExposure()
@@ -7334,7 +7334,7 @@ extension WebRTCManager: SrtDirectEngineHost {
             guard let self, self.currentConnMode == .srtDirect, self.isPublishing else { return }
             WebSocketManager.publishingStreamKey = self.streamKey
             WebSocketManager.isPublishingFlag = 1
-            self.srtLastStateText = "SRT直推中"
+            self.srtLastStateText = "SRS直推中"
             SdLog.i("✅ 出流（第\(attempt + 1)次连接）流名=\(self.streamKey)" +
                     " 拉流=srt://\(self.srtPushHost):\(self.srtPushPort)?streamid=read:\(self.streamKey) → publishStatus=1")
         }
@@ -7342,7 +7342,7 @@ extension WebRTCManager: SrtDirectEngineHost {
 
     func onSrtLost(reason: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.srtLastStateText = "SRT断线,重连中..."
+            self?.srtLastStateText = "SRS断线,重连中..."
         }
     }
 
@@ -7388,7 +7388,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         currentFps = s.encFps
         currentCaptureFps = s.capFps
         currentSendFps = s.live ? s.encFps : 0
-        srtLastStateText = s.live ? "SRT直推中" : (s.connected ? "SRT已连接,等关键帧" : "SRT连接中...")
+        srtLastStateText = s.live ? "SRS直推中" : (s.connected ? "SRS已连接,等关键帧" : "SRS连接中...")
     }
 }
 

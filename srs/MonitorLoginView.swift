@@ -255,7 +255,7 @@ struct MonitorLoginView: View {
                                     publishMode = mode
                                     UserDefaults.standard.set(mode, forKey: "publish_mode")
                                 }) {
-                                    Text(mode.uppercased())
+                                    Text(mode == "srt" ? "SRS直推" : "SRS")   // 手机上不出现 SRT 字样
                                         .font(.system(size: 14, weight: selected ? .bold : .regular))
                                         .foregroundColor(selected ? .white : Color(hex: "666666"))
                                         .padding(.horizontal, 18)
