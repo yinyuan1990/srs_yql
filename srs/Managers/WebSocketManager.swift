@@ -880,7 +880,7 @@ extension WebSocketManager: SwiftStompDelegate {
                 // SRT直推指令字段不在 ThinRemoteConfig 里（解码会丢字段/覆盖缓存配置）→ 原始字典直接转给 WebRTCManager；
                 // srtCamState 是本机回传 PC 的回声，忽略
                 if let cfg = json["config"] as? [String: Any], let ptype = cfg["ptype"] as? String,
-                   ["srt_params", "srt_exposure", "srt_cam_query", "srtCamState"].contains(ptype) {
+                   ["srt_params", "srt_exposure", "srt_cam_query", "srt_reset", "srtCamState"].contains(ptype) {
                     if ptype != "srtCamState" {
                         DispatchQueue.main.async {
                             NotificationCenter.default.post(name: .srtDirectCommand, object: nil, userInfo: cfg)

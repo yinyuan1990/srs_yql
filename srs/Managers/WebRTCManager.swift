@@ -7182,6 +7182,19 @@ extension WebRTCManager: SrtDirectEngineHost {
                     " ISO=\(srtIso > 0 ? String(srtIso) : "自动") EV=\(srtExposureEv)")
         case "srt_cam_query":
             reportSrtCamState(pcT0: srtNumber(cfg["t0"]).map { Int64($0) })
+        case "srt_reset":
+            // 用户第 14 条：PC 关闭 / 切换账号 / 重新登录后第一次连上 → PC 临时改的全部回到服务器默认：
+            //   参数（QP / 延迟等）回登录下发的总后台值，快门/ISO/EV 回自动，锐化回默认，变焦回 1 倍
+            let paramsOk = SrtDirectParams.resetToLogin()
+            srtShutterNs = 0; srtIso = 0; srtExposureEv = 0
+            srtSharpness = VideoFilterPipeline.loadDefault(.sharpness, fallback: 0.0)
+            enforceSrtDirectFilterState(source: "srt_reset")
+            setZoom(1.0)
+            applySrtDirectExposure()
+            srtDirectEnsureCapture(reason: "PC恢复默认")
+            applySrtEncoding(reason: "PC恢复默认")
+            SdLog.i("PC 恢复默认（\(cfg["reason"] as? String ?? "")）：参数\(paramsOk ? "回到登录下发值" : "没有登录记录，保持现状")"
+                    + " [\(srtPlan.describe())]，曝光自动，变焦 1 倍")
         default:
             break
         }

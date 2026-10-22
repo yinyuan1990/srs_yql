@@ -21,6 +21,7 @@ enum SrtDirectParams {
     static let profiles = ["p1440", "low", "standard", "high", "ultra", "p4k", "srt2k", "srt4k"]
 
     private static let overrideKey = "srt_direct_override_json"
+    private static let loginKey = "srt_direct_login_json"   // 登录下发的原样一份（PC「恢复默认」时回到它）
     private static let hostKey = "srt_direct_host"
     private static let portKey = "srt_direct_port"
 
@@ -103,7 +104,20 @@ enum SrtDirectParams {
     static func saveFromLogin(_ raw: Any?) {
         let o = (raw as? [String: Any]) ?? [:]
         lock.lock(); persistLocked(o); lock.unlock()
+        if JSONSerialization.isValidJSONObject(o),
+           let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8) {
+            UserDefaults.standard.set(s, forKey: loginKey)
+        }
         SdLog.i("登录下发 srtParams \(o.isEmpty ? "无（用内置默认）" : "已保存 \(String(describing: o).prefix(300))")")
+    }
+
+    /// PC「恢复默认」：丢掉 PC 临时改的（QP / 延迟等），回到登录下发的总后台值。没存过登录值返回 false
+    @discardableResult
+    static func resetToLogin() -> Bool {
+        guard let s = UserDefaults.standard.string(forKey: loginKey), let d = s.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }
+        lock.lock(); persistLocked(o); lock.unlock()
+        return true
     }
 
     /// STOMP `ptype=srt_params`：增量合并（只带改动项）
