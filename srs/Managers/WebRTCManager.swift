@@ -7187,7 +7187,7 @@ extension WebRTCManager: SrtDirectEngineHost {
             //   参数（QP / 延迟等）回登录下发的总后台值，快门/ISO/EV 回自动，锐化回默认，变焦回 1 倍
             let paramsOk = SrtDirectParams.resetToLogin()
             srtShutterNs = 0; srtIso = 0; srtExposureEv = 0
-            srtSharpness = VideoFilterPipeline.loadDefault(.sharpness, fallback: 0.0)
+            srtSharpness = 0   // 与 VideoFilterPipeline.sharpness 启动默认一致（滤镜参数不持久化，默认就是 0）
             enforceSrtDirectFilterState(source: "srt_reset")
             setZoom(1.0)
             applySrtDirectExposure()
