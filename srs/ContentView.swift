@@ -393,11 +393,13 @@ struct SettingsPanelView: View {
                 
                 // 档位选择（仅 UI 效果，不实际调用，与后端同步）
                 HStack(spacing: 12) {
-                        QualityRadioButton(
-                            profile: .p1440,
-                            isSelected: selectedProfile == .p1440,
-                            action: { selectedProfile = .p1440 }  // 仅 UI 效果
-                        )
+                        if rtc.srtDirectMode {   // 1920×1440 是 SRT码档，SRS 没有
+                            QualityRadioButton(
+                                profile: .p1440,
+                                isSelected: selectedProfile == .p1440,
+                                action: { selectedProfile = .p1440 }  // 仅 UI 效果
+                            )
+                        }
                         
                         QualityRadioButton(
                             profile: .standard,
@@ -493,12 +495,14 @@ struct ControlPanelView: View {
         case .high:     return 2   // 超清
         case .p4k:      return 3   // 超高清
         case .ultra:    return 4   // 超高帧
-        case .p1440:    return 5   // 第 5 级「超超高帧」1920×1440
+        case .p1440:    return 5   // 1920×1440 是 SRT码档，不看等级（见 isProfileUnlocked）
         }
     }
 
     /// 该档位是否已随会员开通（未激活=一个都不算开通，不标绿）
     private func isProfileUnlocked(_ p: LadderProfile) -> Bool {
+        // 1920×1440 是 SRT码档：开通原画质（SRT全码）才算开通
+        if p == .p1440 { return UserDefaults.standard.bool(forKey: "srt_full") }
         guard UserDefaults.standard.bool(forKey: "activated") else { return false }
         let level = UserDefaults.standard.integer(forKey: "activation_level")
         return profileRequiredLevel(p) <= level
@@ -510,7 +514,8 @@ struct ControlPanelView: View {
             // 档位切换（清晰度）
             HStack(spacing: 6) {
                 // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
-                ForEach([LadderProfile.p1440, .standard, .high, .ultra, .p4k, .low], id: \.self) { profile in
+                // 1920×1440 是 SRT码档，只在 SRT直推显示（SRS 没有这一档）
+                ForEach((rtc.srtDirectMode ? [LadderProfile.p1440] : []) + [.standard, .high, .ultra, .p4k, .low], id: \.self) { profile in
                     let selected = (rtc.currentProfile == profile)
                     let unlocked = isProfileUnlocked(profile)
                     Button(action: {
@@ -945,7 +950,7 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             // 档位按钮（仅UI切换，不发送后端）
                             // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
-                            ForEach([LadderProfile.p1440, .low, .standard, .high, .ultra, .p4k], id: \.self) { profile in
+                            ForEach((rtc.srtDirectMode ? [LadderProfile.p1440] : []) + [.low, .standard, .high, .ultra, .p4k], id: \.self) { profile in
                                 Button(action: {
                                     // 仅切换UI显示，不实际切换档位
                                     rtc.currentProfile = profile

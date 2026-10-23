@@ -2149,7 +2149,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
             case "p1440":
-                desiredProfile = .p1440
+                // SRT码档：SRS 没有 1920×1440 → 按超高清 1920×1080
+                desiredProfile = srtDirectMode ? .p1440 : .p4k
             case "p4k":
                 desiredProfile = .p4k
                 // print("   → .p4k")
@@ -2381,12 +2382,12 @@ final class WebRTCManager: NSObject, ObservableObject {
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
             case "p1440":
-                desiredProfile = .p1440
+                desiredProfile = srtDirectMode ? .p1440 : .p4k   // SRS 没有 1920×1440
             case "p4k":
                 desiredProfile = .p4k
             case "srt2k", "srt4k":
-                // 直推里 .p4k + srtHighResKey 取 2K/4K 预设；非直推没有 2K/4K，退到最高的 1920×1440
-                desiredProfile = srtDirectMode ? .p4k : .p1440
+                // 直推里 .p4k + srtHighResKey 取 2K/4K 预设；SRS 没有 SRT码档，按超高清
+                desiredProfile = .p4k
             case "ultra":
                 desiredProfile = .ultra
             case "high":
@@ -4069,7 +4070,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let serverType = serverCfg.type.lowercased()
             let initProfile: LadderProfile
             switch serverType {
-            case "p1440": initProfile = .p1440
+            case "p1440": initProfile = srtDirectMode ? .p1440 : .p4k   // SRS 没有 1920×1440
             case "p4k": initProfile = .p4k
             case "ultra": initProfile = .ultra
             case "high": initProfile = .high
