@@ -232,8 +232,8 @@ class WebSocketManager: ObservableObject {
             // SRT全码/积分：后端 TryDisconnect 下发时存入，透传给 PC（PC 据此判断 1920 以上档能不能选）
             "srtFull": srtFull,
             "srtPoints": srtPoints,
-            // 支持第 5 级档位 p1440（1920×1440）：PC 据此才显示该档按钮（老版本 App 不认 p1440）
-            "supportsP1440": true
+            // 苹果手机不提供第 5 级档位 p1440（1920×1440）：报 false，PC 不显示该档
+            "supportsP1440": false
         ]
         let payloadDict: [String: Any] = [
             "type": "CONFIG_STATE",
