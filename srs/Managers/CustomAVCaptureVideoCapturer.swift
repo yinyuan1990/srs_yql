@@ -672,15 +672,19 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         ]
     }
 
+    /// 改采集帧率：和切格式（configureSession）一样走 sessionQueue 串行，
+    /// 否则切档时这里按旧格式的帧率写进新格式 → 超出 videoSupportedFrameRateRanges 抛 NSException 闪退
     func lockFrameRate(_ fps: Int) {
-        guard let device = currentDevice else { return }
-        do {
-            try device.lockForConfiguration()
-            lockFrameRateLocked(device, fps: fps)
-            device.unlockForConfiguration()
-            vlog("📹 [CustomCapture] fps locked=\(fps)")
-        } catch {
-            print("❌ [CustomCapture] 帧率锁定失败: \(error.localizedDescription)")
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                self.lockFrameRateLocked(device, fps: fps)
+                device.unlockForConfiguration()
+                self.vlog("📹 [CustomCapture] fps locked=\(fps)")
+            } catch {
+                print("❌ [CustomCapture] 帧率锁定失败: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -760,7 +764,7 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
 
             try device.lockForConfiguration()
             device.activeFormat = format
-            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
+            let frameDuration = safeFrameDuration(fps, format: format)
             device.activeVideoMinFrameDuration = frameDuration
             device.activeVideoMaxFrameDuration = frameDuration
             if let duration = lockedDuration, device.isExposureModeSupported(.custom) {
@@ -865,10 +869,34 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
     }
 
     private func lockFrameRateLocked(_ device: AVCaptureDevice, fps: Int) {
-        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
+        let frameDuration = safeFrameDuration(fps, format: device.activeFormat)
         device.activeVideoMinFrameDuration = frameDuration
         device.activeVideoMaxFrameDuration = frameDuration
-        device.activeMaxExposureDuration = frameDuration
+        // 手动曝光（SRT设置 快门/ISO）时不碰；超出格式曝光范围也会抛 NSException
+        if device.exposureMode != .custom {
+            device.activeMaxExposureDuration = clamp(frameDuration,
+                                                     min: device.activeFormat.minExposureDuration,
+                                                     max: device.activeFormat.maxExposureDuration)
+        }
+    }
+
+    /// fps → 该格式支持的帧间隔（videoSupportedFrameRateRanges 之外的值写进去会抛 NSException 闪退）
+    private func safeFrameDuration(_ fps: Int, format: AVCaptureDevice.Format) -> CMTime {
+        let want = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
+        let ranges = format.videoSupportedFrameRateRanges
+        guard let first = ranges.first else { return want }
+        if ranges.contains(where: { CMTimeCompare(want, $0.minFrameDuration) >= 0 && CMTimeCompare(want, $0.maxFrameDuration) <= 0 }) {
+            return want
+        }
+        var fastest = first.minFrameDuration
+        var slowest = first.maxFrameDuration
+        for r in ranges {
+            if CMTimeCompare(r.minFrameDuration, fastest) < 0 { fastest = r.minFrameDuration }
+            if CMTimeCompare(r.maxFrameDuration, slowest) > 0 { slowest = r.maxFrameDuration }
+        }
+        let use = CMTimeCompare(want, fastest) < 0 ? fastest : slowest
+        print("⚠️ [CustomCapture] 帧率 \(fps) 超出格式支持范围 → 改用 \(String(format: "%.1f", 1.0 / max(0.0001, use.seconds)))fps")
+        return use
     }
 
     private func refreshAutoWhiteBalanceAfterLightingChange(reason: String) {
