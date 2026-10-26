@@ -191,6 +191,8 @@ class WebSocketManager: ObservableObject {
             "connectstype": connectstype,
             "connectMode": connectMode,
             "profile": srtProfile,
+            // 当前档位（任何模式）：PC 档位显示跟它走（登录 / 没 PC 在线时手机自己回超低网）
+            "curType": WebRTCManager.currentTypeKey,
             // ⭐ H265：P2P 实际生效编码（"h264"/"h265"），PC 据此选择 H264/H265 解码管线
             "videoCodec": H265Support.shared.effectiveCodecString,
             // ⭐ §53.4.5「互相监督」：本次链路/编码是**怎么定下来的**（人话），PC 顶栏直接显示。

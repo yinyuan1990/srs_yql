@@ -1051,7 +1051,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var viewerHeartbeatChecker: Timer?
     var currentKbps: Int = 0       // 🔥 去掉@Published，纯统计不触发UI刷新
     var currentFps: Int = 0         // 🔥 去掉@Published，纯统计不触发UI刷新
-    @Published var currentProfile: LadderProfile = .standard
+    @Published var currentProfile: LadderProfile = .low   // 默认启动超低网（后端登录也重置成 low）
     @Published var captureRangeMode: CaptureRangeMode = .any
     @Published var captureBinningMode: CaptureBinningMode = .any
     @Published var wbTemperature: Float = 0
@@ -3226,6 +3226,11 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// SRT直推当前档位（srtParams presets 键，如 srt2k/srt4k）；非 SRT直推 = ""。
     /// 随 CONFIG_STATE.profile 上报，后端按它判断 >1920 档按分钟扣积分
     static var effectiveSrtProfile: String = ""
+    /// 当前档位键（任何模式，low/standard/high/ultra/p4k/srt2k/srt4k），随 CONFIG_STATE.curType 上报，PC 档位显示跟它走
+    static var currentTypeKey: String = "low"
+    /// 没有 PC 在线（收不到 PC_PRESENCE）这么久 → 切回超低网，网差时先保证出画面
+    static let noPcLowAfterSec: TimeInterval = 20
+    private var noPcSince: Date?
     /// 当前会话实际模式
     enum ConnMode { case none, p2p, srs, srt, srtDirect }
     private var currentConnMode: ConnMode = .none
@@ -3632,6 +3637,18 @@ final class WebRTCManager: NSObject, ObservableObject {
                 print("🖥 [PC在线] 有 PC 心跳超时下线，剩余 \(SessionPolicy.shared.onlineViewerCount) 台")
             }
             self.refreshPCPresenceState()
+            WebRTCManager.currentTypeKey = self.srtProfileKey(self.currentProfile, highRes: self.srtHighResKey)
+            // 没有 PC 在线 20 秒 → 回超低网（PC 上线后由 PC 手动切高档）
+            if SessionPolicy.shared.onlineViewerCount > 0 || self.noPcSince == nil {
+                self.noPcSince = Date()
+            } else if self.currentProfile != .low,
+                      let since = self.noPcSince, Date().timeIntervalSince(since) >= WebRTCManager.noPcLowAfterSec {
+                self.noPcSince = Date()
+                print("📉 没有 PC 在线 \(Int(WebRTCManager.noPcLowAfterSec))s → 切回超低网")
+                let cur = ConfigManager.shared.currentThinConfig
+                self.applyThinRemoteConfig(ThinRemoteConfig(type: "low", zoom: cur?.zoom ?? 1.0, ptype: "type",
+                                                            direction: cur?.direction ?? "-1"))
+            }
             // ⭐ 清理过期观看者（>4s 无心跳）
             let now = Date()
             let before = self.viewerRegistry.count
