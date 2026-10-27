@@ -59,6 +59,13 @@ final class SrtDirectEngine {
     private let muxLock = NSLock()
     private let muxer = SdTsMuxer()
     private let peak = SdPeakController()
+    // 码率失控保护：VideoToolbox 的 MaxAllowedFrameQP 优先于码率，复杂画面（前置近景 4K@30）下 QP 上限挡住码率控制，
+    //   实测目标 5.5Mbps 输出 55~77Mbps，运行中再调 QP 上限 / 码率都不生效 → 连续 runawayHoldSec 秒超过目标 runawayRatio 倍
+    //   就记下这一档，重建编码器时不设 QP 上限；换档后恢复
+    private static let runawayRatio = 3
+    private static let runawayHoldSec = 3
+    private var runawaySec = 0
+    private var qpCapOffProfile: String?
     private var capFrames: Int64 = 0
     private(set) var encodeWidth = 0
     private(set) var encodeHeight = 0
@@ -77,6 +84,7 @@ final class SrtDirectEngine {
         failedConfig = nil
         let enc = encoder
         let s = sender
+        if let old, old.plan.profile != r.plan.profile { qpCapOffProfile = nil; runawaySec = 0 }
         var bitrateMsg: String?
         if let enc, old != r, let size = targetSizeLocked(r), !Self.structuralChange(enc.config, config(for: r, size: size)) {
             if let old, old.plan != r.plan {
@@ -157,7 +165,8 @@ final class SrtDirectEngine {
 
     private func config(for r: VideoReq, size: (width: Int, height: Int)) -> SdH264Encoder.Config {
         SdH264Encoder.Config(width: size.width, height: size.height, fps: r.fps, bitrateKbps: r.kbps,
-                             bitrateMode: r.plan.bitrateMode, qpPMax: r.plan.qpPMax,
+                             bitrateMode: r.plan.bitrateMode,
+                             qpPMax: qpCapOffProfile == r.plan.profile ? 0 : r.plan.qpPMax,
                              gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps)
     }
 
@@ -319,9 +328,24 @@ final class SrtDirectEngine {
         lastSent = sent; lastLoss = loss; lastRetrans = retrans; lastDrop = drop
         let lossRate = dSent > 0 ? min(1.0, max(0.0, Double(dLoss) / Double(dSent))) : 0.0
 
+        // 码率失控保护（见 runawayRatio）：标记后下一帧 appendFrame 按新配置重建编码器
+        var runawayMsg: String?
+        if let enc, let r, enc.qpConfigured, s?.connected == true,
+           encKbps > r.kbps * Self.runawayRatio, r.plan.peakKbps <= 0 || encKbps > r.plan.peakKbps {
+            runawaySec += 1
+            if runawaySec >= Self.runawayHoldSec {
+                runawaySec = 0
+                qpCapOffProfile = r.plan.profile
+                runawayMsg = "⚠️ 码率失控：实际\(encKbps)kbps 是目标\(r.kbps)kbps 的 \(encKbps / max(1, r.kbps)) 倍、连续\(Self.runawayHoldSec)s，" +
+                    "QP 上限 \(enc.curQpMax) 挡住了码率控制 → 「\(r.plan.profile)」档去掉 QP 上限重建编码器（换档恢复）"
+            }
+        } else {
+            runawaySec = 0
+        }
+
         // 峰值控制器
         var peakMsg: String?
-        if let enc, let r, let s {
+        if runawayMsg == nil, let enc, let r, let s {
             let connected = s.connected
             if let res = peak.tick(encKbps: encKbps, sndBufMs: s.sndBufMs, connected: connected) {
                 switch res.step {
@@ -341,6 +365,7 @@ final class SrtDirectEngine {
         let targetKbps = (r?.kbps ?? 0) * peak.ratePct / 100
         let ew = encodeWidth, eh = encodeHeight, iw = inputWidth, ih = inputHeight
         lock.unlock()
+        if let runawayMsg { SdLog.i(runawayMsg) }
         if let peakMsg { SdLog.i("峰值控制 \(peakMsg)") }
 
         var line = "统计 \(s?.state ?? "未推流")"
