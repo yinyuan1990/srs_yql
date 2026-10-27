@@ -59,10 +59,11 @@ final class SrtDirectEngine {
     private let muxLock = NSLock()
     private let muxer = SdTsMuxer()
     private let peak = SdPeakController()
-    // 码率失控保护：VideoToolbox 的 MaxAllowedFrameQP 优先于码率，复杂画面（前置近景 4K@30）下 QP 上限挡住码率控制，
-    //   实测目标 5.5Mbps 输出 55~77Mbps，运行中再调 QP 上限 / 码率都不生效 → 连续 runawayHoldSec 秒超过目标 runawayRatio 倍
-    //   就记下这一档，重建编码器时不设 QP 上限；换档后恢复
-    private static let runawayRatio = 3
+    // 码率失控保护：VideoToolbox 的 MaxAllowedFrameQP 优先于码率，QP 上限挡住码率控制——
+    //   前置近景 4K@30 目标 5.5Mbps 输出 55~77Mbps；PC 把清晰度拉低（目标 300~1280kbps）时 1080P 仍输出 6~9Mbps，调清晰度等于没调；
+    //   运行中再调 QP 上限 / 码率都不生效 → 连续 runawayHoldSec 秒超过目标 runawayRatio 倍就记下这一档，
+    //   重建编码器时不设 QP 上限（之后清晰度 / 峰值控制都靠码率）；换档后恢复
+    private static let runawayRatio = 2
     private static let runawayHoldSec = 3
     private var runawaySec = 0
     private var qpCapOffProfile: String?
@@ -330,13 +331,12 @@ final class SrtDirectEngine {
 
         // 码率失控保护（见 runawayRatio）：标记后下一帧 appendFrame 按新配置重建编码器
         var runawayMsg: String?
-        if let enc, let r, enc.qpConfigured, s?.connected == true,
-           encKbps > r.kbps * Self.runawayRatio, r.plan.peakKbps <= 0 || encKbps > r.plan.peakKbps {
+        if let enc, let r, enc.qpConfigured, s?.connected == true, encKbps > r.kbps * Self.runawayRatio {
             runawaySec += 1
             if runawaySec >= Self.runawayHoldSec {
                 runawaySec = 0
                 qpCapOffProfile = r.plan.profile
-                runawayMsg = "⚠️ 码率失控：实际\(encKbps)kbps 是目标\(r.kbps)kbps 的 \(encKbps / max(1, r.kbps)) 倍、连续\(Self.runawayHoldSec)s，" +
+                runawayMsg = "⚠️ 码率失控：实际\(encKbps)kbps 超过目标\(r.kbps)kbps 的 \(Self.runawayRatio) 倍、连续\(Self.runawayHoldSec)s，" +
                     "QP 上限 \(enc.curQpMax) 挡住了码率控制 → 「\(r.plan.profile)」档去掉 QP 上限重建编码器（换档恢复）"
             }
         } else {
