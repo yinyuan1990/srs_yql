@@ -138,6 +138,17 @@ enum SrtDirectParams {
         if port <= 0 || port > 65535 { d.removeObject(forKey: portKey) } else { d.set(port, forKey: portKey) }
     }
 
+    /// 单帧降噪 0~1（总后台「参数设置」/ PC「SRT设置」，没配 = nil 不降噪）；iOS 用 CoreImage CINoiseReduction（只处理单帧）
+    static var noiseReduction: Float? {
+        lock.lock()
+        let v = loadOverrideLocked()["noiseReduction"]
+        lock.unlock()
+        // PC「默认」发 -1
+        if let n = v as? NSNumber { return n.floatValue < 0 ? nil : min(1, n.floatValue) }
+        if let s = v as? String, let d = Float(s) { return d < 0 ? nil : min(1, d) }
+        return nil
+    }
+
     static var serverHost: String {
         let h = UserDefaults.standard.string(forKey: hostKey) ?? ""
         return h.isEmpty ? defaultHost : h
