@@ -456,7 +456,7 @@ struct ActivationView: View {
                     if response.level >= 2 { access.append("超清") }
                     if response.level >= 3 { access.append("超高清") }
                     if response.level >= 4 { access.append("超高帧") }
-                    // 苹果手机不提供第 5 级档（1920×1440），不加进可用档位
+                    if response.level >= 5 { access.append(level5DisplayName()) }
                     UserDefaults.standard.set(access, forKey: "quality_access")
                     
                     print("✅ 激活成功: level=\(response.level), levelName=\(response.levelName)")
