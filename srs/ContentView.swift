@@ -393,13 +393,7 @@ struct SettingsPanelView: View {
                 
                 // 档位选择（仅 UI 效果，不实际调用，与后端同步）
                 HStack(spacing: 12) {
-                        if rtc.srtDirectMode {   // 1920×1440 是 SRT码档，SRS 没有
-                            QualityRadioButton(
-                                profile: .p1440,
-                                isSelected: selectedProfile == .p1440,
-                                action: { selectedProfile = .p1440 }  // 仅 UI 效果
-                            )
-                        }
+                        // 1920×1440 是 SRT码档（属于 SRT全码，PC 选、手机照常推），和 2K/4K 一样苹果手机界面不显示
                         
                         QualityRadioButton(
                             profile: .standard,
@@ -514,8 +508,8 @@ struct ControlPanelView: View {
             // 档位切换（清晰度）
             HStack(spacing: 6) {
                 // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
-                // 1920×1440 是 SRT码档，只在 SRT直推显示（SRS 没有这一档）
-                ForEach((rtc.srtDirectMode ? [LadderProfile.p1440] : []) + [.standard, .high, .ultra, .p4k, .low], id: \.self) { profile in
+                // 1920×1440 是 SRT码档（属于 SRT全码，PC 选、手机照常推），和 2K/4K 一样苹果手机界面不显示
+                ForEach([LadderProfile.standard, .high, .ultra, .p4k, .low], id: \.self) { profile in
                     let selected = (rtc.currentProfile == profile)
                     let unlocked = isProfileUnlocked(profile)
                     Button(action: {
@@ -950,7 +944,7 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             // 档位按钮（仅UI切换，不发送后端）
                             // ⭐ 2026-08-01 用户要求：主页档位「超高清」「超高帧」互换显示位置（名称/等级不变，仅顺序）
-                            ForEach((rtc.srtDirectMode ? [LadderProfile.p1440] : []) + [.low, .standard, .high, .ultra, .p4k], id: \.self) { profile in
+                            ForEach([LadderProfile.low, .standard, .high, .ultra, .p4k], id: \.self) { profile in   // 1920×1440 同上，界面不显示
                                 Button(action: {
                                     // 仅切换UI显示，不实际切换档位
                                     rtc.currentProfile = profile
