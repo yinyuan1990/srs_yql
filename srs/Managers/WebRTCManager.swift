@@ -6964,10 +6964,16 @@ extension WebRTCManager: SrtDirectEngineHost {
     }
 
     /// 推送帧率 = min(PC 设定, 档位 fps, 低功率上限)；码率 = 档位码率 × PC 清晰度%
+    /// 推送帧率 = min(PC 设定, 档位 fps)；防频闪开启时按防频闪帧率（不受档位 fps 封顶）
+    private func srtPushFps(_ plan: SrtDirectParams.Plan) -> Int {
+        let base = antiFlickerEnabled ? targetOutputFPS : min(targetOutputFPS, plan.fps)
+        return max(1, effectiveCaptureFps(base))
+    }
+
     func srtVideoReq() -> SrtDirectEngine.VideoReq {
         let plan = srtPlan
         WebRTCManager.effectiveSrtProfile = plan.profile
-        let fps = max(1, min(targetOutputFPS, plan.fps, effectiveCaptureFps(plan.fps)))
+        let fps = srtPushFps(plan)
         let pct = lastQualityPercent ?? 100
         let kbps = max(300, plan.bitrateKbps * pct / 100)
         return SrtDirectEngine.VideoReq(plan: plan, fps: fps, kbps: kbps)
@@ -6975,8 +6981,21 @@ extension WebRTCManager: SrtDirectEngineHost {
 
     func srtDirectCaptureResolution(_ profile: LadderProfile) -> (width: Int, height: Int, fps: Int) {
         let plan = SrtDirectParams.plan(srtProfileKey(profile, highRes: srtHighResKey))
-        let fps = max(1, min(targetOutputFPS, plan.fps, effectiveCaptureFps(plan.fps)))
-        return (plan.width, plan.height, fps)
+        return (plan.width, plan.height, srtPushFps(plan))
+    }
+
+    /// 当前摄像头和档位同宽高比的采集格式里最高帧率（防频闪 40/50 帧要看采集格式给不给得了）
+    func srtMaxSameRatioFps() -> Int {
+        guard let dev = capturer?.currentDevice else { return 30 }
+        let plan = srtPlan
+        let ratio = Double(max(plan.width, plan.height)) / Double(max(1, min(plan.width, plan.height)))
+        let fpsList = dev.formats.compactMap { f -> Int? in
+            let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+            let w = Double(max(d.width, d.height)), h = Double(max(1, min(d.width, d.height)))
+            guard abs(w / h - ratio) < 0.02 else { return nil }
+            return Int(f.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+        }
+        return fpsList.max() ?? 30
     }
 
     /// 直推采集格式：同宽高比、不小于目标的最小格式（帧率够档位用）；没有就取同比例最大的
@@ -7033,10 +7052,14 @@ extension WebRTCManager: SrtDirectEngineHost {
 
     /// 档位 / srtParams 变化后采集尺寸要变 → 重选采集格式（SRT 不断，引擎下一帧自动换编码器）
     func srtDirectEnsureCapture(reason: String) {
-        guard capturer?.currentDevice != nil else { return }
+        guard let dev = capturer?.currentDevice else { return }
         let want = srtDirectCaptureResolution(currentProfile)
-        guard want.width != srtCaptureReqWidth || want.height != srtCaptureReqHeight else { return }
-        SdLog.i("重选采集格式（\(reason)）\(srtCaptureReqWidth)x\(srtCaptureReqHeight) → \(want.width)x\(want.height)@\(want.fps)")
+        // 防频闪 40/50 帧：当前采集格式最高帧率不够也要重选格式
+        let activeMax = Int(dev.activeFormat.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0)
+        let fpsShort = antiFlickerEnabled && activeMax < want.fps
+        guard want.width != srtCaptureReqWidth || want.height != srtCaptureReqHeight || fpsShort else { return }
+        SdLog.i("重选采集格式（\(reason)）\(srtCaptureReqWidth)x\(srtCaptureReqHeight) → \(want.width)x\(want.height)@\(want.fps)" +
+                (fpsShort ? "（当前格式最高 \(activeMax)fps）" : ""))
         recaptureWithResolution(width: want.width, height: want.height, fps: want.fps)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.reapplyConfigExceptFocus()
@@ -7097,16 +7120,19 @@ extension WebRTCManager: SrtDirectEngineHost {
         capturer?.applySrtExposure(shutterNs: srtShutterNs, iso: srtIso, ev: srtExposureEv, fps: srtVideoReq().fps)
     }
 
-    /// PC anti_flicker：80/100/160/200 → 20/25/40/50fps（160 档 40fps 原样）；关闭时推送帧率保持不变
+    /// PC anti_flicker：80/100/160/200 → 20/25/40/50fps（160 档 40fps 原样），不受档位 fps 封顶；
+    ///   摄像头同比例格式跑不到时退到更低的 100 约数；关闭时推送帧率回到 min(PC 设定, 档位 fps)
     func srtDirectAntiFlicker(enabled: Bool, serverFps: Int) {
         antiFlickerEnabled = enabled
         if enabled {
-            let want = (serverFps > 0 ? serverFps : 80) / 4
+            let want = min((serverFps > 0 ? serverFps : 80) / 4, srtMaxSameRatioFps())
             let fps = want == 40 ? 40 : ([50, 25, 20, 10, 5].first { $0 <= want } ?? 5)
             antiFlickerFps = fps
             targetOutputFPS = fps
         }
         applySrtEncoding(reason: enabled ? "防频闪开启" : "防频闪关闭")
+        // 放在 applySrtEncoding 后：它按旧格式锁的帧率排在换格式前面，换完格式按新帧率采集
+        if enabled { srtDirectEnsureCapture(reason: "防频闪 \(antiFlickerFps)fps") }
         applySrtDirectExposure()
         SdLog.i("🔦 防频闪\(enabled ? "开启" : "关闭") 请求=\(serverFps)÷4 推送=\(srtVideoReq().fps)fps")
     }
