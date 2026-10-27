@@ -46,9 +46,6 @@ struct MonitorLoginView: View {
     @State private var selectedConnectMode: ConnectModeOption = ConnectModeOption.lastSelected
     @State private var selectedCodec: VideoCodecOption = VideoCodecOption.lastSelected
     @State private var selectedCodecSrs: VideoCodecOption = VideoCodecOption.lastSelected(key: VideoCodecOption.srsStorageKey, defaultCodec: .h265)
-    // 推流方式："srt" = SRT直推（默认，MediaMTX）；"srs" = 原 WebRTC（SRS/P2P，SessionPolicy 决定）。
-    //   存 UserDefaults `publish_mode`（与 Android 同名），退出登录不清；WebRTCManager.srtDirectMode 读它
-    @State private var publishMode: String = (UserDefaults.standard.string(forKey: "publish_mode") == "srs") ? "srs" : "srt"
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
     @State private var showRegisterView: Bool = false
@@ -98,29 +95,34 @@ struct MonitorLoginView: View {
                     Color.clear
                         .frame(height: 25)
                     
-                    // 顶部导航栏
-                    HStack {
-                        // 关闭按钮
-                        Button(action: {
-                            appState.navigateBack()
-                        }) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(Color(hex: "1A1A1A"))
-                                .frame(width: 28, height: 28)
-                        }
-                        
-                        Spacer()
-                        
-                        // 标题
+                    // 顶部导航栏：左 = 关闭 +「老版本登录」（SRS），标题居中
+                    ZStack {
                         Text("登录")
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(Color(hex: "1A1A1A"))
-                        
-                        Spacer()
-                        
-                        // 占位，保持标题居中
-                        Color.clear.frame(width: 28, height: 28)
+
+                        HStack(spacing: 6) {
+                            // 关闭按钮
+                            Button(action: {
+                                appState.navigateBack()
+                            }) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(Color(hex: "1A1A1A"))
+                                    .frame(width: 28, height: 28)
+                            }
+
+                            Button(action: {
+                                handleLogin(mode: "srs")
+                            }) {
+                                Text("老版本登录")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(Color(hex: "65AEF7"))
+                            }
+                            .disabled(isLoading)
+
+                            Spacer()
+                        }
                     }
                     .padding(.horizontal, 16)
                     .frame(height: 44)
@@ -238,36 +240,7 @@ struct MonitorLoginView: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 16)
 
-                        // 分隔线
-                        Divider()
-                            .background(Color(hex: "F0F0F0"))
-                            .padding(.leading, 50)
-
-                        // 推流方式：SRS / SRT（与 Android 登录页一致）
-                        HStack(spacing: 8) {
-                            Text("推流方式")
-                                .font(.system(size: 16))
-                                .foregroundColor(Color(hex: "1A1A1A"))
-                            Spacer()
-                            ForEach(["srs", "srt"], id: \.self) { mode in
-                                let selected = (publishMode == mode)
-                                Button(action: {
-                                    publishMode = mode
-                                    UserDefaults.standard.set(mode, forKey: "publish_mode")
-                                }) {
-                                    Text(mode == "srt" ? "SRS直推" : "SRS")   // 手机上不出现 SRT 字样
-                                        .font(.system(size: 14, weight: selected ? .bold : .regular))
-                                        .foregroundColor(selected ? .white : Color(hex: "666666"))
-                                        .padding(.horizontal, 18)
-                                        .padding(.vertical, 5)
-                                        .background(Capsule().fill(selected ? Color(hex: "65AEF7") : Color.clear))
-                                        .overlay(Capsule().stroke(selected ? Color(hex: "65AEF7") : Color(hex: "B3B3B3"), lineWidth: 1))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
+                        // 推流方式不在表单里选：「立即登入」= SRT直推，左上角「老版本登录」= SRS
 
                         // 分隔线
                         Divider()
@@ -291,7 +264,7 @@ struct MonitorLoginView: View {
                     VStack(spacing: 12) {
                         // 登录按钮
                         Button(action: {
-                            handleLogin()
+                            handleLogin(mode: "srt")
                         }) {
                             HStack {
                                 if isLoading {
@@ -653,7 +626,9 @@ struct MonitorLoginView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
     
-    private func handleLogin() {
+    /// mode："srt" =「立即登入」（SRT直推，MediaMTX）；"srs" = 左上角「老版本登录」（原 WebRTC，SRS/P2P 由 SessionPolicy 决定）。
+    ///   登录成功写 UserDefaults `publish_mode`（与 Android 同名），退出登录不清；WebRTCManager.srtDirectMode 读它
+    private func handleLogin(mode: String) {
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showAlert(message: "请输入用户名")
             return
@@ -682,6 +657,7 @@ struct MonitorLoginView: View {
                 )
                 
                 await MainActor.run {
+                    UserDefaults.standard.set(mode, forKey: "publish_mode")
                     UserDefaults.standard.set(loginResponse.token, forKey: "jwt_token")
                     UserDefaults.standard.set(loginResponse.permanentToken, forKey: "permanent_token")
                     UserDefaults.standard.set(loginResponse.username, forKey: "username")
