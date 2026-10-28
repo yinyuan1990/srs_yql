@@ -622,6 +622,10 @@ struct ContentView: View {
     
     // 导航到个人中心
     @State private var showingProfile: Bool = false
+    // 个人中心是 fullScreenCover：盖上时本页会收到 onDisappear、关掉时收到 onAppear，
+    //   这两次不能当成离开 / 重新进入推流页（否则停推流 + 断 WebSocket = PC 掉线）
+    @State private var coveredByProfile: Bool = false
+    @State private var profileLoggingOut: Bool = false
 
     // ✅ 自动推流状态
     @State private var isCameraReady = false
@@ -995,6 +999,21 @@ struct ContentView: View {
         .modifier(HideHomeIndicatorModifier())             // 🔥 隐藏 Home Indicator（iOS 16+）
         .onAppear {
             print("🚀 ContentView.onAppear")
+            if coveredByProfile {
+                coveredByProfile = false
+                if profileLoggingOut { return }
+                print("📱 从个人中心回到推流页：推流照旧，不重置")
+                if rtc.isCameraSleeping { rtc.wakeCamera() }   // 个人中心去扫码时相机被休眠
+                AppDelegate.orientationLock = .portrait
+                UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+                UIApplication.shared.isIdleTimerDisabled = true
+                if !WebSocketManager.shared.isConnected,
+                   let deviceId = UserDefaults.standard.string(forKey: "device_id"), !deviceId.isEmpty {
+                    WebSocketManager.shared.connect(deviceId: deviceId)
+                }
+                return
+            }
             rtc.localView.backgroundColor = .black
             rtc.localView.isOpaque = true
             rtc.localView.contentMode = .scaleAspectFill
@@ -1150,6 +1169,10 @@ struct ContentView: View {
             ) { _ in
                 // BackgroundAudioManager.shared.stopBackgroundKeepAlive()  // 🔊 审核隐藏
                 if rtc.isPublishing { print("⚠️ [原因] 退出登录停止推流"); rtc.stopPublish() }
+                // 从个人中心退出：本页被盖住时 onDisappear 没做清理，这里补上
+                profileLoggingOut = true
+                rtc.stopWhiteBalanceStatusPolling()
+                if !rtc.isCameraSleeping { rtc.sleepCamera() }
             }
             
             // ⭐ §53.4-定稿：§52.6 的「非同 WiFi → 退回登录页让用户改线路」已废弃。
@@ -1194,6 +1217,11 @@ struct ContentView: View {
             rtc.startWhiteBalanceStatusPolling()
         }
         .onDisappear {
+            if showingProfile {
+                coveredByProfile = true
+                print("🚪 ContentView 被个人中心盖住：推流 / WebSocket / 相机照旧")
+                return
+            }
             print("🚪 ContentView.onDisappear: 清理资源")
             rtc.stopWhiteBalanceStatusPolling()
             
