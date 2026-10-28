@@ -7163,11 +7163,15 @@ extension WebRTCManager: SrtDirectEngineHost {
                 frameThrottler?.currentProfileName = "\(desired)"
             }
             let newKey = srtProfileKey(currentProfile, highRes: srtHighResKey)
-            if let f = cfg.fps { setAverageOutputFPS(f) }
+            if let f = cfg.fps, !antiFlickerEnabled { setAverageOutputFPS(f) }
             let reason = "切档 \(oldKey)→\(newKey)"
             if oldKey != newKey { SdLog.i("\(reason) 参数[\(srtPlan.describe())]") }
             srtDirectEnsureCapture(reason: reason)
             applySrtEncoding(reason: reason)
+            return true
+        case "fps" where antiFlickerEnabled:
+            // 防频闪开着：推送帧率按防频闪走，PC 发的 fps（切档补发 / 档位上限）不覆盖
+            SdLog.i("🔦 防频闪开启中，忽略 fps=\(cfg.fps ?? 0)（推送保持 \(srtVideoReq().fps)fps）")
             return true
         case "cjfps", "test_brightness":
             SdLog.i("忽略 \(cfg.ptype)（SRT 曝光在 PC「SRT设置」调）")
