@@ -86,6 +86,12 @@ final class SrtDirectEngine {
         let enc = encoder
         let s = sender
         if let old, old.plan.profile != r.plan.profile { qpCapOffProfile = nil; runawaySec = 0 }
+        // PC 改了 QP：按新 QP 重建（下一帧 structuralChange 发现 qpPMax 变了）；码率又失控会再触发保护
+        if let old, old.plan.profile == r.plan.profile, qpCapOffProfile != nil,
+           old.plan.qpIMin != r.plan.qpIMin || old.plan.qpIMax != r.plan.qpIMax ||
+           old.plan.qpPMin != r.plan.qpPMin || old.plan.qpPMax != r.plan.qpPMax {
+            qpCapOffProfile = nil; runawaySec = 0
+        }
         var bitrateMsg: String?
         if let enc, old != r, let size = targetSizeLocked(r), !Self.structuralChange(enc.config, config(for: r, size: size)) {
             if let old, old.plan != r.plan {
@@ -272,6 +278,7 @@ final class SrtDirectEngine {
             m["qpPMin"] = r.plan.qpPMin
             m["qpPMax"] = r.plan.qpPMax
             m["qpOk"] = enc?.qpConfigured ?? false
+            m["qpOff"] = qpCapOffProfile == r.plan.profile   // 码率失控保护去掉了 QP 上限
             m["qpAvg"] = -1
             m["qpPMaxNow"] = peak.curPMax
         }
