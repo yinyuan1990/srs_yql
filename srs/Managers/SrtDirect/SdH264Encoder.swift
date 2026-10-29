@@ -91,17 +91,15 @@ final class SdH264Encoder {
         _ = set(kVTCompressionPropertyKey_PixelTransferProperties,
                 [kVTPixelTransferPropertyKey_ScalingMode as String: kVTScalingMode_Trim as String] as CFDictionary)
         self.applyBitrateLocked(session, config.bitrateKbps)
-        // qpPMax <= 0 = 不设 QP 上限（码率失控保护触发后，见 SrtDirectEngine.tick）
-        if #available(iOS 15.0, *), config.qpPMax > 0 {
+        if #available(iOS 15.0, *) {
             let qs = set(kVTCompressionPropertyKey_MaxAllowedFrameQP, NSNumber(value: config.qpPMax))
             qpConfigured = qs == noErr
             curQpMax = qpConfigured ? config.qpPMax : 0
         }
         VTCompressionSessionPrepareToEncodeFrames(session)
-        let qpDesc = config.qpPMax <= 0 ? "不设（码率失控保护）"
-            : (qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)")
         SdLog.i("编码器就绪 VideoToolbox H.264 High \(config.width)x\(config.height)@\(config.fps) 目标\(config.bitrateKbps)kbps" +
-                " \(config.bitrateMode == 2 ? "CBR" : "VBR") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s QP上限 \(qpDesc)")
+                " \(config.bitrateMode == 2 ? "CBR" : "VBR") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s" +
+                " QP上限 \(qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)")")
     }
 
     deinit {
