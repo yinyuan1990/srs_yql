@@ -7086,13 +7086,12 @@ extension WebRTCManager: SrtDirectEngineHost {
 
     // MARK: 滤镜 / 曝光 / 对焦
 
-    /// 颜色在 PC 本地调：手机端滤镜参数归中性、LUT 关；只保留锐化 + 单帧降噪（有一项 >0 才过一次 GPU）
-    ///   降噪 srtParams.noiseReduction 0~1 → CINoiseReduction 噪声级 0~0.04（0.6 ≈ CoreImage 默认 0.02），只处理单帧、不融合前后帧
+    /// 颜色在 PC 本地调：手机端滤镜参数归中性、LUT 关；只保留锐化（>0 才过一次 GPU）。
+    ///   降噪不做软件处理，交给相机硬件（和参考 App 一样），后台 / PC 发的 noiseReduction 忽略
     func enforceSrtDirectFilterState(source: String) {
         let s = max(0, min(1, srtSharpness))
-        let nr = SrtDirectParams.noiseReduction ?? 0
-        videoFilter.noiseLevel = nr * 0.04
-        let on = s > 0 || nr > 0
+        videoFilter.noiseLevel = 0
+        let on = s > 0
         videoFilter.applyAll(brightness: 0, contrast: 1, saturation: 1, sharpness: s,
                              blackPoint: 0, redGlow: 0, highlightLift: 0, gamma: 1, exposure: 0,
                              pixelLevel: 0, chroma: 0, enabled: on, source: "SRT直推:\(source)")
@@ -7221,7 +7220,7 @@ extension WebRTCManager: SrtDirectEngineHost {
             let replace = srtBool(cfg["replace"]) ?? false
             if replace { SrtDirectParams.replaceFromAdmin(patch) } else { SrtDirectParams.mergeRemote(patch) }
             SdLog.i("\(replace ? "总后台下发(整份替换)" : "后台改参") \(String(describing: patch).prefix(300)) → 生效 [\(srtPlan.describe())]")
-            if replace || patch.keys.contains("noiseReduction") { enforceSrtDirectFilterState(source: "后台改参:降噪") }
+            if replace { enforceSrtDirectFilterState(source: "总后台下发") }
             srtDirectEnsureCapture(reason: "后台改参")
             applySrtEncoding(reason: "后台改参")
         case "srt_exposure":
@@ -7283,7 +7282,6 @@ extension WebRTCManager: SrtDirectEngineHost {
         st["reqIso"] = srtIso
         st["ev"] = Double(srtExposureEv)
         st["zoom"] = Double(currentZoomFactor)
-        st["noiseReduction"] = SrtDirectParams.noiseReduction.map { Double($0) } ?? NSNull()   // null = 不降噪（相机默认）
         var presets: [String: Any] = [:]
         for k in SrtDirectParams.profiles {
             let p = SrtDirectParams.plan(k)
