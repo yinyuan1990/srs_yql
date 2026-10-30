@@ -7282,6 +7282,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         st["reqIso"] = srtIso
         st["ev"] = Double(srtExposureEv)
         st["zoom"] = Double(currentZoomFactor)
+        st["bitrateMode"] = srtPlan.bitrateMode   // 1=动态码率(VBR) 2=静态码率(CBR)，PC「码率模式」按钮按它摆
         var presets: [String: Any] = [:]
         for k in SrtDirectParams.profiles {
             let p = SrtDirectParams.plan(k)
