@@ -120,6 +120,16 @@ enum SrtDirectParams {
         return true
     }
 
+    /// 总后台「保存并下发」（srt_params 带 replace=true）：整份替换，后台清空的键（降噪 / 档位单独值）才能回默认；
+    /// 同时作为 PC「恢复默认」的基准（原来只有登录时才更新基准）
+    static func replaceFromAdmin(_ params: [String: Any]) {
+        lock.lock(); persistLocked(params); lock.unlock()
+        if JSONSerialization.isValidJSONObject(params),
+           let d = try? JSONSerialization.data(withJSONObject: params), let s = String(data: d, encoding: .utf8) {
+            UserDefaults.standard.set(s, forKey: loginKey)
+        }
+    }
+
     /// STOMP `ptype=srt_params`：增量合并（只带改动项）
     static func mergeRemote(_ patch: [String: Any]) {
         lock.lock()

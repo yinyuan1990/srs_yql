@@ -7218,9 +7218,10 @@ extension WebRTCManager: SrtDirectEngineHost {
                 let skip: Set<String> = ["ptype", "device_id", "deviceId", "operator", "cmd"]
                 patch = cfg.filter { !skip.contains($0.key) }
             }
-            SrtDirectParams.mergeRemote(patch)
-            SdLog.i("后台改参 \(String(describing: patch).prefix(300)) → 生效 [\(srtPlan.describe())]")
-            if patch.keys.contains("noiseReduction") { enforceSrtDirectFilterState(source: "后台改参:降噪") }
+            let replace = srtBool(cfg["replace"]) ?? false
+            if replace { SrtDirectParams.replaceFromAdmin(patch) } else { SrtDirectParams.mergeRemote(patch) }
+            SdLog.i("\(replace ? "总后台下发(整份替换)" : "后台改参") \(String(describing: patch).prefix(300)) → 生效 [\(srtPlan.describe())]")
+            if replace || patch.keys.contains("noiseReduction") { enforceSrtDirectFilterState(source: "后台改参:降噪") }
             srtDirectEnsureCapture(reason: "后台改参")
             applySrtEncoding(reason: "后台改参")
         case "srt_exposure":
