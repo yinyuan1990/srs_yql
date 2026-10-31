@@ -170,13 +170,13 @@ final class SrtDirectEngine {
 
     private func config(for r: VideoReq, size: (width: Int, height: Int)) -> SdH264Encoder.Config {
         SdH264Encoder.Config(width: size.width, height: size.height, fps: r.fps, bitrateKbps: r.kbps,
-                             bitrateMode: r.plan.bitrateMode, qpPMax: r.plan.qpPMax,
+                             bitrateMode: r.plan.bitrateMode, qpPMax: r.plan.qpPMax, qpMin: r.plan.iosQpMin,
                              gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps)
     }
 
     private static func structuralChange(_ a: SdH264Encoder.Config, _ b: SdH264Encoder.Config) -> Bool {
         a.width != b.width || a.height != b.height || a.fps != b.fps || a.gopSec != b.gopSec ||
-        a.bitrateMode != b.bitrateMode || a.qpPMax != b.qpPMax || a.peakKbps != b.peakKbps
+        a.bitrateMode != b.bitrateMode || a.qpPMax != b.qpPMax || a.qpMin != b.qpMin || a.peakKbps != b.peakKbps
     }
 
     private func makeEncoder(_ cfg: SdH264Encoder.Config) throws -> SdH264Encoder {
@@ -358,7 +358,9 @@ final class SrtDirectEngine {
 
         var line = "统计 \(s?.state ?? "未推流")"
         line += " | 采集\(capFps)fps(\(iw)x\(ih))"
+        let qpMinNow = enc?.curQpMin ?? 0
         line += " | 编码 \(ew)x\(eh) \(encKbps)kbps/目标\(targetKbps) \(encFps)fps QP上限\(enc?.curQpMax ?? 0)"
+        if qpMinNow > 0 { line += " 下限\(qpMinNow)" }
         line += " I\((enc?.lastIBytes ?? 0) / 1024)KB P均\((enc?.statPAvgBytes ?? 0) / 1024)KB P峰\((enc?.statPMaxBytes ?? 0) / 1024)KB"
         if let enc, enc.encodeErrors > 0 { line += " 编码错误\(enc.encodeErrors)" }
         if let s {

@@ -8,7 +8,8 @@
 //  结构：
 //  { presets: { low|standard|high|ultra|p4k|srt2k|srt4k: {width,height,fps,bitrateKbps, …可选覆盖任意全局键} },
 //    bitrateMode:1(VBR)/2(CBR), qpIMin, qpIMax, qpPMin, qpPMax, gopSec, latencyMs, maxBwKbps(0=不限),
-//    peakKbps, peakCtrl:{enable,qpStep,qpCeil,holdSec,recoverSec}, disableStabilization }
+//    peakKbps, peakCtrl:{enable,qpStep,qpCeil,holdSec,recoverSec}, disableStabilization,
+//    iosQpMin(只有 iOS 认：编码器 QP 下限 MinAllowedFrameQP，iOS 16+，缺省 18，0=不设) }
 //  档位里可再带 peakKbps/latencyMs/gopSec/qp* 等，覆盖全局值。
 //
 
@@ -68,10 +69,11 @@ enum SrtDirectParams {
         let holdSec: Int
         let recoverSec: Int
         let disableStabilization: Bool
+        let iosQpMin: Int
 
         func describe() -> String {
             "\(profile) \(width)x\(height)@\(fps) \(bitrateKbps)kbps \(bitrateMode == 2 ? "CBR" : "VBR")" +
-            " QP I\(qpIMin)~\(qpIMax) P\(qpPMin)~\(qpPMax) GOP\(gopSec)s 延迟\(latencyMs)ms" +
+            " QP I\(qpIMin)~\(qpIMax) P\(qpPMin)~\(qpPMax) iOS下限\(iosQpMin > 0 ? "\(iosQpMin)" : "不设") GOP\(gopSec)s 延迟\(latencyMs)ms" +
             " 限速\(maxBwKbps > 0 ? "\(maxBwKbps)kbps" : "不限") 峰值\(peakKbps)kbps" +
             " 峰值控制\(peakEnable ? "开(步长\(qpStep) 封顶\(qpCeil) 持续\(holdSec)s 回落\(recoverSec)s)" : "关")" +
             " 关防抖=\(disableStabilization)"
@@ -214,7 +216,8 @@ enum SrtDirectParams {
             qpCeil: clamp(num(pc, "qpCeil") ?? 38, 0, 51),
             holdSec: clamp(num(pc, "holdSec") ?? 2, 1, 30),
             recoverSec: clamp(num(pc, "recoverSec") ?? 5, 1, 120),
-            disableStabilization: bool("disableStabilization", true)
+            disableStabilization: bool("disableStabilization", true),
+            iosQpMin: clamp(int("iosQpMin", 18), 0, 51)
         )
     }
 

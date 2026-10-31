@@ -25,6 +25,8 @@ final class SdH264Encoder {
         /// 1=VBR 2=CBR
         let bitrateMode: Int
         let qpPMax: Int
+        /// QP 下限（MinAllowedFrameQP，iOS 16+）；0 = 不设
+        let qpMin: Int
         let gopSec: Int
         let peakKbps: Int
     }
@@ -41,6 +43,8 @@ final class SdH264Encoder {
     /// MaxAllowedFrameQP 是否设进去了
     private(set) var qpConfigured = false
     private(set) var curQpMax = 0
+    /// MinAllowedFrameQP 实际设进去的值；0 = 没设 / 系统不支持
+    private(set) var curQpMin = 0
     private(set) var curBitrateKbps = 0
 
     // —— 每秒统计（回调线程写，统计线程读）——
@@ -101,10 +105,26 @@ final class SdH264Encoder {
             qpConfigured = qs == noErr
             curQpMax = qpConfigured ? config.qpPMax : 0
         }
+        // 下限不能高过上限，否则 VideoToolbox 拒绝
+        let qpMin = qpConfigured ? min(config.qpMin, config.qpPMax) : config.qpMin
+        var qpMinText = "不设"
+        if qpMin > 0 {
+            if #available(iOS 16.0, *) {
+                let st = set(kVTCompressionPropertyKey_MinAllowedFrameQP, NSNumber(value: qpMin))
+                if st == noErr {
+                    curQpMin = qpMin
+                    qpMinText = "\(qpMin)（MinAllowedFrameQP）"
+                } else {
+                    qpMinText = "未设(编码器不支持 \(st))"
+                }
+            } else {
+                qpMinText = "未设(需 iOS 16)"
+            }
+        }
         VTCompressionSessionPrepareToEncodeFrames(session)
         SdLog.i("编码器就绪 VideoToolbox H.264 High \(config.width)x\(config.height)@\(config.fps) 目标\(config.bitrateKbps)kbps" +
                 " \(config.bitrateMode == 2 ? "CBR" : "VBR") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s" +
-                " QP上限 \(qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)")")
+                " QP上限 \(qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)") QP下限 \(qpMinText)")
     }
 
     deinit {
