@@ -614,6 +614,8 @@ struct ContentView: View {
     @State private var showControls: Bool = true
     @State private var isBlackout: Bool = false
     @State private var savedBrightness: CGFloat? = nil
+    /// 黑屏模式中间小灯泡打开的手电筒（闪光灯常亮）
+    @State private var torchOn: Bool = false
     
     // 🔥 滑动黑屏：同一方向滑动5次触发
     @State private var swipeCount: Int = 0
@@ -986,9 +988,18 @@ struct ContentView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            // 黑幕层
+            // 黑幕层：中间一个灰色 80% 小灯泡，点一下开 / 关手电筒（黑幕本身不吃触摸，滑动亮屏照旧）
             if isBlackout {
                 Color.black.ignoresSafeArea().allowsHitTesting(false)
+                Button {
+                    torchOn = rtc.capturer?.setTorch(!torchOn) ?? false
+                } label: {
+                    Image(systemName: torchOn ? "lightbulb.fill" : "lightbulb")
+                        .font(.system(size: 28))
+                        .foregroundColor(Color.gray.opacity(0.8))
+                        .frame(width: 64, height: 64)
+                        .contentShape(Rectangle())
+                }
             }
             
         }
@@ -1020,6 +1031,7 @@ struct ContentView: View {
             if isBlackout {
                 isBlackout = false
             }
+            if torchOn { rtc.capturer?.setTorch(false); torchOn = false }
             if let b = savedBrightness {
                 UIScreen.main.brightness = b
                 savedBrightness = nil
@@ -1223,6 +1235,7 @@ struct ContentView: View {
                 return
             }
             print("🚪 ContentView.onDisappear: 清理资源")
+            if torchOn { rtc.capturer?.setTorch(false); torchOn = false }
             rtc.stopWhiteBalanceStatusPolling()
             
             // 兜底资源清理
@@ -1286,9 +1299,12 @@ struct ContentView: View {
                         if isBlackout {
                             savedBrightness = UIScreen.main.brightness
                             UIScreen.main.brightness = 0.05
-                        } else if let b = savedBrightness {
-                            UIScreen.main.brightness = b
-                            savedBrightness = nil
+                        } else {
+                            if torchOn { rtc.capturer?.setTorch(false); torchOn = false }
+                            if let b = savedBrightness {
+                                UIScreen.main.brightness = b
+                                savedBrightness = nil
+                            }
                         }
                     }
                 }

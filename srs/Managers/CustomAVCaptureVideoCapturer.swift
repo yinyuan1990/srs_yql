@@ -429,6 +429,25 @@ final class CustomAVCaptureVideoCapturer: RTCVideoCapturer {
         }
     }
 
+    /// 黑屏模式中间的小灯泡：闪光灯常亮当手电筒（只有带闪光灯的后置摄像头支持）。返回操作后是否亮着
+    @discardableResult
+    func setTorch(_ on: Bool) -> Bool {
+        guard let device = currentDevice, device.hasTorch, device.isTorchAvailable else { return false }
+        do {
+            try device.lockForConfiguration()
+            if on {
+                try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+            } else {
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+            return on
+        } catch {
+            print("❌ [CustomCapture] 手电筒设置失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// §104 连续自动对焦（PC「自动」胶囊）。不支持 continuousAutoFocus 的机型退到单次 autoFocus；都不支持则不动。
     func applyContinuousAutoFocus() {
         guard let device = currentDevice else { return }
