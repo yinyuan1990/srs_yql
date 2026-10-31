@@ -57,6 +57,9 @@ final class SrtDirectEngine {
     private var failedConfig: SdH264Encoder.Config?
     /// 编码器失效重建的节流（后台时系统可能一直不给建会话，别每帧重建）
     private var lastBrokenRebuildMs: Int64 = 0
+    /// 峰值控制要的 QP 上限（≠ 档位值时）。VideoToolbox 运行中改 MaxAllowedFrameQP 不生效
+    /// （s88888888 10-31：抬到 45 后 1080p 仍 35~41Mbps），只能按新值重建编码器
+    private var qpBoost: Int?
     private var sender: SdSrtSender?
     private let muxLock = NSLock()
     private let muxer = SdTsMuxer()
@@ -77,6 +80,11 @@ final class SrtDirectEngine {
         let old = req
         req = r
         failedConfig = nil
+        if old?.plan != r.plan, qpBoost != nil {
+            // 新参数：峰值控制从头来；编码器下一帧按档位 QP 重建（走「只改 QP」那条，不再重置）
+            qpBoost = nil
+            peak.reset(r.plan, qpRuntime: encoder?.qpConfigured ?? false)
+        }
         let enc = encoder
         let s = sender
         var bitrateMsg: String?
@@ -112,12 +120,19 @@ final class SrtDirectEngine {
         inputWidth = w
         inputHeight = h
         guard let r = req, let size = targetSizeLocked(r) else { lock.unlock(); return }
-        let want = config(for: r, size: size)
+        var want = config(for: r, size: size)
         var enc = encoder
         var rebuildMsg: String?
         var retired: SdH264Encoder?
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let brokenRebuild = (enc?.broken ?? false) && nowMs - lastBrokenRebuildMs >= 2000
+        // 只有 QP 上限变（峰值控制抬 / 回落）→ 重建但保留峰值控制状态；其它结构变化 / 失效重建 → 峰值控制从头来，QP 回档位值
+        var qpOnly = false
+        if enc == nil || brokenRebuild || Self.structuralChange(enc!.config, want, ignoreQp: true) {
+            if qpBoost != nil { qpBoost = nil; want = config(for: r, size: size) }
+        } else if enc!.config.qpPMax != want.qpPMax {
+            qpOnly = true
+        }
         let needNew = enc == nil || Self.structuralChange(enc!.config, want)
         if (needNew && want != failedConfig) || brokenRebuild {
             let old = enc
@@ -127,10 +142,18 @@ final class SrtDirectEngine {
                 encoder = created
                 encodeWidth = want.width
                 encodeHeight = want.height
-                peak.reset(r.plan, qpRuntime: created.qpConfigured)
+                if qpOnly {
+                    let target = r.kbps * peak.ratePct / 100
+                    created.setBitrate(target)
+                } else {
+                    peak.reset(r.plan, qpRuntime: created.qpConfigured)
+                }
                 enc = created
                 let from = old.map { "\($0.config.width)x\($0.config.height)@\($0.config.fps)" } ?? "无"
-                if brokenRebuild, let old {
+                if qpOnly, let old {
+                    rebuildMsg = "峰值控制 QP上限 \(old.config.qpPMax)→\(want.qpPMax) 重建编码器生效" +
+                        "（运行中改不生效）目标\(r.kbps * peak.ratePct / 100)kbps（SRT 不断，下一帧出关键帧）"
+                } else if brokenRebuild, let old {
                     rebuildMsg = "🔁 编码器失效（VideoToolbox 错误 \(old.lastErrorStatus)，连续 \(old.consecutiveErrors) 帧失败）→ 重建" +
                         " \(want.width)x\(want.height)@\(want.fps) 目标\(want.bitrateKbps)kbps（SRT 不断，下一帧出关键帧）"
                 } else {
@@ -140,9 +163,10 @@ final class SrtDirectEngine {
                 retired = old
             } catch {
                 if !brokenRebuild { failedConfig = want }
+                if qpOnly { qpBoost = nil }
                 rebuildMsg = brokenRebuild
                     ? "⚠️ 编码器失效后重建失败: \(error.localizedDescription)，2 秒后再试"
-                    : "⚠️ 编码器创建失败 \(want.width)x\(want.height)@\(want.fps): \(error.localizedDescription)，保持原编码器"
+                    : "⚠️ 编码器创建失败 \(want.width)x\(want.height)@\(want.fps) QP上限\(want.qpPMax): \(error.localizedDescription)，保持原编码器"
             }
         }
         lock.unlock()
@@ -170,13 +194,15 @@ final class SrtDirectEngine {
 
     private func config(for r: VideoReq, size: (width: Int, height: Int)) -> SdH264Encoder.Config {
         SdH264Encoder.Config(width: size.width, height: size.height, fps: r.fps, bitrateKbps: r.kbps,
-                             bitrateMode: r.plan.bitrateMode, qpPMax: r.plan.qpPMax, qpMin: r.plan.iosQpMin,
+                             bitrateMode: r.plan.bitrateMode, qpPMax: qpBoost ?? r.plan.qpPMax, qpMin: r.plan.iosQpMin,
                              gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps)
     }
 
-    private static func structuralChange(_ a: SdH264Encoder.Config, _ b: SdH264Encoder.Config) -> Bool {
+    private static func structuralChange(_ a: SdH264Encoder.Config, _ b: SdH264Encoder.Config,
+                                         ignoreQp: Bool = false) -> Bool {
         a.width != b.width || a.height != b.height || a.fps != b.fps || a.gopSec != b.gopSec ||
-        a.bitrateMode != b.bitrateMode || a.qpPMax != b.qpPMax || a.qpMin != b.qpMin || a.peakKbps != b.peakKbps
+        a.bitrateMode != b.bitrateMode || (!ignoreQp && a.qpPMax != b.qpPMax) || a.qpMin != b.qpMin ||
+        a.peakKbps != b.peakKbps
     }
 
     private func makeEncoder(_ cfg: SdH264Encoder.Config) throws -> SdH264Encoder {
@@ -249,6 +275,7 @@ final class SrtDirectEngine {
         lock.lock()
         let enc = encoder
         encoder = nil
+        qpBoost = nil
         encodeWidth = 0
         encodeHeight = 0
         lock.unlock()
@@ -339,8 +366,8 @@ final class SrtDirectEngine {
             if let res = peak.tick(encKbps: encKbps, sndBufMs: s.sndBufMs, connected: connected) {
                 switch res.step {
                 case .qp(let from, let to)?:
-                    enc.setQpMax(to)
-                    peakMsg = "\(res.raised ? "压峰值" : "回落") QP上限 \(from)→\(to)（\(res.reason)）"
+                    qpBoost = to == r.plan.qpPMax ? nil : to
+                    peakMsg = "\(res.raised ? "压峰值" : "回落") QP上限 \(from)→\(to)（\(res.reason)）→ 下一帧重建编码器"
                 case .rate(let fromPct, let toPct)?:
                     let target = r.kbps * toPct / 100
                     enc.setBitrate(target)
