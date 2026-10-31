@@ -55,6 +55,8 @@ final class SrtDirectEngine {
     private var req: VideoReq?
     private var encoder: SdH264Encoder?
     private var failedConfig: SdH264Encoder.Config?
+    /// 编码器失效重建的节流（后台时系统可能一直不给建会话，别每帧重建）
+    private var lastBrokenRebuildMs: Int64 = 0
     private var sender: SdSrtSender?
     private let muxLock = NSLock()
     private let muxer = SdTsMuxer()
@@ -114,8 +116,12 @@ final class SrtDirectEngine {
         var enc = encoder
         var rebuildMsg: String?
         var retired: SdH264Encoder?
-        if enc == nil || Self.structuralChange(enc!.config, want), want != failedConfig {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let brokenRebuild = (enc?.broken ?? false) && nowMs - lastBrokenRebuildMs >= 2000
+        let needNew = enc == nil || Self.structuralChange(enc!.config, want)
+        if (needNew && want != failedConfig) || brokenRebuild {
             let old = enc
+            if brokenRebuild { lastBrokenRebuildMs = nowMs }
             do {
                 let created = try makeEncoder(want)
                 encoder = created
@@ -124,12 +130,19 @@ final class SrtDirectEngine {
                 peak.reset(r.plan, qpRuntime: created.qpConfigured)
                 enc = created
                 let from = old.map { "\($0.config.width)x\($0.config.height)@\($0.config.fps)" } ?? "无"
-                rebuildMsg = "换编码器 \(from) → \(want.width)x\(want.height)@\(want.fps) 目标\(want.bitrateKbps)kbps" +
-                    " GOP\(want.gopSec)s 采集\(w)x\(h)（SRT 不断）"
+                if brokenRebuild, let old {
+                    rebuildMsg = "🔁 编码器失效（VideoToolbox 错误 \(old.lastErrorStatus)，连续 \(old.consecutiveErrors) 帧失败）→ 重建" +
+                        " \(want.width)x\(want.height)@\(want.fps) 目标\(want.bitrateKbps)kbps（SRT 不断，下一帧出关键帧）"
+                } else {
+                    rebuildMsg = "换编码器 \(from) → \(want.width)x\(want.height)@\(want.fps) 目标\(want.bitrateKbps)kbps" +
+                        " GOP\(want.gopSec)s 采集\(w)x\(h)（SRT 不断）"
+                }
                 retired = old
             } catch {
-                failedConfig = want
-                rebuildMsg = "⚠️ 编码器创建失败 \(want.width)x\(want.height)@\(want.fps): \(error.localizedDescription)，保持原编码器"
+                if !brokenRebuild { failedConfig = want }
+                rebuildMsg = brokenRebuild
+                    ? "⚠️ 编码器失效后重建失败: \(error.localizedDescription)，2 秒后再试"
+                    : "⚠️ 编码器创建失败 \(want.width)x\(want.height)@\(want.fps): \(error.localizedDescription)，保持原编码器"
             }
         }
         lock.unlock()

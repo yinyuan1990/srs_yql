@@ -57,6 +57,11 @@ final class SdH264Encoder {
     private(set) var lastIBytes = 0
     private(set) var framesTotal: Int64 = 0
     private(set) var encodeErrors = 0
+    /// 连续编码失败帧数（成功一帧清零）。VideoToolbox 会话被系统作废后（App 退后台 / 被来电等打断）每帧都失败、不会自己好
+    private(set) var consecutiveErrors = 0
+    private(set) var lastErrorStatus: OSStatus = noErr
+    /// 引擎看到 true 就用同样参数重建（shiji80888 10-31：作废后编码错误 3500+、0 帧，推流一直空连）
+    var broken: Bool { lastErrorStatus == kVTInvalidSessionErr || consecutiveErrors >= 15 }
 
     init(config: Config, onFrame: @escaping (_ data: [UInt8], _ ptsUs: Int64, _ isKey: Bool, _ hostPtsNs: Int64) -> Void) throws {
         self.config = config
@@ -138,12 +143,17 @@ final class SdH264Encoder {
             guard let self else { return }
             guard status == noErr, let sb = sampleBuffer else {
                 self.encodeErrors += 1
+                self.consecutiveErrors += 1
+                if status != noErr { self.lastErrorStatus = status }
                 return
             }
+            self.consecutiveErrors = 0
             self.handleOutput(sb, hostPtsNs: hostPtsNs)
         }
         if st != noErr {
             encodeErrors += 1
+            consecutiveErrors += 1
+            lastErrorStatus = st
             if key { lock.lock(); forceKey = true; lock.unlock() }
         }
     }
