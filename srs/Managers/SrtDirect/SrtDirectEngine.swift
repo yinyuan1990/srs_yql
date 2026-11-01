@@ -228,7 +228,8 @@ final class SrtDirectEngine {
                              bitrateMode: r.plan.bitrateMode, qpPMax: qpBoost ?? r.plan.qpPMax, qpMin: r.plan.iosQpMin,
                              gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps,
                              vbrCeilingKbps: r.plan.peakKbps > 0
-                                ? min(r.plan.peakKbps, r.plan.peakKbps * r.kbps / max(1, r.plan.bitrateKbps)) : 0)
+                                ? min(r.plan.peakKbps, r.plan.peakKbps * r.kbps / max(1, r.plan.bitrateKbps)) : 0,
+                             lowLatencyWanted: r.plan.iosLowLatency)
     }
 
     /// 低延迟码控下 QP 上限归保帧控制器管，峰值控制只降码率（上行不够时）

@@ -992,4 +992,34 @@ extension CustomAVCaptureVideoCapturer: AVCaptureVideoDataOutputSampleBufferDele
         let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timeStampNs)
         delegate?.capturer(self, didCapture: frame)
     }
+
+    /// 系统丢掉的帧（alwaysDiscardsLateVideoFrames=true：上一帧还没处理完就到的帧直接丢）。
+    /// 只计数，诊断定时器每秒读走清零：late = 采集线程来不及；outOfBuffers = 下游还攥着缓冲（缓冲池用光）
+    func captureOutput(_ output: AVCaptureOutput,
+                       didDrop sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        let reason = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_DroppedFrameReason,
+                                     attachmentModeOut: nil) as? String
+        if reason == (kCMSampleBufferDroppedFrameReason_FrameWasLate as String) {
+            Self.dropLate += 1
+        } else if reason == (kCMSampleBufferDroppedFrameReason_OutOfBuffers as String) {
+            Self.dropOutOfBuffers += 1
+        } else {
+            Self.dropOther += 1
+        }
+    }
+}
+
+extension CustomAVCaptureVideoCapturer {
+    /// 采集线程写、诊断线程读走清零（只做诊断，不加锁）
+    static var dropLate = 0
+    static var dropOutOfBuffers = 0
+    static var dropOther = 0
+
+    /// 读走这一段的丢帧数并清零：(来不及, 缓冲池用光, 其它)
+    static func takeDropCounts() -> (late: Int, outOfBuffers: Int, other: Int) {
+        let r = (dropLate, dropOutOfBuffers, dropOther)
+        dropLate = 0; dropOutOfBuffers = 0; dropOther = 0
+        return r
+    }
 }

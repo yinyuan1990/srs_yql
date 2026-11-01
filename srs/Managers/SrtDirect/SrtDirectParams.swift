@@ -74,9 +74,12 @@ enum SrtDirectParams {
         let iosQpMin: Int
         let iosQpCeil: Int
         let iosMinFpsPct: Int
+        /// 只有 iOS 认：编码器开不开低延迟码控（缺省开）；可按档位关（4K 低延迟比普通码控少 3~5 帧）
+        let iosLowLatency: Bool
 
         func describe() -> String {
             "\(profile) \(width)x\(height)@\(fps) \(bitrateKbps)kbps \(bitrateMode == 2 ? "CBR" : "VBR")" +
+            (iosLowLatency ? "" : " 普通码控") +
             " QP I\(qpIMin)~\(qpIMax) P\(qpPMin)~\(qpPMax) iOS下限\(iosQpMin > 0 ? "\(iosQpMin)" : "不设")" +
             " 保帧\(iosMinFpsPct)%(QP最多抬到\(iosQpCeil)) GOP\(gopSec)s 延迟\(latencyMs)ms" +
             " 限速\(maxBwKbps > 0 ? "\(maxBwKbps)kbps" : "不限") 峰值\(peakKbps)kbps" +
@@ -224,7 +227,8 @@ enum SrtDirectParams {
             disableStabilization: bool("disableStabilization", true),
             iosQpMin: clamp(int("iosQpMin", 18), 0, 51),
             iosQpCeil: clamp(int("iosQpCeil", 42), clamp(int("qpPMax", 33), qpPMin, 51), 51),
-            iosMinFpsPct: clamp(int("iosMinFpsPct", 80), 30, 100)
+            iosMinFpsPct: clamp(int("iosMinFpsPct", 80), 30, 100),
+            iosLowLatency: bool("iosLowLatency", true)
         )
     }
 

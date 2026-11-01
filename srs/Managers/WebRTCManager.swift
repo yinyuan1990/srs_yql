@@ -560,6 +560,18 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
     // ═══════════════════════════════════════════════════════════════════════════
     private var diagCapCount: Int = 0   // 摄像头回调计数
     private var diagPushCount: Int = 0  // 实际喂给 WebRTC 的帧数
+    // 相机线程每帧处理耗时（整个回调 / 其中交给 SRT 编码器那一步）：超过一帧间隔，下一帧就被系统丢掉（来不及）
+    private var diagProcSumMs: Double = 0
+    private var diagProcMaxMs: Double = 0
+    private var diagProcN: Int = 0
+    private var diagSinkSumMs: Double = 0
+    private var diagSinkMaxMs: Double = 0
+    private var diagSinkN: Int = 0
+    // SRT 日志 5 秒汇总
+    private var sdDiagSec = 0
+    private var sdDiagCap = 0, sdDiagLate = 0, sdDiagOob = 0, sdDiagOther = 0
+    private var sdDiagProcSum: Double = 0, sdDiagProcMax: Double = 0, sdDiagProcN = 0
+    private var sdDiagSinkSum: Double = 0, sdDiagSinkMax: Double = 0, sdDiagSinkN = 0
     private var diagTimer: Timer?       // 独立诊断定时器（不在采集队列）
     private let diagQueue = DispatchQueue(label: "fps.diag", qos: .utility)
     
@@ -596,7 +608,35 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
                 //   带「采集」关键词，P2PLogReporter 才会收进上报（见其 captureKeywords）。
                 let gapMs = self.lastCaptureFrameAt > 0
                     ? Int((CFAbsoluteTimeGetCurrent() - self.lastCaptureFrameAt) * 1000) : -1
-                print("🔬 [采集诊断] cap=\(cap) push=\(push)/\(target) 距上帧=\(gapMs)ms 尺寸=\(self.lastFrameWidth)x\(self.lastFrameHeight) 首帧=\(self.hasReceivedFrame ? "已到" : "未到")")
+                let drops = CustomAVCaptureVideoCapturer.takeDropCounts()
+                let procAvg = self.diagProcN > 0 ? self.diagProcSumMs / Double(self.diagProcN) : 0
+                let procMax = self.diagProcMaxMs
+                let sinkAvg = self.diagSinkN > 0 ? self.diagSinkSumMs / Double(self.diagSinkN) : 0
+                let sinkMax = self.diagSinkMaxMs
+                let procN = self.diagProcN, procSum = self.diagProcSumMs, sinkN = self.diagSinkN, sinkSum = self.diagSinkSumMs
+                self.diagProcSumMs = 0; self.diagProcMaxMs = 0; self.diagProcN = 0
+                self.diagSinkSumMs = 0; self.diagSinkMaxMs = 0; self.diagSinkN = 0
+                print("🔬 [采集诊断] cap=\(cap) push=\(push)/\(target) 距上帧=\(gapMs)ms 尺寸=\(self.lastFrameWidth)x\(self.lastFrameHeight) 首帧=\(self.hasReceivedFrame ? "已到" : "未到")" +
+                      " 系统丢=\(drops.late)来不及/\(drops.outOfBuffers)缓冲池满/\(drops.other)其它" +
+                      " 处理均\(String(format: "%.1f", procAvg))最长\(String(format: "%.1f", procMax))ms" +
+                      (sinkN > 0 ? " SRT送帧均\(String(format: "%.1f", sinkAvg))最长\(String(format: "%.1f", sinkMax))ms" : ""))
+
+                // SRT直推时每 5 秒汇总一行进 SRT 日志（P2P 日志开关关着也能看到采集端为什么出不满帧）
+                guard self.srtDirectSink != nil else { self.sdDiagSec = 0; return }
+                self.sdDiagSec += 1
+                self.sdDiagCap += cap
+                self.sdDiagLate += drops.late; self.sdDiagOob += drops.outOfBuffers; self.sdDiagOther += drops.other
+                self.sdDiagProcSum += procSum; self.sdDiagProcN += procN; self.sdDiagProcMax = max(self.sdDiagProcMax, procMax)
+                self.sdDiagSinkSum += sinkSum; self.sdDiagSinkN += sinkN; self.sdDiagSinkMax = max(self.sdDiagSinkMax, sinkMax)
+                guard self.sdDiagSec >= 5 else { return }
+                let secs = self.sdDiagSec
+                SdLog.i("采集诊断 \(self.lastFrameWidth)x\(self.lastFrameHeight) 相机给\(self.sdDiagCap / secs)fps" +
+                        " 系统丢\((self.sdDiagLate + self.sdDiagOob + self.sdDiagOther) / secs)fps(来不及\(self.sdDiagLate) 缓冲池满\(self.sdDiagOob) 其它\(self.sdDiagOther)/\(secs)s)" +
+                        " 相机线程每帧均\(String(format: "%.1f", self.sdDiagProcN > 0 ? self.sdDiagProcSum / Double(self.sdDiagProcN) : 0))最长\(String(format: "%.1f", self.sdDiagProcMax))ms" +
+                        " 其中送编码器均\(String(format: "%.1f", self.sdDiagSinkN > 0 ? self.sdDiagSinkSum / Double(self.sdDiagSinkN) : 0))最长\(String(format: "%.1f", self.sdDiagSinkMax))ms")
+                self.sdDiagSec = 0; self.sdDiagCap = 0; self.sdDiagLate = 0; self.sdDiagOob = 0; self.sdDiagOther = 0
+                self.sdDiagProcSum = 0; self.sdDiagProcMax = 0; self.sdDiagProcN = 0
+                self.sdDiagSinkSum = 0; self.sdDiagSinkMax = 0; self.sdDiagSinkN = 0
             }
         }
     }
@@ -666,6 +706,11 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
 
     func capturer(_ capturer: RTCVideoCapturer, didCapture videoFrame: RTCVideoFrame) {
         let nowSec = CFAbsoluteTimeGetCurrent()
+        defer {
+            let ms = (CFAbsoluteTimeGetCurrent() - nowSec) * 1000
+            diagProcSumMs += ms; diagProcN += 1
+            if ms > diagProcMaxMs { diagProcMaxMs = ms }
+        }
         lastCaptureFrameAt = nowSec  // 🚑 采集看门狗心跳
         
         // 采集计数
@@ -746,7 +791,11 @@ final class FrameThrottler: NSObject, RTCVideoCapturerDelegate {
                 }
                 if let sink = srtDirectSink,
                    let cvBuffer = (filtered.buffer as? RTCCVPixelBuffer)?.pixelBuffer {
+                    let t0 = CFAbsoluteTimeGetCurrent()
                     sink(cvBuffer, videoFrame.timeStampNs)
+                    let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+                    diagSinkSumMs += ms; diagSinkN += 1
+                    if ms > diagSinkMaxMs { diagSinkMaxMs = ms }
                 }
             }
         }

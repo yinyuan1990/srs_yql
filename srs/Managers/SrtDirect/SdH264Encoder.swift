@@ -31,6 +31,8 @@ final class SdH264Encoder {
         let peakKbps: Int
         /// VBR 在低延迟码控下的平均码率 = 峰值 × 清晰度%（0 = 不放开，按目标码率）
         var vbrCeilingKbps: Int = 0
+        /// 后台 srtParams.iosLowLatency：false = 不建低延迟码控，直接用普通码控
+        var lowLatencyWanted: Bool = true
     }
 
     let config: Config
@@ -98,7 +100,9 @@ final class SdH264Encoder {
         // 低延迟码控守码率优先，QP 到上限还超预算就丢帧（WWDC21「Explore low-latency video encoding」）
         var rcText = "普通"
         var created: (OSStatus, VTCompressionSession?) = (noErr, nil)
-        if #available(iOS 14.5, *) {
+        if !config.lowLatencyWanted {
+            rcText = "普通(后台关了低延迟)"
+        } else if #available(iOS 14.5, *) {
             let spec = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true] as CFDictionary
             created = create(spec)
             if created.0 == noErr, created.1 != nil {
