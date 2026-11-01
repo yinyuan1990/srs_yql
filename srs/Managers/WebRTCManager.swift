@@ -921,6 +921,9 @@ final class LadderConfigStore {
     static let ultra = "ultra"
     static let standard = "standard"
     static let low = "low"
+    /// SRT码档 2K / 4K 在 SRS（WebRTC）推流时的码率（SRT直推的在 srtParams 里配）
+    static let srt2k = "srt2k"
+    static let srt4k = "srt4k"
 
     private static let storageKey = "video_ladder_config"
 
@@ -932,7 +935,10 @@ final class LadderConfigStore {
         LadderConfigStore.high:     Entry(w: 0, h: 0, fps: 0, maxKbps: 6500, minKbps: 4200),
         LadderConfigStore.ultra:    Entry(w: 0, h: 0, fps: 0, maxKbps: 5000, minKbps: 3300),
         LadderConfigStore.standard: Entry(w: 0, h: 0, fps: 0, maxKbps: 4000, minKbps: 2700),
-        LadderConfigStore.low:      Entry(w: 0, h: 0, fps: 0, maxKbps: 2000, minKbps: 1500)
+        LadderConfigStore.low:      Entry(w: 0, h: 0, fps: 0, maxKbps: 2000, minKbps: 1500),
+        // w/h 0 = 2560×1440 / 3840×2160（见 WebRTCManager.applySrsHighResPreset）
+        LadderConfigStore.srt2k:    Entry(w: 0, h: 0, fps: 0, maxKbps: 10000, minKbps: 6000),
+        LadderConfigStore.srt4k:    Entry(w: 0, h: 0, fps: 0, maxKbps: 16000, minKbps: 9600)
     ]
 
     /// 后端下发值（登录时落盘，App 启动时从磁盘读回）
@@ -973,7 +979,7 @@ final class LadderConfigStore {
         remoteCaptureFps = min(max(intOf(json["captureFps"]), 0), 240)
         var parsed: [String: Entry] = [:]
         for name in [LadderConfigStore.p1440, LadderConfigStore.p4k, LadderConfigStore.high, LadderConfigStore.ultra,
-                     LadderConfigStore.standard, LadderConfigStore.low] {
+                     LadderConfigStore.standard, LadderConfigStore.low, LadderConfigStore.srt2k, LadderConfigStore.srt4k] {
             guard let node = json[name] as? [String: Any], let def = builtin[name] else { continue }
             // 逐字段兜底：后端缺项/给 0 就用默认值那一项
             let maxKbps = intOf(node["max"]) > 0 ? intOf(node["max"]) : def.maxKbps
@@ -1194,7 +1200,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         applySrsHighResPreset()
     }
 
-    /// SRS（WebRTC）推 SRT码档 2K / 4K：沿用 .p4k 槽位，换成 SRT直推同一套档位参数（总后台 srtParams 的分辨率 / 码率），
+    /// SRS（WebRTC）推 SRT码档 2K / 4K：沿用 .p4k 槽位，换成总后台「视频码率档位」的 srt2k / srt4k（没配用内置默认），
     ///   采集 3840×2160，WebRTC 输出缩到档位尺寸（adaptOutputFormat）；srtHighResKey = nil 时恢复超高清 1920×1080
     private var baseP4kPreset: LadderPreset?
 
@@ -1204,11 +1210,14 @@ final class WebRTCManager: NSObject, ObservableObject {
             currentLadder[.p4k] = base
             return
         }
-        let plan = SrtDirectParams.plan(key)
-        let maxK = plan.bitrateKbps
-        currentLadder[.p4k] = LadderPreset(width: plan.width, height: plan.height, fps: 30,
-                                           maxKbps: maxK, minKbps: maxK * 60 / 100, maxPushFps: 30, scaleDown: 1.0)
-        print("📐 SRS SRT码档 \(key) → 输出 \(plan.width)x\(plan.height)@30 \(maxK * 60 / 100)-\(maxK)kbps（采集 3840x2160）")
+        let e = LadderConfigStore.shared.entry(key)
+        let is4k = key == LadderConfigStore.srt4k
+        let w = e.w > 0 && e.h > 0 ? e.w : (is4k ? 3840 : 2560)
+        let h = e.w > 0 && e.h > 0 ? e.h : (is4k ? 2160 : 1440)
+        let fps = e.fps > 0 ? e.fps : 30
+        currentLadder[.p4k] = LadderPreset(width: w, height: h, fps: fps,
+                                           maxKbps: e.maxKbps, minKbps: e.minKbps, maxPushFps: 30, scaleDown: 1.0)
+        print("📐 SRS SRT码档 \(key) → 输出 \(w)x\(h)@\(fps) \(e.minKbps)-\(e.maxKbps)kbps（采集 3840x2160）")
     }
 
     /// ⭐ §77 打印各档**实际生效**值。
