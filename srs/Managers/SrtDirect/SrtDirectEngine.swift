@@ -64,6 +64,10 @@ final class SrtDirectEngine {
     private let muxLock = NSLock()
     private let muxer = SdTsMuxer()
     private let peak = SdPeakController()
+    private let fpsGuard = SdFpsGuard()
+    private weak var statEncoder: SdH264Encoder?
+    private var lastFramesIn: Int64 = 0
+    private var lastFramesDropped: Int64 = 0
     private var capFrames: Int64 = 0
     private(set) var encodeWidth = 0
     private(set) var encodeHeight = 0
@@ -83,7 +87,8 @@ final class SrtDirectEngine {
         if old?.plan != r.plan, qpBoost != nil {
             // 新参数：峰值控制从头来；编码器下一帧按档位 QP 重建（走「只改 QP」那条，不再重置）
             qpBoost = nil
-            peak.reset(r.plan, qpRuntime: encoder?.qpConfigured ?? false)
+            peak.reset(r.plan, qpRuntime: Self.peakQpRuntime(encoder))
+            fpsGuard.reset(r.plan)
         }
         let enc = encoder
         let s = sender
@@ -91,7 +96,8 @@ final class SrtDirectEngine {
         if let enc, old != r, let size = targetSizeLocked(r), !Self.structuralChange(enc.config, config(for: r, size: size)) {
             if let old, old.plan != r.plan {
                 if peak.curPMax != r.plan.qpPMax { enc.setQpMax(r.plan.qpPMax) }
-                peak.reset(r.plan, qpRuntime: enc.qpConfigured)
+                peak.reset(r.plan, qpRuntime: Self.peakQpRuntime(enc))
+                fpsGuard.reset(r.plan)
             }
             let target = r.kbps * peak.ratePct / 100
             enc.setBitrate(target)
@@ -146,7 +152,8 @@ final class SrtDirectEngine {
                     let target = r.kbps * peak.ratePct / 100
                     created.setBitrate(target)
                 } else {
-                    peak.reset(r.plan, qpRuntime: created.qpConfigured)
+                    peak.reset(r.plan, qpRuntime: Self.peakQpRuntime(created))
+                    fpsGuard.reset(r.plan)
                 }
                 enc = created
                 let from = old.map { "\($0.config.width)x\($0.config.height)@\($0.config.fps)" } ?? "无"
@@ -196,6 +203,12 @@ final class SrtDirectEngine {
         SdH264Encoder.Config(width: size.width, height: size.height, fps: r.fps, bitrateKbps: r.kbps,
                              bitrateMode: r.plan.bitrateMode, qpPMax: qpBoost ?? r.plan.qpPMax, qpMin: r.plan.iosQpMin,
                              gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps)
+    }
+
+    /// 低延迟码控下 QP 上限归保帧控制器管，峰值控制只降码率（上行不够时）
+    private static func peakQpRuntime(_ enc: SdH264Encoder?) -> Bool {
+        guard let enc else { return false }
+        return enc.qpConfigured && !enc.lowLatency
     }
 
     private static func structuralChange(_ a: SdH264Encoder.Config, _ b: SdH264Encoder.Config,
@@ -377,17 +390,39 @@ final class SrtDirectEngine {
                 }
             }
         }
+        // 保帧控制器（低延迟码控）：按这一秒「出帧 / 进帧」调 QP 上限
+        var guardMsg: String?
+        var inN = 0, dropN = 0
+        if let enc {
+            if statEncoder !== enc {
+                statEncoder = enc
+                lastFramesIn = enc.framesIn
+                lastFramesDropped = enc.framesDropped
+            }
+            inN = Int(max(0, enc.framesIn - lastFramesIn))
+            dropN = Int(max(0, enc.framesDropped - lastFramesDropped))
+            lastFramesIn = enc.framesIn
+            lastFramesDropped = enc.framesDropped
+            if enc.lowLatency, let r, s?.connected == true,
+               let g = fpsGuard.tick(inFrames: inN, outFrames: max(0, inN - dropN), encKbps: encKbps,
+                                     targetKbps: r.kbps * peak.ratePct / 100, curQp: qpBoost ?? r.plan.qpPMax) {
+                qpBoost = g.to == r.plan.qpPMax ? nil : g.to
+                guardMsg = "QP上限 \(g.from)→\(g.to)（\(g.reason)）→ 下一帧重建编码器"
+            }
+        }
         let peakDesc = peak.levelDesc
         let targetKbps = (r?.kbps ?? 0) * peak.ratePct / 100
         let ew = encodeWidth, eh = encodeHeight, iw = inputWidth, ih = inputHeight
         lock.unlock()
         if let peakMsg { SdLog.i("峰值控制 \(peakMsg)") }
+        if let guardMsg { SdLog.i("保帧 \(guardMsg)") }
 
         var line = "统计 \(s?.state ?? "未推流")"
         line += " | 采集\(capFps)fps(\(iw)x\(ih))"
         let qpMinNow = enc?.curQpMin ?? 0
         line += " | 编码 \(ew)x\(eh) \(encKbps)kbps/目标\(targetKbps) \(encFps)fps QP上限\(enc?.curQpMax ?? 0)"
         if qpMinNow > 0 { line += " 下限\(qpMinNow)" }
+        if enc?.lowLatency == true { line += " 低延迟码控 丢帧\(dropN)/\(inN)" }
         line += " I\((enc?.lastIBytes ?? 0) / 1024)KB P均\((enc?.statPAvgBytes ?? 0) / 1024)KB P峰\((enc?.statPMaxBytes ?? 0) / 1024)KB"
         if let enc, enc.encodeErrors > 0 { line += " 编码错误\(enc.encodeErrors)" }
         if let s {
@@ -517,5 +552,74 @@ final class SdPeakController {
         case .qp(_, let to): curPMax = to
         case .rate(_, let toPct): ratePct = toPct
         }
+    }
+}
+
+/// 保帧控制器（只在 iOS 低延迟码控下用）：低延迟码控守码率，QP 到上限还超预算就丢帧；
+/// 这里每秒看「出帧 / 进帧」，丢太多就抬 QP 上限，画面简单了再一点点降回档位值。
+///
+/// 模型（H.264：QP 每 +6 每帧大小约减半）：
+///   需求 D(Q) = D(Q0) × 2^(-(Q-Q0)/6)，预算 B = 目标码率；低延迟码控下保住帧比例 k = min(1, B / D(Q))。
+///   - 抬：k < r（iosMinFpsPct）连续 holdSec 秒 → 当前 Q 下 D/B ≈ 1/k，要 k ≥ r 需
+///     ΔQ = 6 × log2(r / k)，向上取整，单次 1~6，最多到 iosQpCeil；
+///   - 降：k ≥ 95% 且 实际码率 ≤ 75% 目标 连续 recoverSec 秒 → Q -= 2（不低于档位值 Q0）。
+///     75% 来自：Q 降 2 码率约 ×2^(2/6)=1.26，0.75×1.26≈0.95，降完仍在预算内、不会马上又丢帧（不来回切）；
+///   - 每次改完空 1 秒再判断（新编码器第一秒带关键帧，数据不准）。
+final class SdFpsGuard {
+    static let holdSec = 2
+    static let recoverSec = 5
+    static let maxStep = 6
+    static let calmKeepPct = 95
+    static let calmUsePct = 75
+
+    struct Result {
+        let from: Int
+        let to: Int
+        let reason: String
+    }
+
+    private var base = 0
+    private var qpCeil = 0
+    private var minPct = 80
+    private var lowSec = 0
+    private var calmSec = 0
+    private var skip = 0
+
+    func reset(_ p: SrtDirectParams.Plan) {
+        base = p.qpPMax
+        qpCeil = max(p.qpPMax, p.iosQpCeil)
+        minPct = p.iosMinFpsPct
+        lowSec = 0; calmSec = 0; skip = 1
+    }
+
+    /// inFrames / outFrames：这一秒送进编码器 / 编码出来的帧；curQp：当前 QP 上限
+    func tick(inFrames: Int, outFrames: Int, encKbps: Int, targetKbps: Int, curQp: Int) -> Result? {
+        if skip > 0 { skip -= 1; return nil }
+        guard inFrames >= 5, targetKbps > 0 else { lowSec = 0; calmSec = 0; return nil }
+        let keep = min(1.0, Double(outFrames) / Double(inFrames))
+        let keepPct = Int((keep * 100).rounded())
+        if keepPct < minPct {
+            lowSec += 1; calmSec = 0
+        } else if keepPct >= Self.calmKeepPct && encKbps * 100 <= targetKbps * Self.calmUsePct {
+            calmSec += 1; lowSec = 0
+        } else {
+            lowSec = 0; calmSec = 0
+        }
+        if lowSec >= Self.holdSec && curQp < qpCeil {
+            let need = 6 * log2(Double(minPct) / 100 / max(keep, 0.05))
+            let step = min(Self.maxStep, max(1, Int(need.rounded(.up))))
+            let to = min(qpCeil, curQp + step)
+            lowSec = 0; calmSec = 0; skip = 1
+            return Result(from: curQp, to: to,
+                          reason: "出帧\(outFrames)/\(inFrames)=\(keepPct)%<\(minPct)% 连续\(Self.holdSec)s，" +
+                                  "6×log2(\(minPct)%/\(keepPct)%)=+\(String(format: "%.1f", need))→+\(step)")
+        }
+        if calmSec >= Self.recoverSec && curQp > base {
+            let to = max(base, curQp - 2)
+            lowSec = 0; calmSec = 0; skip = 1
+            return Result(from: curQp, to: to,
+                          reason: "出帧≥\(Self.calmKeepPct)% 且码率\(encKbps)≤\(Self.calmUsePct)%目标\(targetKbps) 连续\(Self.recoverSec)s")
+        }
+        return nil
     }
 }

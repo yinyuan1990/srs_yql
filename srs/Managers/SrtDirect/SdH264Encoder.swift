@@ -60,6 +60,11 @@ final class SdH264Encoder {
     private(set) var statPMaxBytes = 0
     private(set) var lastIBytes = 0
     private(set) var framesTotal: Int64 = 0
+    /// 送进编码器的帧 / 低延迟码控为守码率主动丢的帧（累计；引擎每秒取差值）
+    private(set) var framesIn: Int64 = 0
+    private(set) var framesDropped: Int64 = 0
+    /// 低延迟码控（EnableLowLatencyRateControl）建成功：守码率优先，QP 到上限还超预算就丢帧
+    private(set) var lowLatency = false
     private(set) var encodeErrors = 0
     /// 连续编码失败帧数（成功一帧清零）。VideoToolbox 会话被系统作废后（App 退后台 / 被来电等打断）每帧都失败、不会自己好
     private(set) var consecutiveErrors = 0
@@ -70,21 +75,41 @@ final class SdH264Encoder {
     init(config: Config, onFrame: @escaping (_ data: [UInt8], _ ptsUs: Int64, _ isKey: Bool, _ hostPtsNs: Int64) -> Void) throws {
         self.config = config
         self.onFrame = onFrame
-        var s: VTCompressionSession?
-        let st = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: Int32(config.width),
-            height: Int32(config.height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &s)
-        guard st == noErr, let session = s else {
-            throw NSError(domain: "SdH264Encoder", code: Int(st),
-                          userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionCreate 失败 \(st)"])
+        func create(_ spec: CFDictionary?) -> (OSStatus, VTCompressionSession?) {
+            var s: VTCompressionSession?
+            let st = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: Int32(config.width),
+                height: Int32(config.height),
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: spec,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &s)
+            return (st, s)
+        }
+        // 普通码控下 MaxAllowedFrameQP 优先于码率（shiji80888 11-01：QP≤30 时 1080p 冲到 55Mbps）；
+        // 低延迟码控守码率优先，QP 到上限还超预算就丢帧（WWDC21「Explore low-latency video encoding」）
+        var rcText = "普通"
+        var created: (OSStatus, VTCompressionSession?) = (noErr, nil)
+        if #available(iOS 14.5, *) {
+            let spec = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true] as CFDictionary
+            created = create(spec)
+            if created.0 == noErr, created.1 != nil {
+                lowLatency = true
+                rcText = "低延迟"
+            } else {
+                rcText = "普通(低延迟建不起来 \(created.0))"
+            }
+        } else {
+            rcText = "普通(低延迟需 iOS 14.5)"
+        }
+        if !lowLatency { created = create(nil) }
+        guard created.0 == noErr, let session = created.1 else {
+            throw NSError(domain: "SdH264Encoder", code: Int(created.0),
+                          userInfo: [NSLocalizedDescriptionKey: "VTCompressionSessionCreate 失败 \(created.0)"])
         }
         self.session = session
         func set(_ key: CFString, _ value: CFTypeRef) -> OSStatus {
@@ -92,7 +117,13 @@ final class SdH264Encoder {
         }
         _ = set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         _ = set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        _ = set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
+        var profileText = "High"
+        if lowLatency, #available(iOS 15.0, *),
+           set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel) == noErr {
+            profileText = "ConstrainedHigh"
+        } else {
+            _ = set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
+        }
         _ = set(kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC)
         _ = set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: config.fps))
         _ = set(kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: max(1, config.fps * config.gopSec)))
@@ -122,7 +153,7 @@ final class SdH264Encoder {
             }
         }
         VTCompressionSessionPrepareToEncodeFrames(session)
-        SdLog.i("编码器就绪 VideoToolbox H.264 High \(config.width)x\(config.height)@\(config.fps) 目标\(config.bitrateKbps)kbps" +
+        SdLog.i("编码器就绪 VideoToolbox H.264 \(profileText) 码控=\(rcText) \(config.width)x\(config.height)@\(config.fps) 目标\(config.bitrateKbps)kbps" +
                 " \(config.bitrateMode == 2 ? "CBR" : "VBR") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s" +
                 " QP上限 \(qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)") QP下限 \(qpMinText)")
     }
@@ -156,11 +187,18 @@ final class SdH264Encoder {
         lock.unlock()
         let pts = CMTime(value: hostPtsNs, timescale: 1_000_000_000)
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
+        framesIn += 1
         let st = VTCompressionSessionEncodeFrame(
             s, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
             frameProperties: props, infoFlagsOut: nil
-        ) { [weak self] status, _, sampleBuffer in
+        ) { [weak self] status, infoFlags, sampleBuffer in
             guard let self else { return }
+            // 低延迟码控守码率主动丢帧：不是错误，不能算进「连续失败」（否则 15 帧就被当成失效重建）
+            if status == noErr, sampleBuffer == nil || infoFlags.contains(.frameDropped) {
+                self.framesDropped += 1
+                if key { self.lock.lock(); self.forceKey = true; self.lock.unlock() }
+                return
+            }
             guard status == noErr, let sb = sampleBuffer else {
                 self.encodeErrors += 1
                 self.consecutiveErrors += 1

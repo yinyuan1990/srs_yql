@@ -9,7 +9,9 @@
 //  { presets: { low|standard|high|ultra|p4k|srt2k|srt4k: {width,height,fps,bitrateKbps, …可选覆盖任意全局键} },
 //    bitrateMode:1(VBR)/2(CBR), qpIMin, qpIMax, qpPMin, qpPMax, gopSec, latencyMs, maxBwKbps(0=不限),
 //    peakKbps, peakCtrl:{enable,qpStep,qpCeil,holdSec,recoverSec}, disableStabilization,
-//    iosQpMin(只有 iOS 认：编码器 QP 下限 MinAllowedFrameQP，iOS 16+，缺省 18，0=不设) }
+//    iosQpMin(只有 iOS 认：编码器 QP 下限 MinAllowedFrameQP，iOS 16+，缺省 18，0=不设),
+//    iosQpCeil(只有 iOS 认：低延迟码控下保帧时 QP 上限最多抬到多少，缺省 42),
+//    iosMinFpsPct(只有 iOS 认：低延迟码控至少保住多少 % 的帧，低于它就抬 QP 上限，缺省 80) }
 //  档位里可再带 peakKbps/latencyMs/gopSec/qp* 等，覆盖全局值。
 //
 
@@ -70,10 +72,13 @@ enum SrtDirectParams {
         let recoverSec: Int
         let disableStabilization: Bool
         let iosQpMin: Int
+        let iosQpCeil: Int
+        let iosMinFpsPct: Int
 
         func describe() -> String {
             "\(profile) \(width)x\(height)@\(fps) \(bitrateKbps)kbps \(bitrateMode == 2 ? "CBR" : "VBR")" +
-            " QP I\(qpIMin)~\(qpIMax) P\(qpPMin)~\(qpPMax) iOS下限\(iosQpMin > 0 ? "\(iosQpMin)" : "不设") GOP\(gopSec)s 延迟\(latencyMs)ms" +
+            " QP I\(qpIMin)~\(qpIMax) P\(qpPMin)~\(qpPMax) iOS下限\(iosQpMin > 0 ? "\(iosQpMin)" : "不设")" +
+            " 保帧\(iosMinFpsPct)%(QP最多抬到\(iosQpCeil)) GOP\(gopSec)s 延迟\(latencyMs)ms" +
             " 限速\(maxBwKbps > 0 ? "\(maxBwKbps)kbps" : "不限") 峰值\(peakKbps)kbps" +
             " 峰值控制\(peakEnable ? "开(步长\(qpStep) 封顶\(qpCeil) 持续\(holdSec)s 回落\(recoverSec)s)" : "关")" +
             " 关防抖=\(disableStabilization)"
@@ -217,7 +222,9 @@ enum SrtDirectParams {
             holdSec: clamp(num(pc, "holdSec") ?? 2, 1, 30),
             recoverSec: clamp(num(pc, "recoverSec") ?? 5, 1, 120),
             disableStabilization: bool("disableStabilization", true),
-            iosQpMin: clamp(int("iosQpMin", 18), 0, 51)
+            iosQpMin: clamp(int("iosQpMin", 18), 0, 51),
+            iosQpCeil: clamp(int("iosQpCeil", 42), clamp(int("qpPMax", 33), qpPMin, 51), 51),
+            iosMinFpsPct: clamp(int("iosMinFpsPct", 80), 30, 100)
         )
     }
 
