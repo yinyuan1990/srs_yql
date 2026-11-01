@@ -1185,6 +1185,9 @@ struct ContentView: View {
                 rtc.startPreviewIfNeeded()
             }
             
+            // 重进推流页先清掉上一轮的观察者（必须在本轮所有注册之前），避免同一条指令被多份闭包处理
+            noteTokens.removeAll()
+
             // 注册自动推流监听
             setupAutoPublishing()
             
@@ -1205,9 +1208,6 @@ struct ContentView: View {
                 }
             }
             
-            // 重进推流页先清掉上一轮的观察者，避免同一条指令被多份闭包处理
-            noteTokens.removeAll()
-
             // 监听退出登录通知
             noteTokens.add(NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("StopPublishBeforeLogout"),
