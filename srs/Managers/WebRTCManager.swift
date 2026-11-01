@@ -1675,6 +1675,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     @objc private func onAntiFlickerCommand(_ notification: Notification) {
+        guard acceptsPcCommand else { return }   // 老实例不跟着改帧率 / 曝光
         guard let userInfo = notification.userInfo else { return }
         let enabled = userInfo["enabled"] as? Bool ?? false
         let serverFps = userInfo["fps"] as? Int ?? 80
@@ -1913,6 +1914,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
 
     @objc private func onSetFpsRequested(_ notification: Notification) {
+        guard acceptsPcCommand else { return }   // 老实例不跟着改帧率
         guard let userInfo = notification.userInfo,
               let fps = userInfo["fps"] as? Int else {
             print("🎯 [set_fps] ❌ 通知参数错误")
@@ -3607,8 +3609,22 @@ final class WebRTCManager: NSObject, ObservableObject {
     // 键格式："前置_1024x768" 或 "后置_1920x1080"
     private var focusDistanceCache: [String: Float] = [:]
 
+    /// 当前推流页在用的实例（每进一次推流页新建一个）。老实例若没被及时释放，
+    /// 不能再去处理 PC 指令、动相机，否则和新实例抢档位。
+    static weak var activeInstance: WebRTCManager?
+    /// teardownOnLeave 之后为 true
+    private(set) var isTornDown = false
+    /// 本实例还是不是 PC 指令的接收者。没被卸过监听、又没人认领时自己认领（兜底，
+    /// 避免 activeInstance 意外为空时整个 App 不响应 PC 指令）。
+    var acceptsPcCommand: Bool {
+        if isTornDown { return false }
+        if WebRTCManager.activeInstance == nil { WebRTCManager.activeInstance = self }
+        return WebRTCManager.activeInstance === self
+    }
+
     override init() {
         super.init()
+        WebRTCManager.activeInstance = self
         // 🔥 测试：scaleAspectFit = 完整显示（可能有黑边），scaleAspectFill = 填满（可能裁剪）
         localView.videoContentMode = .scaleAspectFit
         
@@ -3621,8 +3637,6 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebRTCManager.calculateMaxShutterSpeed()
         
         loadTokenIfNeeded() // 动态流名：使用你的读取逻辑
-        NotificationCenter.default.addObserver(self, selector: #selector(onLogoutRequired),
-                                               name: NSNotification.Name("LogoutRequired"), object: nil)
         
         // 🔥 强制重新加载本地缓存的配置（确保获取最新的）
         ConfigManager.shared.loadCachedThinConfig()
@@ -3634,7 +3648,21 @@ final class WebRTCManager: NSObject, ObservableObject {
         } else {
             print("🎬 [WebRTCManager.init] 无缓存配置，使用默认档位 currentProfile=\(currentProfile)")
         }
-        
+
+        installNotificationObservers()
+
+        // ⭐ 两种连接管理类（P2P / SRS）的数据源
+        p2pManager.dataSource = self
+        srsManager.dataSource = self
+        installSessionPolicyHooks()
+    }
+
+    /// 通知监听 + 心跳检查定时器。init 建一次；teardownOnLeave 卸掉后若本实例被复用
+    /// （重新进推流页）由 reactivateOnEnter 再装回来。
+    private func installNotificationObservers() {
+        NotificationCenter.default.addObserver(self, selector: #selector(onLogoutRequired),
+                                               name: NSNotification.Name("LogoutRequired"), object: nil)
+
         NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(onThinConfigUpdated(_:)),
@@ -3705,6 +3733,8 @@ final class WebRTCManager: NSObject, ObservableObject {
         )
         viewerHeartbeatChecker = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            // 老实例（上一轮登录留下的）不许再写心跳用的档位静态量、不许自动回超低网
+            guard self.acceptsPcCommand else { return }
             let elapsed = Date().timeIntervalSince(self.lastViewerHeartbeatTime)
             if elapsed > 3.0 && self.viewerConnected {
                 self.viewerConnected = false
@@ -3759,11 +3789,18 @@ final class WebRTCManager: NSObject, ObservableObject {
                 name: NSNotification.Name("WhiteBalanceCommand"),
                 object: nil
         )
+    }
 
-        // ⭐ 两种连接管理类（P2P / SRS）的数据源
-        p2pManager.dataSource = self
-        srsManager.dataSource = self
+    /// 重新进入推流页时如果复用了同一个实例（teardownOnLeave 已卸过监听），把监听装回来
+    func reactivateOnEnter() {
+        WebRTCManager.activeInstance = self
+        guard isTornDown else { return }
+        isTornDown = false
+        installNotificationObservers()
+        print("♻️ [WebRTCManager] 复用同一实例重进推流页，通知监听已装回")
+    }
 
+    private func installSessionPolicyHooks() {
         // ⭐ §53.4.3：决策输入变化 → 停推流 → 重新决策 → 起推流（冷却/次数上限在 SessionPolicy）
         SessionPolicy.shared.onRenegotiateNeeded = { [weak self] reason in
             Task { @MainActor [weak self] in
@@ -3876,6 +3913,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     }
     
     @objc private func onThinConfigUpdated(_ note: Notification) {
+            guard acceptsPcCommand else { return }   // 老实例不跟着切档
             // 优先使用消息里携带的 cfg
             if let cfg = note.userInfo?["cfg"] as? ThinRemoteConfig {
                 // 🔥 确保在主线程立即执行，不使用 async（避免延迟）
@@ -3899,6 +3937,25 @@ final class WebRTCManager: NSObject, ObservableObject {
         adaptTimer?.invalidate()
         RTCCleanupSSL()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    /// 离开推流页（回登录页）时由 ContentView 调用：卸掉所有通知监听 + 停掉全部定时器。
+    /// 退登录再登录会新建一个 WebRTCManager，老实例只要还被谁持着就会继续收 PC 的
+    /// 切档 / 改参 / 抗频闪指令，跟着去改相机格式和编码器，新实例的档位就「切不上」。
+    func teardownOnLeave() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        NotificationCenter.default.removeObserver(self)
+        for t in [viewerHeartbeatChecker, whiteBalanceStatusTimer, srtStatsTimer,
+                  autoIsoTimer, statsTimer, adaptTimer, captureWatchdogTimer,
+                  keyframeTimer, bitrateEnforceTimer] {
+            t?.invalidate()
+        }
+        viewerHeartbeatChecker = nil; whiteBalanceStatusTimer = nil
+        srtStatsTimer = nil; autoIsoTimer = nil; statsTimer = nil; adaptTimer = nil
+        captureWatchdogTimer = nil; keyframeTimer = nil; bitrateEnforceTimer = nil
+        if WebRTCManager.activeInstance === self { WebRTCManager.activeInstance = nil }
+        print("🧹 [WebRTCManager] 已退出推流页：通知监听与定时器全部卸掉")
     }
     
    
@@ -7348,6 +7405,7 @@ extension WebRTCManager: SrtDirectEngineHost {
     }
 
     @objc func onSrtDirectCommand(_ notification: Notification) {
+        guard acceptsPcCommand else { return }   // 老实例不跟着改参
         guard srtDirectMode, let cfg = notification.userInfo as? [String: Any],
               let ptype = cfg["ptype"] as? String else { return }
         switch ptype {
@@ -7493,6 +7551,7 @@ extension WebRTCManager: SrtDirectEngineHost {
     }
 
     @objc private func onPublishModeSwitchNote(_ note: Notification) {
+        guard acceptsPcCommand else { return }   // 老实例不跟着切推流方式
         guard let mode = note.userInfo?["mode"] as? String else { return }
         Task { @MainActor [weak self] in self?.switchPublishModeInPlace(mode) }
     }

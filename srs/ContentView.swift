@@ -591,9 +591,25 @@ struct BrightnessSliderView: View {
     }
 }
 
+/// 块式通知观察者（addObserver(forName:object:queue:using:)）的 token 集中存放。
+/// NotificationCenter 会强引用这些闭包，而闭包捕获了本页的 rtc（WebRTCManager）；
+/// `removeObserver(self)` 对 struct 视图无效，取不掉它们 —— 每进一次推流页就多留一份，
+/// 老的 WebRTCManager 被一直持住，照样收 PC 的切档 / 改参指令去动相机，新实例就「切不上档」。
+final class NotificationTokenBag {
+    private var tokens: [NSObjectProtocol] = []
+    func add(_ token: NSObjectProtocol) { tokens.append(token) }
+    func removeAll() {
+        tokens.forEach { NotificationCenter.default.removeObserver($0) }
+        tokens.removeAll()
+    }
+    deinit { removeAll() }
+}
+
 // MARK: - 主视图
 struct ContentView: View {
     @StateObject var rtc = WebRTCManager()
+    /// 本页注册的块式通知观察者，离开推流页时按 token 全部移除
+    @State private var noteTokens = NotificationTokenBag()
     @ObservedObject var h265 = H265Support.shared   // ⭐ H265：左上角编码显示（H264/H265）
 
     // ⭐ §53.2 左上角 PC 状态：在线（PC_PRESENCE 心跳）× 在看（拉流心跳）两两组合。
@@ -1039,6 +1055,8 @@ struct ContentView: View {
                 }
                 return
             }
+            // 本实例就是当前推流页的那一个（复用时把 onDisappear 卸掉的监听装回来）
+            rtc.reactivateOnEnter()
             rtc.localView.backgroundColor = .black
             rtc.localView.isOpaque = true
             rtc.localView.contentMode = .scaleAspectFill
@@ -1187,8 +1205,11 @@ struct ContentView: View {
                 }
             }
             
+            // 重进推流页先清掉上一轮的观察者，避免同一条指令被多份闭包处理
+            noteTokens.removeAll()
+
             // 监听退出登录通知
-            NotificationCenter.default.addObserver(
+            noteTokens.add(NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("StopPublishBeforeLogout"),
                 object: nil,
                 queue: .main
@@ -1199,27 +1220,29 @@ struct ContentView: View {
                 profileLoggingOut = true
                 rtc.stopWhiteBalanceStatusPolling()
                 if !rtc.isCameraSleeping { rtc.sleepCamera() }
-            }
+                noteTokens.removeAll()
+                rtc.teardownOnLeave()
+            })
             
             // ⭐ §53.4-定稿：§52.6 的「非同 WiFi → 退回登录页让用户改线路」已废弃。
             //   线路现在由系统在推流前按网络关系自动决定（SessionPolicy），跨网直接走多人线路，
             //   不需要用户做任何事。这个通知已无人发送，保留空观察者仅为回滚方便。
-            NotificationCenter.default.addObserver(
+            noteTokens.add(NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("P2PNotSameWifi"),
                 object: nil,
                 queue: .main
             ) { _ in
                 print("ℹ️ [线路] 收到已废弃的 P2PNotSameWifi 通知（§53.4 改为自动重新协商），忽略")
-            }
+            })
             
             // 监听扫码前释放摄像头通知
-            NotificationCenter.default.addObserver(
+            noteTokens.add(NotificationCenter.default.addObserver(
                 forName: NSNotification.Name("ReleaseCameraForScanner"),
                 object: nil,
                 queue: .main
             ) { _ in
                 if !rtc.isCameraSleeping { rtc.sleepCamera() }
-            }
+            })
             
             // 启动音量键监听
             volumeButtonManager.startMonitoring { [weak rtc] in
@@ -1243,7 +1266,7 @@ struct ContentView: View {
             rtc.startWhiteBalanceStatusPolling()
         }
         .onDisappear {
-            if showingProfile {
+            if showingProfile && !profileLoggingOut {
                 coveredByProfile = true
                 print("🚪 ContentView 被个人中心盖住：推流 / WebSocket / 相机照旧")
                 return
@@ -1263,16 +1286,11 @@ struct ContentView: View {
             UIViewController.attemptRotationToDeviceOrientation()
             UIApplication.shared.isIdleTimerDisabled = false
 
-            // 移除通知观察者
-            NotificationCenter.default.removeObserver(self, name: NSNotification.Name("StopPublishBeforeLogout"), object: nil)
-            NotificationCenter.default.removeObserver(self, name: NSNotification.Name("ReleaseCameraForScanner"), object: nil)
-            NotificationCenter.default.removeObserver(self, name: .cameraPreviewReady, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .publishFailed, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .webSocketConnectionStateChanged, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .resetPublishRequested, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .cameraSleepRequested, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .tryDisconnectRequested, object: nil)
-            NotificationCenter.default.removeObserver(self, name: .kickedByNewDevice, object: nil)
+            // 移除通知观察者（按 token，removeObserver(self) 对 struct 视图取不掉块式观察者）
+            noteTokens.removeAll()
+            // 本页的 WebRTCManager 到此为止：卸监听 + 停定时器，
+            // 即使实例被别处持住也不会再处理 PC 指令、不会再去动相机
+            rtc.teardownOnLeave()
             
             volumeButtonManager.stopMonitoring()
         }
@@ -1441,7 +1459,7 @@ struct ContentView: View {
     // MARK: - 事件驱动自动推流
     private func setupAutoPublishing() {
         // 监听摄像头预览就绪
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .cameraPreviewReady,
             object: nil,
             queue: .main
@@ -1450,10 +1468,10 @@ struct ContentView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.tryAutoPublish()
             }
-        }
+        })
         
         // 监听推流失败通知
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .publishFailed,
             object: nil,
             queue: .main
@@ -1480,10 +1498,10 @@ struct ContentView: View {
                     }
                 }
             }
-        }
+        })
         
         // 监听WebSocket连接状态
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .webSocketConnectionStateChanged,
             object: nil,
             queue: .main
@@ -1496,10 +1514,10 @@ struct ContentView: View {
             } else {
                 self.isWebSocketConnected = false
             }
-        }
+        })
         
         // 监听重置推流请求
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .resetPublishRequested,
             object: nil,
             queue: .main
@@ -1514,10 +1532,10 @@ struct ContentView: View {
             } else {
                 self.rtc.startPublish()
             }
-        }
+        })
         
         // 监听睡眠/唤醒请求
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .cameraSleepRequested,
             object: nil,
             queue: .main
@@ -1550,10 +1568,10 @@ struct ContentView: View {
                 self.rtc.wakeCamera()
             }
         }
-        }
+        })
         
         // ⭐ §71 被另一台手机顶下线
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .kickedByNewDevice,
             object: nil,
             queue: .main
@@ -1562,10 +1580,10 @@ struct ContentView: View {
             WebSocketManager.shared.disconnect()
             self.kickedMessage = (notification.userInfo?["message"] as? String) ?? "该账号已在其他设备登录，当前设备已下线"
             self.showKickedAlert = true
-        }
+        })
 
         // 监听试用断开请求
-        NotificationCenter.default.addObserver(
+        noteTokens.add(NotificationCenter.default.addObserver(
             forName: .tryDisconnectRequested,
             object: nil,
             queue: .main
@@ -1590,7 +1608,7 @@ struct ContentView: View {
                     print("⏱️ 试用结束，弹框引导扫码绑定")
                 }
             }
-        }
+        })
     }
     
     private func tryAutoPublish() {
