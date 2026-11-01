@@ -381,6 +381,10 @@ struct MonitorLoginView: View {
             selectedConnectMode = ConnectModeOption.lastSelected  // 同步上次选择
             setupWebSocketNotificationListener()
             checkForceUpdate()   // ⭐ 强制更新检查（总后台「App更新配置」，公共接口）
+            if let mode = PublishModeSwitch.pendingMode {
+                PublishModeSwitch.pendingMode = nil
+                autoLoginForPublishSwitch(mode)
+            }
         }
         .onDisappear {
             NotificationCenter.default.removeObserver(self, name: .webSocketConnectionStateChanged, object: nil)
@@ -622,6 +626,22 @@ struct MonitorLoginView: View {
         }
     }
 
+    /// 总后台 / PC 切了推流方式：按新方式自动登录一次；没存密码（本次也没登录过）就提示手动登录
+    private func autoLoginForPublishSwitch(_ mode: String) {
+        if password.isEmpty && !PublishModeSwitch.lastPassword.isEmpty {
+            username = PublishModeSwitch.lastUsername
+            password = PublishModeSwitch.lastPassword
+            hasLocalAccount = false
+        }
+        let name = PublishModeSwitch.modeName(mode)
+        guard !username.isEmpty, !password.isEmpty else {
+            showAlert(message: "推流方式已切换为\(name)，请输入密码后点「\(mode == "srs" ? "老版本登录" : "立即登入")」")
+            return
+        }
+        appState.loginToast = "推流方式已切换为\(name)，正在自动登录…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { handleLogin(mode: mode) }
+    }
+
     private func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
@@ -658,6 +678,8 @@ struct MonitorLoginView: View {
                 
                 await MainActor.run {
                     UserDefaults.standard.set(mode, forKey: "publish_mode")
+                    PublishModeSwitch.lastUsername = loginUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+                    PublishModeSwitch.lastPassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
                     UserDefaults.standard.set(loginResponse.token, forKey: "jwt_token")
                     UserDefaults.standard.set(loginResponse.permanentToken, forKey: "permanent_token")
                     UserDefaults.standard.set(loginResponse.username, forKey: "username")

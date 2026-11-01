@@ -679,6 +679,22 @@ struct ContentView: View {
     // 记录已弹框的阶段号，只有新阶段结束时才弹框
     @State private var lastShownStageEnded: Int = 0
 
+    /// 黑屏中连点两下小灯泡 → 亮屏（和滑 20 次亮屏一样）
+    private func exitBlackout() {
+        guard isBlackout else { return }
+        withAnimation(.easeInOut(duration: 0.2)) { isBlackout = false }
+        restoreFromBlackout()
+    }
+
+    /// 离开黑屏：关手电筒、恢复亮度
+    private func restoreFromBlackout() {
+        if torchOn { rtc.capturer?.setTorch(false); torchOn = false }
+        if let b = savedBrightness {
+            UIScreen.main.brightness = b
+            savedBrightness = nil
+        }
+    }
+
 
     // 档位名称
     private func profileDisplayName(_ p: LadderProfile) -> String {
@@ -988,18 +1004,16 @@ struct ContentView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            // 黑幕层：中间一个灰色 80% 小灯泡，点一下开 / 关手电筒（黑幕本身不吃触摸，滑动亮屏照旧）
+            // 黑幕层：中间一个灰色 80% 小灯泡，点一下开 / 关手电筒，连点两下亮屏（黑幕本身不吃触摸，滑动亮屏照旧）
             if isBlackout {
                 Color.black.ignoresSafeArea().allowsHitTesting(false)
-                Button {
-                    torchOn = rtc.capturer?.setTorch(!torchOn) ?? false
-                } label: {
-                    Image(systemName: torchOn ? "lightbulb.fill" : "lightbulb")
-                        .font(.system(size: 28))
-                        .foregroundColor(Color.gray.opacity(0.8))
-                        .frame(width: 64, height: 64)
-                        .contentShape(Rectangle())
-                }
+                Image(systemName: torchOn ? "lightbulb.fill" : "lightbulb")
+                    .font(.system(size: 28))
+                    .foregroundColor(Color.gray.opacity(0.8))
+                    .frame(width: 64, height: 64)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { exitBlackout() }
+                    .onTapGesture(count: 1) { torchOn = rtc.capturer?.setTorch(!torchOn) ?? false }
             }
             
         }
@@ -1008,6 +1022,15 @@ struct ContentView: View {
         .ignoresSafeArea(.all)                             // 🔥 ZStack 本身也忽略安全区域
         .statusBar(hidden: isBlackout)                     // 🔥 黑屏时隐藏状态栏
         .modifier(HideHomeIndicatorModifier())             // 🔥 隐藏 Home Indicator（iOS 16+）
+        .onReceive(NotificationCenter.default.publisher(for: .publishModeSwitch)) { note in
+            guard let mode = note.userInfo?["mode"] as? String, mode != PublishModeSwitch.currentMode else { return }
+            print("🔀 [推流方式] 总后台 / PC 下发 \(PublishModeSwitch.modeName(mode)) → 退回登录页自动重登")
+            PublishModeSwitch.pendingMode = mode
+            if rtc.isPublishing { print("⚠️ [原因] 切换推流方式"); rtc.stopPublish() }
+            WebSocketManager.shared.disconnect()
+            if !rtc.isCameraSleeping { rtc.sleepCamera() }
+            appState.navigateToMonitorLogin()
+        }
         .onAppear {
             print("🚀 ContentView.onAppear")
             if coveredByProfile {
@@ -1300,11 +1323,7 @@ struct ContentView: View {
                             savedBrightness = UIScreen.main.brightness
                             UIScreen.main.brightness = 0.05
                         } else {
-                            if torchOn { rtc.capturer?.setTorch(false); torchOn = false }
-                            if let b = savedBrightness {
-                                UIScreen.main.brightness = b
-                                savedBrightness = nil
-                            }
+                            restoreFromBlackout()
                         }
                     }
                 }

@@ -18,6 +18,30 @@ import CoreVideo
 extension Notification.Name {
     /// WebSocketManager → WebRTCManager：srt_params / srt_exposure / srt_cam_query 原始 config 字典（userInfo）
     static let srtDirectCommand = Notification.Name("SrtDirectCommand")
+    /// WebSocketManager → ContentView：总后台 / PC 下发推流方式（userInfo["mode"] = "srt" / "srs"）
+    static let publishModeSwitch = Notification.Name("PublishModeSwitch")
+}
+
+/// 总后台「用户管理」/ PC 相机设定下发推流方式（CONFIG_UPDATE ptype=publish_mode）：
+/// 推流页退回登录页，登录页按新方式自动登录一次（一次性；以后手动登录按哪个按钮走哪种）
+enum PublishModeSwitch {
+    /// 登录页读到非空就按它自动登录一次（"srt" = 立即登入 / "srs" = 老版本登录），用完清空
+    static var pendingMode: String?
+    /// 本次运行最近一次登录成功的账号密码：没勾「记住密码」时自动重登用（只在内存，不落盘）
+    static var lastUsername = ""
+    static var lastPassword = ""
+
+    static var currentMode: String { UserDefaults.standard.string(forKey: "publish_mode") == "srs" ? "srs" : "srt" }
+
+    static func normalize(_ raw: Any?) -> String? {
+        switch (raw as? String)?.lowercased() {
+        case "srs": return "srs"
+        case "srt": return "srt"
+        default: return nil
+        }
+    }
+
+    static func modeName(_ mode: String) -> String { mode == "srs" ? "省流模式(SRS)" : "SRT" }
 }
 
 protocol SrtDirectEngineHost: AnyObject {

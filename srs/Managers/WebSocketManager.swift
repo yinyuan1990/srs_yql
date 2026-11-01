@@ -190,6 +190,9 @@ class WebSocketManager: ObservableObject {
             // ⭐ 自动协商：连接方式 + P2P 状态，PC 跟随 connectstype 切换
             "connectstype": connectstype,
             "connectMode": connectMode,
+            // 支持被 PC / 总后台切推流方式（ptype=publish_mode）；publishMode = 当前方式 srt / srs
+            "publishSwitch": true,
+            "publishMode": PublishModeSwitch.currentMode,
             "profile": srtProfile,
             // 当前档位（任何模式）：PC 档位显示跟它走（登录 / 没 PC 在线时手机自己回超低网）
             "curType": WebRTCManager.currentTypeKey,
@@ -879,6 +882,16 @@ extension WebSocketManager: SwiftStompDelegate {
                     }
                 }
                 
+                // 推流方式切换（总后台 / PC 相机设定）：推流页退回登录页并按新方式自动重登
+                if let cfg = json["config"] as? [String: Any], (cfg["ptype"] as? String) == "publish_mode" {
+                    if let mode = PublishModeSwitch.normalize(cfg["mode"]) {
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(name: .publishModeSwitch, object: nil, userInfo: ["mode": mode])
+                        }
+                    }
+                    return
+                }
+
                 // SRT直推指令字段不在 ThinRemoteConfig 里（解码会丢字段/覆盖缓存配置）→ 原始字典直接转给 WebRTCManager；
                 // srtCamState 是本机回传 PC 的回声，忽略
                 if let cfg = json["config"] as? [String: Any], let ptype = cfg["ptype"] as? String,
