@@ -226,7 +226,9 @@ final class SrtDirectEngine {
     private func config(for r: VideoReq, size: (width: Int, height: Int)) -> SdH264Encoder.Config {
         SdH264Encoder.Config(width: size.width, height: size.height, fps: r.fps, bitrateKbps: r.kbps,
                              bitrateMode: r.plan.bitrateMode, qpPMax: qpBoost ?? r.plan.qpPMax, qpMin: r.plan.iosQpMin,
-                             gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps)
+                             gopSec: r.plan.gopSec, peakKbps: r.plan.peakKbps,
+                             vbrCeilingKbps: r.plan.peakKbps > 0
+                                ? min(r.plan.peakKbps, r.plan.peakKbps * r.kbps / max(1, r.plan.bitrateKbps)) : 0)
     }
 
     /// 低延迟码控下 QP 上限归保帧控制器管，峰值控制只降码率（上行不够时）
@@ -429,7 +431,8 @@ final class SrtDirectEngine {
             lastFramesDropped = enc.framesDropped
             if enc.lowLatency, let r, s?.connected == true,
                let g = fpsGuard.tick(inFrames: inN, outFrames: max(0, inN - dropN), encKbps: encKbps,
-                                     targetKbps: r.kbps * peak.ratePct / 100, curQp: qpBoost ?? r.plan.qpPMax) {
+                                     targetKbps: enc.curAvgKbps > 0 ? enc.curAvgKbps : r.kbps * peak.ratePct / 100,
+                                     curQp: qpBoost ?? r.plan.qpPMax) {
                 qpBoost = g.to == r.plan.qpPMax ? nil : g.to
                 guardMsg = "QP上限 \(g.from)→\(g.to)（\(g.reason)）→ 下一帧重建编码器"
             }
@@ -444,7 +447,8 @@ final class SrtDirectEngine {
         var line = "统计 \(s?.state ?? "未推流")"
         line += " | 采集\(capFps)fps(\(iw)x\(ih))"
         let qpMinNow = enc?.curQpMin ?? 0
-        line += " | 编码 \(ew)x\(eh) \(encKbps)kbps/目标\(targetKbps) \(encFps)fps QP上限\(enc?.curQpMax ?? 0)"
+        let avgKbps = enc?.curAvgKbps ?? 0
+        line += " | 编码 \(ew)x\(eh) \(encKbps)kbps/目标\(targetKbps)\(avgKbps > targetKbps ? "(VBR均值\(avgKbps))" : "") \(encFps)fps QP上限\(enc?.curQpMax ?? 0)"
         if qpMinNow > 0 { line += " 下限\(qpMinNow)" }
         if enc?.lowLatency == true { line += " 低延迟码控 丢帧\(dropN)/\(inN)" }
         line += " I\((enc?.lastIBytes ?? 0) / 1024)KB P均\((enc?.statPAvgBytes ?? 0) / 1024)KB P峰\((enc?.statPMaxBytes ?? 0) / 1024)KB"
@@ -521,9 +525,11 @@ final class SdPeakController {
             overSec = 0; calmSec = 0
             return nil
         }
-        let peakOver = p.peakKbps > 0 && encKbps > p.peakKbps
+        // 低延迟码控（qpRuntime=false）由编码器自己守码率，VBR 均值又放开到峰值附近：
+        //   再拿「实际 > 峰值」判超标会贴着峰值来回压，只按发送缓冲（上行不够）判
+        let peakOver = qpRuntime && p.peakKbps > 0 && encKbps > p.peakKbps
         let bufOver = sndBufMs > p.latencyMs * 45 / 100
-        let calm = (p.peakKbps <= 0 || encKbps <= p.peakKbps * 8 / 10) && sndBufMs < p.latencyMs * 15 / 100
+        let calm = (!qpRuntime || p.peakKbps <= 0 || encKbps <= p.peakKbps * 8 / 10) && sndBufMs < p.latencyMs * 15 / 100
         if peakOver || bufOver {
             overSec += 1; calmSec = 0
         } else if calm {

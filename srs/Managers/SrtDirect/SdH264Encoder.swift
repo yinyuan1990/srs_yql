@@ -29,6 +29,8 @@ final class SdH264Encoder {
         let qpMin: Int
         let gopSec: Int
         let peakKbps: Int
+        /// VBR 在低延迟码控下的平均码率 = 峰值 × 清晰度%（0 = 不放开，按目标码率）
+        var vbrCeilingKbps: Int = 0
     }
 
     let config: Config
@@ -46,6 +48,8 @@ final class SdH264Encoder {
     /// MinAllowedFrameQP 实际设进去的值；0 = 没设 / 系统不支持
     private(set) var curQpMin = 0
     private(set) var curBitrateKbps = 0
+    /// 实际设给编码器的平均码率（VBR + 低延迟码控时是放开到峰值的那个值）
+    private(set) var curAvgKbps = 0
 
     // —— 每秒统计（回调线程写，统计线程读）——
     private var secBytes = 0
@@ -154,7 +158,7 @@ final class SdH264Encoder {
         }
         VTCompressionSessionPrepareToEncodeFrames(session)
         SdLog.i("编码器就绪 VideoToolbox H.264 \(profileText) 码控=\(rcText) \(config.width)x\(config.height)@\(config.fps) 目标\(config.bitrateKbps)kbps" +
-                " \(config.bitrateMode == 2 ? "CBR" : "VBR") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s" +
+                " \(config.bitrateMode == 2 ? "CBR" : "VBR")\(curAvgKbps != config.bitrateKbps ? "（均值放开到 \(curAvgKbps)kbps）" : "") 峰值\(config.peakKbps)kbps GOP\(config.gopSec)s" +
                 " QP上限 \(qpConfigured ? "\(config.qpPMax)（MaxAllowedFrameQP）" : "未设(系统不支持)") QP下限 \(qpMinText)")
     }
 
@@ -163,12 +167,20 @@ final class SdH264Encoder {
     }
 
     /// 目标码率 + 峰值上限（DataRateLimits：字节/秒）
+    /// 低延迟码控把 AverageBitRate 当硬目标（shiji8199 11-01 4K：CBR / VBR 都钉在目标 10M，峰值 14M 从没用上，
+    ///   还为守码率把 QP 抬到 42、丢帧 11%）→ VBR 的平均给到峰值×清晰度：简单画面 QP 到下限用不满、码率自然往下走，
+    ///   复杂画面才用到封顶；CBR 照旧钉在目标。peak 控制按比例降 kbps 时均值跟着同比例降。
     private func applyBitrateLocked(_ s: VTCompressionSession, _ kbps: Int) {
         curBitrateKbps = kbps
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: kbps * 1000))
+        let vbrOpen = lowLatency && config.bitrateMode != 2 && config.vbrCeilingKbps > config.bitrateKbps
+        let avg = vbrOpen ? config.vbrCeilingKbps * kbps / max(1, config.bitrateKbps) : kbps
+        curAvgKbps = avg
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: avg * 1000))
         let capKbps: Int
         if config.bitrateMode == 2 {
             capKbps = kbps * 11 / 10
+        } else if vbrOpen {
+            capKbps = max(config.peakKbps, avg) * 11 / 10
         } else if config.peakKbps > kbps {
             capKbps = config.peakKbps
         } else {
