@@ -1190,6 +1190,25 @@ final class WebRTCManager: NSObject, ObservableObject {
             print("📐 前置摄像头 - 档位配置：")
             printLadderDetail(p4kInfo: p4kInfo)
         }
+        baseP4kPreset = currentLadder[.p4k]
+        applySrsHighResPreset()
+    }
+
+    /// SRS（WebRTC）推 SRT码档 2K / 4K：沿用 .p4k 槽位，换成 SRT直推同一套档位参数（总后台 srtParams 的分辨率 / 码率），
+    ///   采集 3840×2160，WebRTC 输出缩到档位尺寸（adaptOutputFormat）；srtHighResKey = nil 时恢复超高清 1920×1080
+    private var baseP4kPreset: LadderPreset?
+
+    private func applySrsHighResPreset() {
+        guard !srtDirectMode, let base = baseP4kPreset else { return }
+        guard let key = srtHighResKey else {
+            currentLadder[.p4k] = base
+            return
+        }
+        let plan = SrtDirectParams.plan(key)
+        let maxK = plan.bitrateKbps
+        currentLadder[.p4k] = LadderPreset(width: plan.width, height: plan.height, fps: 30,
+                                           maxKbps: maxK, minKbps: maxK * 60 / 100, maxPushFps: 30, scaleDown: 1.0)
+        print("📐 SRS SRT码档 \(key) → 输出 \(plan.width)x\(plan.height)@30 \(maxK * 60 / 100)-\(maxK)kbps（采集 3840x2160）")
     }
 
     /// ⭐ §77 打印各档**实际生效**值。
@@ -2149,9 +2168,9 @@ final class WebRTCManager: NSObject, ObservableObject {
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
             case "p1440":
-                // SRT码档：SRS 没有 1920×1440 → 按超高清 1920×1080
-                desiredProfile = srtDirectMode ? .p1440 : .p4k
-            case "p4k":
+                desiredProfile = .p1440
+            case "p4k", "srt2k", "srt4k":
+                // SRT码档 2K / 4K 在 SRS 也沿用 .p4k 槽位（applySrsHighResPreset 换预设）
                 desiredProfile = .p4k
                 // print("   → .p4k")
             case "ultra":
@@ -2171,9 +2190,15 @@ final class WebRTCManager: NSObject, ObservableObject {
                 print("   ⚠️ 未知档位 '\(cfg.type)'，使用默认 .low")
             }
             // print("   当前档位: \(currentProfile), 目标档位: \(desiredProfile)")
-            if currentProfile != desiredProfile {
-                print("🔔 [触发源:applyThinRemoteConfig-ptype=type] 档位变更: \(currentProfile) → \(desiredProfile)")
-                if gentleAdaptMode { applyProfileBitrateOnly(desiredProfile) } else { applyProfile(desiredProfile) }
+            let newHighRes = srtHighResKeyOf(cfg.type)
+            let highResChanged = newHighRes != srtHighResKey
+            if highResChanged {
+                srtHighResKey = newHighRes
+                applySrsHighResPreset()
+            }
+            if currentProfile != desiredProfile || highResChanged {
+                print("🔔 [触发源:applyThinRemoteConfig-ptype=type] 档位变更: \(currentProfile) → \(desiredProfile) \(cfg.type)")
+                if gentleAdaptMode { applyProfileBitrateOnly(desiredProfile, force: highResChanged) } else { applyProfile(desiredProfile, force: highResChanged) }
             } else {
                 // print("⏭️ 档位无变化")
             }
@@ -2382,11 +2407,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             let desiredProfile: LadderProfile
             switch cfg.type.lowercased() {
             case "p1440":
-                desiredProfile = srtDirectMode ? .p1440 : .p4k   // SRS 没有 1920×1440
+                desiredProfile = .p1440
             case "p4k":
                 desiredProfile = .p4k
             case "srt2k", "srt4k":
-                // 直推里 .p4k + srtHighResKey 取 2K/4K 预设；SRS 没有 SRT码档，按超高清
+                // .p4k + srtHighResKey 取 2K/4K 预设（直推按 srtParams；SRS 由 applySrsHighResPreset 换 .p4k 槽位）
                 desiredProfile = .p4k
             case "ultra":
                 desiredProfile = .ultra
@@ -2400,9 +2425,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 desiredProfile = .standard
                 print("⚠️ [Init] 未知档位 '\(cfg.type)'，使用默认 .standard")
             }
+            let newHighRes = srtHighResKeyOf(cfg.type)
+            let highResChanged = newHighRes != srtHighResKey
+            srtHighResKey = newHighRes
             if srtDirectMode {
-                srtHighResKey = srtHighResKeyOf(cfg.type)
                 srtSharpness = max(0, min(1, cfg.sharpness ?? srtSharpness))
+            } else {
+                applySrsHighResPreset()
             }
             
             // ✅ 初始化时只设置档位，不尝试切换（因为capturer还不存在）
@@ -2412,7 +2441,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             // 如果已经有 capturer（重新加载配置的情况），则尝试切换
             if capturer != nil {
                 print("🔔 [触发源:applyThinRemoteConfigInit] 初始化档位: \(desiredProfile)")
-                if gentleAdaptMode { applyProfileBitrateOnly(desiredProfile) } else { applyProfile(desiredProfile) }
+                if gentleAdaptMode { applyProfileBitrateOnly(desiredProfile, force: highResChanged) } else { applyProfile(desiredProfile, force: highResChanged) }
             }
 
             // 2) 方向："-1"后置；"1"前置（若不一致则切换一次）
@@ -3828,7 +3857,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     
     /// 🔥 切换档位（4:3档位只改缩放，16:9档位需重采集）
     /// - Parameter p: 目标档位
-    func applyProfileBitrateOnly(_ p: LadderProfile) {
+    /// force：SRS 换 SRT码档（2K / 4K / 超高清共用 .p4k 槽位，档位名不变但预设变了）→ 不跳过、强制重采集
+    func applyProfileBitrateOnly(_ p: LadderProfile, force: Bool = false) {
         print("═══════════════════════════════════════════════════")
         print("🎯 [档位切换] 请求: \(p)")
         
@@ -3844,7 +3874,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         print("   输出分辨率: \(preset.width)x\(preset.height)@\(preset.fps)fps, scaleDown=\(preset.scaleDown)")
         
         // 2️⃣ 检查是否需要切换
-        if oldProfile == p {
+        if oldProfile == p && !force {
             print("   ⏭️ 档位无变化，跳过")
                 return
             }
@@ -3874,7 +3904,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         // - 其他: 1920x1440 (4:3)
         let oldCaptureRes = getCaptureResolutionForProfile(oldProfile)
         let newCaptureRes = getCaptureResolutionForProfile(p)
-        let needRecapture = (oldCaptureRes.width != newCaptureRes.width || oldCaptureRes.height != newCaptureRes.height)
+        let needRecapture = force || (oldCaptureRes.width != newCaptureRes.width || oldCaptureRes.height != newCaptureRes.height)
 
         if needRecapture {
             // 🔥 需要重采集（采集分辨率发生变化）
@@ -5350,8 +5380,8 @@ final class WebRTCManager: NSObject, ObservableObject {
 
     // MARK: - 档位应用（直接调用 applyProfileBitrateOnly）
     /// 🔥 与 applyProfileBitrateOnly 功能相同，为兼容性保留
-    func applyProfile(_ p: LadderProfile) {
-        applyProfileBitrateOnly(p)
+    func applyProfile(_ p: LadderProfile, force: Bool = false) {
+        applyProfileBitrateOnly(p, force: force)
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -5830,7 +5860,8 @@ final class WebRTCManager: NSObject, ObservableObject {
         case .p1440:
             return isIPhone15OrNewer() ? (1920, 1080, fps) : (1920, 1440, fps)
         case .p4k:
-            return (1920, 1080, fps)
+            // SRS 推 SRT码档 2K / 4K：采集 4K，WebRTC 输出缩到档位尺寸
+            return srtHighResKey != nil ? (3840, 2160, fps) : (1920, 1080, fps)
         case .high:
             return (1440, 1080, fps)   // 直接采集 1440×1080，无缩放
         case .low:

@@ -178,7 +178,10 @@ class WebSocketManager: ObservableObject {
         let srtPlayHost: String = connectstype == 3 ? WebSocketManager.srtPlayHost : ""
         let srtPlayPort: Int = connectstype == 3 ? WebSocketManager.srtPlayPort : 0
         // SRT直推当前档位：后端 SrtPointsService 按它判断 srt2k/srt4k（>1920）按分钟扣积分
-        let srtProfile: String = connectstype == 3 ? WebRTCManager.effectiveSrtProfile : ""
+        //   SRS 推 SRT码档（1920×1440 / 2K / 4K）同样上报，后端照样计费、按分辨率限观看人数
+        let srsFullCodeTypes = ["p1440", "srt2k", "srt4k"]
+        let srtProfile: String = connectstype == 3 ? WebRTCManager.effectiveSrtProfile
+            : (srsFullCodeTypes.contains(WebRTCManager.currentTypeKey) ? WebRTCManager.currentTypeKey : "")
         let srtFull = UserDefaults.standard.bool(forKey: "srt_full")
         let srtPoints = UserDefaults.standard.integer(forKey: "srt_points")
         
@@ -238,7 +241,9 @@ class WebSocketManager: ObservableObject {
             "srtFull": srtFull,
             "srtPoints": srtPoints,
             // 支持第 5 级档位 p1440（1920×1440）：PC 据此才显示该档按钮（老版本 App 不认 p1440）
-            "supportsP1440": true
+            "supportsP1440": true,
+            // SRS（WebRTC）也能推 SRT码档 1920×1440 / 2K / 4K：PC 据此在 SRS 下也按 SRT全码 + 流量放开这三档
+            "srsHighRes": true
         ]
         let payloadDict: [String: Any] = [
             "type": "CONFIG_STATE",
