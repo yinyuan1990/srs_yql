@@ -168,6 +168,8 @@ struct LoginResponse: Codable {
     let clientIp: String?
     // ⭐ 需求#13（2026-07-31）：三端最新版本号（总后台可配）。与本地版本比对，不一致提示更新（软提示）。
     let latestVersions: LatestVersions?
+    // 总后台「App配置 → 登录推流方式」：「立即登入」走 "srs" / "srt"（老后端不带 = SRT）
+    let loginPublishMode: String?
 }
 
 // ⭐ 需求#13：三端最新版本号

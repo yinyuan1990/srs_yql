@@ -264,7 +264,7 @@ struct MonitorLoginView: View {
                     VStack(spacing: 12) {
                         // 登录按钮
                         Button(action: {
-                            handleLogin(mode: "srt")
+                            handleLogin(mode: "default")
                         }) {
                             HStack {
                                 if isLoading {
@@ -646,7 +646,8 @@ struct MonitorLoginView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
     
-    /// mode："srt" =「立即登入」（SRT直推，MediaMTX）；"srs" = 左上角「老版本登录」（原 WebRTC，SRS/P2P 由 SessionPolicy 决定）。
+    /// mode："default" =「立即登入」，按后端 loginPublishMode 定（没下发 = srt）；"srt" = SRT直推（MediaMTX）；
+    ///   "srs" = 左上角「老版本登录」（原 WebRTC，SRS/P2P 由 SessionPolicy 决定）。推流方式下发后的自动重登传 srt / srs。
     ///   登录成功写 UserDefaults `publish_mode`（与 Android 同名），退出登录不清；WebRTCManager.srtDirectMode 读它
     private func handleLogin(mode: String) {
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -677,7 +678,8 @@ struct MonitorLoginView: View {
                 )
                 
                 await MainActor.run {
-                    UserDefaults.standard.set(mode, forKey: "publish_mode")
+                    let resolvedMode = mode == "default" ? (loginResponse.loginPublishMode == "srs" ? "srs" : "srt") : mode
+                    UserDefaults.standard.set(resolvedMode, forKey: "publish_mode")
                     PublishModeSwitch.lastUsername = loginUsername.trimmingCharacters(in: .whitespacesAndNewlines)
                     PublishModeSwitch.lastPassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
                     UserDefaults.standard.set(loginResponse.token, forKey: "jwt_token")
