@@ -1035,7 +1035,13 @@ final class WebRTCManager: NSObject, ObservableObject {
     static var maxShutterSpeed: Int = 240  // 默认值，初始化时会重新计算
     
     // MARK: - 对外状态
-    @Published var isPublishing = false
+    @Published var isPublishing = false {
+        didSet { if isPublishing { publishStartingSince = nil } }
+    }
+    /// startPublish 还在路上（宽限等观看端 / 取 token / SRS 协商，isPublishing 还没置真）的起始时刻。
+    /// 期间再来的 startPublish 一律忽略：自动推流、3.5s 兜底、宽限期回调会撞在同一秒，
+    /// 生成同一个流名两路一起推 → SRS 400 → 失败重试，出画面平白晚 2~3 秒。
+    private var publishStartingSince: Date?
     @Published var viewerConnected: Bool = false
     /// ⭐ 切网重连中（P2P）：拆会话+HANGUP 后等 PC 重连，左上角显示"网络切换重连中…"；PC 心跳恢复即清除
     @Published var p2pReconnecting: Bool = false
@@ -4112,6 +4118,14 @@ final class WebRTCManager: NSObject, ObservableObject {
             //print("========================================\n")
             return
         }
+
+        // 已在推 / 上一次还在启动中：直接忽略，不能先改 streamKey（正在用的会话还要靠它删流、上报）
+        guard !isPublishing else { return }
+        if let since = publishStartingSince, Date().timeIntervalSince(since) < 8 {
+            print("⏭️ 推流启动中（已 \(String(format: "%.1f", Date().timeIntervalSince(since)))s），忽略重复 startPublish")
+            return
+        }
+        publishStartingSince = Date()
         
         // 🔥 生成带时间戳的 streamKey（每次推流唯一，避免 SRS 缓存冲突）
         let timestamp = Int(Date().timeIntervalSince1970)
@@ -4153,6 +4167,7 @@ final class WebRTCManager: NSObject, ObservableObject {
             let grace = SessionPolicy.shared.presenceGraceSec
             print("🧭 [链路决策] 暂未收到观看端在线心跳，等 \(grace)s 再定案（避免同 WiFi 被误判成跨网）")
             DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+                self?.publishStartingSince = nil   // 宽限到点的这次是正主，放行
                 self?.startPublish(initialProfile: initialProfile)
             }
             return
@@ -4483,6 +4498,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebSocketManager.packetLoss = 0.0
         WebSocketManager.rtt = 0
         isPublishing = false
+        publishStartingSince = nil
         pc?.close(); pc = nil
         // ⭐ 停止对应连接管理类
         modeEvalTimer?.invalidate(); modeEvalTimer = nil
@@ -7105,6 +7121,7 @@ extension WebRTCManager: SRSManagerDataSource {
     }
 
     func srsDidFail(reason: String) {
+        publishStartingSince = nil
         NotificationCenter.default.post(name: .publishFailed, object: nil, userInfo: ["reason": reason])
     }
 }
