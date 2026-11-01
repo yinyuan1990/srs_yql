@@ -1022,15 +1022,6 @@ struct ContentView: View {
         .ignoresSafeArea(.all)                             // 🔥 ZStack 本身也忽略安全区域
         .statusBar(hidden: isBlackout)                     // 🔥 黑屏时隐藏状态栏
         .modifier(HideHomeIndicatorModifier())             // 🔥 隐藏 Home Indicator（iOS 16+）
-        .onReceive(NotificationCenter.default.publisher(for: .publishModeSwitch)) { note in
-            guard let mode = note.userInfo?["mode"] as? String, mode != PublishModeSwitch.currentMode else { return }
-            print("🔀 [推流方式] 总后台 / PC 下发 \(PublishModeSwitch.modeName(mode)) → 退回登录页自动重登")
-            PublishModeSwitch.pendingMode = mode
-            if rtc.isPublishing { print("⚠️ [原因] 切换推流方式"); rtc.stopPublish() }
-            WebSocketManager.shared.disconnect()
-            if !rtc.isCameraSleeping { rtc.sleepCamera() }
-            appState.navigateToMonitorLogin()
-        }
         .onAppear {
             print("🚀 ContentView.onAppear")
             if coveredByProfile {

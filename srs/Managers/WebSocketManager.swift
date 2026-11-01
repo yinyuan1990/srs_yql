@@ -887,7 +887,7 @@ extension WebSocketManager: SwiftStompDelegate {
                     }
                 }
                 
-                // 推流方式切换（总后台 / PC 相机设定）：推流页退回登录页并按新方式自动重登
+                // 推流方式切换（总后台 / PC 相机设定）：WebRTCManager 在推流页内直接切（switchPublishModeInPlace）
                 if let cfg = json["config"] as? [String: Any], (cfg["ptype"] as? String) == "publish_mode" {
                     if let mode = PublishModeSwitch.normalize(cfg["mode"]) {
                         DispatchQueue.main.async {

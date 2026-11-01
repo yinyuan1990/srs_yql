@@ -3682,6 +3682,13 @@ final class WebRTCManager: NSObject, ObservableObject {
                 object: nil
         )
 
+        NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(onPublishModeSwitchNote(_:)),
+                name: .publishModeSwitch,
+                object: nil
+        )
+
         // PC 拉流心跳监听
         NotificationCenter.default.addObserver(
                 self,
@@ -7483,6 +7490,30 @@ extension WebRTCManager: SrtDirectEngineHost {
         startSrtStatsTimer()
         startCaptureWatchdog()
         applySrtDirectExposure()
+    }
+
+    @objc private func onPublishModeSwitchNote(_ note: Notification) {
+        guard let mode = note.userInfo?["mode"] as? String else { return }
+        Task { @MainActor [weak self] in self?.switchPublishModeInPlace(mode) }
+    }
+
+    /// 总后台 / PC 下发推流方式：推流页内直接切 SRS ↔ SRT，不退回登录页、不重新登录。
+    /// 原来退登录页自动重登，App 在后台时登录页不刷新，要点开 App 才登得上。
+    /// 两种方式共用同一条采集管线，只换推流出口，再按新方式重选采集格式 / 滤镜 / 相机参数。
+    @MainActor
+    func switchPublishModeInPlace(_ mode: String) {
+        let toSrt = mode == "srt"
+        guard toSrt != srtDirectMode else { return }
+        let wasPublishing = isPublishing
+        print("🔀 [推流方式] 页内切换 → \(toSrt ? "SRT" : "SRS")，推流中=\(wasPublishing)")
+        if wasPublishing { stopPublish() }
+        UserDefaults.standard.set(mode, forKey: "publish_mode")
+        if toSrt { SdLog.i("🔀 推流方式切换 SRS → SRT（页内切换，不重新登录）推流中=\(wasPublishing)") }
+        applySrsHighResPreset()
+        applyProfile(currentProfile, force: true)
+        applyPipelineDefaults(source: "推流方式切换")
+        if let dev = capturer?.currentDevice { configureCameraAutoModes(dev) }
+        if wasPublishing { startPublish() }
     }
 
     func stopSrtDirectPublish() {
