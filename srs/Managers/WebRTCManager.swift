@@ -1125,7 +1125,11 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 🔥 iPhone 15+ 超高清(p4k) 直接采集 1920x1080 (16:9)，scaleDown=1.0
         //    因为 scaleResolutionDownBy 是等比缩放，无法从 1920x1440 → 1920x1080
 
-        let needP4kSeparateCapture = isIPhone15OrNewer()
+        // p1440 按这颗摄像头有没有 1920×1440 格式定（原来按机型：iPhone 15+ 一律 1920×1080，前置后置都一样）
+        srsP1440Native = CustomAVCaptureVideoCapturer.supportedFormats(for: device).contains {
+            let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            return max(d.width, d.height) == 1920 && min(d.width, d.height) == 1440
+        }
 
         // ⭐ §77：档位数值改由后端「运营配置→App配置→视频码率档位」下发（登录响应 videoLadder），
         //   后台没配 = 内置默认值 = 与本行以下注释描述的历史数值完全一致，行为不变。
@@ -1153,7 +1157,7 @@ final class WebRTCManager: NSObject, ObservableObject {
                                      fps: fpsOf(cfgP4k, 60),
                                      maxKbps: cfgP4k.maxKbps, minKbps: cfgP4k.minKbps,
                                      maxPushFps: 60, scaleDown: 1.0)
-        let p1440DefaultHeight = needP4kSeparateCapture ? 1080 : 1440
+        let p1440DefaultHeight = srsP1440Native ? 1440 : 1080
         let p1440Preset = LadderPreset(width: cfgP1440.w > 0 ? cfgP1440.w : 1920,
                                        height: cfgP1440.h > 0 ? cfgP1440.h : p1440DefaultHeight,
                                        fps: fpsOf(cfgP1440, 60),
@@ -1169,7 +1173,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         let standardPreset = LadderPreset(width: cfgStd.w > 0 ? cfgStd.w : 1024, height: cfgStd.h > 0 ? cfgStd.h : 768, fps: fpsOf(cfgStd, 60), maxKbps: cfgStd.maxKbps, minKbps: cfgStd.minKbps, maxPushFps: 60, scaleDown: 1.0)
         let lowPreset      = LadderPreset(width: cfgLow.w > 0 ? cfgLow.w : 640, height: cfgLow.h > 0 ? cfgLow.h : 480, fps: fpsOf(cfgLow, 60), maxKbps: cfgLow.maxKbps, minKbps: cfgLow.minKbps, maxPushFps: 60, scaleDown: 1.0)
 
-        let p4kInfo = needP4kSeparateCapture ? "p1440 因机型退到 1920x1080" : "p1440 = 1920x1440(4:3原始)"
+        let p4kInfo = srsP1440Native ? "p1440 = 1920x1440(4:3原始)" : "p1440 这颗摄像头没有 1920x1440 → 1920x1080"
         
         if device.position == .back {
             currentLadder = [
@@ -3241,6 +3245,37 @@ final class WebRTCManager: NSObject, ObservableObject {
     var srtDirectMode: Bool { UserDefaults.standard.string(forKey: "publish_mode") != "srs" }
     /// 档位 srt2k / srt4k（PC 选 1920 以上档）；采集档位按 p4k 走，编码参数按它取
     var srtHighResKey: String?
+    /// 当前摄像头有没有 1920×1440 格式（SRS p1440 采集用，calculateLadderForDevice 里按设备算）
+    var srsP1440Native = true
+
+    /// SRS 的 1920×1440 / 2K / 4K 三档（SrsHdLog 只记这三档）
+    func isSrsHdProfile(_ p: LadderProfile) -> Bool {
+        p == .p1440 || (p == .p4k && srtHighResKey != nil)
+    }
+
+    func srsHdName(_ p: LadderProfile) -> String {
+        if p == .p4k, let k = srtHighResKey { return k }
+        return "\(p)"
+    }
+
+    func srsHdCameraDesc() -> String {
+        guard let dev = capturer?.currentDevice else { return "相机未开" }
+        let d = CMVideoFormatDescriptionGetDimensions(dev.activeFormat.formatDescription)
+        return "\(dev.position == .front ? "前置" : "后置") \(dev.localizedName) 当前格式 \(d.width)x\(d.height)"
+    }
+
+    /// 每秒 WebRTC 统计里调，SRS 高清档每 5 秒记一行：实际发出的分辨率 / 帧率 / 码率、编码受限原因
+    func srsHdTick(sendW: Int, sendH: Int, sendFps: Int, kbps: Int, qlr: String?, rttMs: Int,
+                   lossPerSec: Int, nackPerSec: Int, pliPerSec: Int) {
+        guard !srtDirectMode, isPublishing, isSrsHdProfile(currentProfile), SrsHdLog.shouldTick() else { return }
+        let preset = currentLadder[currentProfile]
+        let want = preset.map { "\($0.width)x\($0.height)" } ?? "?"
+        let sendRes = sendW > 0 ? "\(sendW)x\(sendH)" : "未知"
+        let shrunk = sendW > 0 && preset.map { max(sendW, sendH) < max($0.width, $0.height) } == true
+        SrsHdLog.line("统计 \(srsHdName(currentProfile)) 档位输出 \(want) 实际发出 \(sendRes)\(shrunk ? "（比档位小）" : "")" +
+                      " 发送\(sendFps)fps 采集\(currentCaptureFps)fps 码率\(kbps)kbps 目标\(targetMinBitrateKbps)-\(targetBitrateKbps)" +
+                      " 清晰度\(lastQualityPercent ?? 100)% 编码受限=\(qlr ?? "none") RTT\(rttMs)ms 丢包\(lossPerSec)/s NACK\(nackPerSec) PLI\(pliPerSec)")
+    }
     /// PC「SRT设置」曝光：快门/ISO 0=自动；EV 只在两项都自动时生效
     var srtShutterNs: Int64 = 0
     var srtIso: Int = 0
@@ -3890,6 +3925,11 @@ final class WebRTCManager: NSObject, ObservableObject {
             
         // 3️⃣ 更新档位
             currentProfile = p
+        if !srtDirectMode && (isSrsHdProfile(p) || isSrsHdProfile(oldProfile) || (force && p == .p4k)) {
+            let cap = getCaptureResolutionForProfile(p)
+            SrsHdLog.line("切档 \(srsHdName(oldProfile)) → \(srsHdName(p))：输出 \(preset.width)x\(preset.height)@\(preset.fps)" +
+                          " \(preset.minKbps)-\(preset.maxKbps)kbps 采集目标 \(cap.width)x\(cap.height)@\(cap.fps) \(srsHdCameraDesc())")
+        }
         
         // 4️⃣ 设置码率（min/max 均按档位 + 清晰度百分比）
         emergencyBitrateScale = 1.0  // 🚨 显式切档，重置弱网紧急降码率系数
@@ -4037,6 +4077,10 @@ final class WebRTCManager: NSObject, ObservableObject {
             startSrtDirectPublish(initialProfile: initialProfile)
             return
         }
+        SrsHdLog.sessionBegin(streamId: streamKey)
+        if isSrsHdProfile(currentProfile) {
+            SrsHdLog.line("开始推流 档位=\(srsHdName(currentProfile)) \(srsHdCameraDesc())")
+        }
 
         // ⭐ §53.4.1 宽限期：推流那一刻若还没收到任何 PC_PRESENCE（两端登录有先后，
         //   刚开机时消息可能还在路上），等 2s 再决策一次——否则"其实同 WiFi"却因消息未到白走 SRS。
@@ -4126,8 +4170,8 @@ final class WebRTCManager: NSObject, ObservableObject {
             let serverType = serverCfg.type.lowercased()
             let initProfile: LadderProfile
             switch serverType {
-            case "p1440": initProfile = srtDirectMode ? .p1440 : .p4k   // SRS 没有 1920×1440
-            case "p4k": initProfile = .p4k
+            case "p1440": initProfile = .p1440
+            case "p4k", "srt2k", "srt4k": initProfile = .p4k   // 2K / 4K 用 .p4k 槽位 + srtHighResKey
             case "ultra": initProfile = .ultra
             case "high": initProfile = .high
             case "low": initProfile = .low
@@ -4370,6 +4414,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         WebSocketManager.publishingSendFps = 0
         WebSocketManager.publishingStreamKey = ""  // 清空流名
         P2PLogReporter.shared.stop()  // ⭐ P2P诊断日志上报：停流即冲刷剩余并停止
+        SrsHdLog.sessionEnd()
         WebSocketManager.networkQuality = "unknown"
         WebSocketManager.packetLoss = 0.0
         WebSocketManager.rtt = 0
@@ -5425,6 +5470,9 @@ final class WebRTCManager: NSObject, ObservableObject {
         // 3️⃣ 查找最佳匹配格式
         guard let bestFormat = findBestFormat(for: device, targetWidth: width, targetHeight: height, targetFps: fps) else {
             print("   ❌ 未找到合适的格式")
+            if !srtDirectMode && isSrsHdProfile(currentProfile) {
+                SrsHdLog.line("⚠️ 采集目标 \(width)x\(height)@\(fps) 找不到格式，采集没换 \(srsHdCameraDesc())")
+            }
             return
         }
         
@@ -5472,6 +5520,11 @@ final class WebRTCManager: NSObject, ObservableObject {
                 self?.forceKeyframe()
             }
             print("🔑 [分辨率切换] 重配置完成回调 → adaptOutputFormat + forceKeyframe（IDR 发在新格式产帧之后）")
+            if !self.srtDirectMode && self.isSrsHdProfile(self.currentProfile) {
+                let act = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+                SrsHdLog.line("采集已切换 相机实际 \(act.width)x\(act.height) 帧率 \(useFps) → 编码输出 \(outputWidth)x\(outputHeight)" +
+                              " \(device.position == .front ? "前置" : "后置")")
+            }
         }
 
         // 5️⃣ 更新状态变量
@@ -5650,8 +5703,40 @@ final class WebRTCManager: NSObject, ObservableObject {
             }.first
         }
 
+        func longShort(_ fmt: AVCaptureDevice.Format) -> (w: Int, h: Int) {
+            let d = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+            return (Int(max(d.width, d.height)), Int(min(d.width, d.height)))
+        }
+        let targetLong = max(targetWidth, targetHeight), targetShort = min(targetWidth, targetHeight)
+        let hdTarget = targetLong >= 1920
+        let hdLog = hdTarget && !srtDirectMode && isSrsHdProfile(currentProfile)
+
+        // 1920 以上没有正好的尺寸：取同比例、不小于目标的最小尺寸，没有就取最大的（全部格式里挑会按 fps / 面积挑到小尺寸）
+        func nearestHdFormats(_ formats: [AVCaptureDevice.Format]) -> [AVCaptureDevice.Format] {
+            let ratio = Double(targetLong) / Double(max(1, targetShort))
+            let sameRatio = formats.filter { abs(Double(longShort($0).w) / Double(max(1, longShort($0).h)) - ratio) < 0.02 }
+            let pool = sameRatio.isEmpty ? formats : sameRatio
+            let covering = pool.filter { longShort($0).w >= targetLong && longShort($0).h >= targetShort }
+            let area: (AVCaptureDevice.Format) -> Int = { longShort($0).w * longShort($0).h }
+            guard let pick = covering.min(by: { area($0) < area($1) }) ?? pool.max(by: { area($0) < area($1) }) else { return formats }
+            let size = longShort(pick)
+            return formats.filter { longShort($0).w == size.w && longShort($0).h == size.h }
+        }
+
         let sameResolution = allFormats.filter(matchesResolution)
-        let base = sameResolution.isEmpty ? allFormats : sameResolution
+        let base = !sameResolution.isEmpty ? sameResolution : (hdTarget ? nearestHdFormats(allFormats) : allFormats)
+        if hdLog {
+            var bySize: [String: (area: Int, fps: Int)] = [:]
+            for f in allFormats where longShort(f).w >= 1920 {
+                let s = longShort(f)
+                let key = "\(s.w)x\(s.h)"
+                bySize[key] = (s.w * s.h, max(bySize[key]?.fps ?? 0, maxFps(f)))
+            }
+            let list = bySize.sorted { $0.value.area < $1.value.area }.map { "\($0.key)≤\($0.value.fps)" }.joined(separator: " ")
+            SrsHdLog.line("找采集格式 目标 \(targetWidth)x\(targetHeight)@\(targetFps) \(device.position == .front ? "前置" : "后置")" +
+                          " \(device.localizedName)：1920 以上格式 [\(list.isEmpty ? "无" : list)]" +
+                          (sameResolution.isEmpty ? "，没有正好 \(targetWidth)x\(targetHeight) 的，就近用 \(base.first.map { "\(longShort($0).w)x\(longShort($0).h)" } ?? "无")" : ""))
+        }
         print("   格式切换: 分辨率=\(targetWidth)x\(targetHeight), range=\(captureRangeMode.rawValue), binned=\(captureBinningMode.rawValue), 最低FPS=\(requiredFps)")
         for (idx, fmt) in base.enumerated() {
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
@@ -5691,6 +5776,13 @@ final class WebRTCManager: NSObject, ObservableObject {
             let dims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
             let binned = selected.isVideoBinned ? "Binned" : "NonBinned"
             print("   ✅ 格式选中(\(reason)): \(dims.width)x\(dims.height) @\(maxFps(selected))fps \(pixelFormatString(selected)) \(binned) FOV=\(String(format: "%.1f", selected.videoFieldOfView))°")
+            if hdLog {
+                SrsHdLog.line("选中格式(\(reason)) \(dims.width)x\(dims.height) 最高\(maxFps(selected))fps \(pixelFormatString(selected)) \(binned)" +
+                              " 视野\(String(format: "%.0f", selected.videoFieldOfView))°" +
+                              (maxFps(selected) < requiredFps ? "（这个尺寸最高 \(maxFps(selected))fps，达不到 \(requiredFps)）" : ""))
+            }
+        } else if hdLog {
+            SrsHdLog.line("⚠️ 没选到格式 目标 \(targetWidth)x\(targetHeight)")
         }
         return selected
     }
@@ -5867,7 +5959,7 @@ final class WebRTCManager: NSObject, ObservableObject {
         case .ultra:
             return (1280, 720, fps)
         case .p1440:
-            return isIPhone15OrNewer() ? (1920, 1080, fps) : (1920, 1440, fps)
+            return srsP1440Native ? (1920, 1440, fps) : (1920, 1080, fps)
         case .p4k:
             // SRS 推 SRT码档 2K / 4K：采集 4K，WebRTC 输出缩到档位尺寸
             return srtHighResKey != nil ? (3840, 2160, fps) : (1920, 1080, fps)
@@ -6469,6 +6561,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                     var fpsNow: Int = 0
                     var framesSentTotal: UInt64 = 0
                     var qlr: String? = nil
+                    var sendFrameW = 0
+                    var sendFrameH = 0
                     
                     // ✅ 网络质量指标
                     var packetsSent: UInt64 = 0
@@ -6546,6 +6640,8 @@ final class WebRTCManager: NSObject, ObservableObject {
                                 else if let i = v as? Int { retransmittedPacketsSent = UInt64(i) }
                             }
                             if let r = s.values["qualityLimitationReason"] as? String { qlr = r }
+                            if let n = s.values["frameWidth"] as? NSNumber { sendFrameW = max(sendFrameW, n.intValue) }
+                            if let n = s.values["frameHeight"] as? NSNumber { sendFrameH = max(sendFrameH, n.intValue) }
                         } else if type == "remote-inbound-rtp" && isVideo {
                             // ✅ 远端入站统计：包含丢包、RTT、抖动
                             // ⚠️ packetsLost 规范上是有符号(long)，可能为负（重传补回时倒退）。
@@ -6772,6 +6868,9 @@ final class WebRTCManager: NSObject, ObservableObject {
                         WebSocketManager.networkQuality = quality
                         WebSocketManager.packetLoss = packetLossRate
                         WebSocketManager.rtt = rttMs
+                        self.srsHdTick(sendW: sendFrameW, sendH: sendFrameH, sendFps: self.currentFps,
+                                       kbps: self.kbpsHistory.last ?? 0, qlr: qlr, rttMs: rttMs,
+                                       lossPerSec: packetsLostPerSec, nackPerSec: nackPerSec, pliPerSec: pliPerSec)
                         
                         // ═══════════════════════════════════════════════════════════════
                         // 🔥 自适应FPS处理（基于RTT+码率+丢包综合判断）

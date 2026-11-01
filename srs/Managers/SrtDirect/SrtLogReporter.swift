@@ -32,6 +32,53 @@ enum SdLog {
     }
 }
 
+/// SRS（WebRTC）推 1920×1440 / 2K / 4K 的诊断：进这三档才启动 SrtLogReporter（同一个 iOS-srt.log，受「SRT日志」开关控制），
+///   行首「[SRS高清]」；只有 SrsHdLog 自己启动的 reporter 才由它在停推流时停（SRT直推的不碰）。
+enum SrsHdLog {
+    private static let lock = NSLock()
+    private static var streamId = ""
+    private static var account = ""
+    private static var startedByUs = false
+    private static var lastTick: CFAbsoluteTime = 0
+
+    static func sessionBegin(streamId sid: String) {
+        lock.lock(); defer { lock.unlock() }
+        streamId = sid
+        account = (UserDefaults.standard.string(forKey: "username") ?? "").replacingOccurrences(of: ":", with: "")
+        lastTick = 0
+    }
+
+    static func sessionEnd() {
+        lock.lock()
+        let was = startedByUs
+        startedByUs = false
+        streamId = ""
+        lock.unlock()
+        if was { SrtLogReporter.shared.stop() }
+    }
+
+    static func line(_ msg: String) {
+        print("[SRS高清] \(msg)")
+        lock.lock()
+        let sid = streamId, acc = account
+        let needStart = !startedByUs && !sid.isEmpty
+        if needStart { startedByUs = true }
+        lock.unlock()
+        guard !sid.isEmpty else { return }
+        if needStart { SrtLogReporter.shared.start(streamId: sid, account: acc) }
+        SrtLogReporter.shared.line("[SRS高清] \(msg)")
+    }
+
+    /// 每秒统计里调用：到了间隔才返回 true
+    static func shouldTick(every sec: Double = 5) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastTick >= sec else { return false }
+        lastTick = now
+        return true
+    }
+}
+
 final class SrtLogReporter {
     static let shared = SrtLogReporter()
     private init() {}
