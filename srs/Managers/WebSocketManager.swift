@@ -604,6 +604,7 @@ extension WebSocketManager: SwiftStompDelegate {
         // 订阅
         subscribeToDeviceConfig()
         isConnected = true
+        SdLog.i("指令通道(WS) 已连上（\(connectType)）")
         
         // 订阅用户心跳回执（用户目的地固定写 /user/queue/heartbeat）
         swiftStomp.subscribe(to: "/user/queue/heartbeat")
@@ -629,6 +630,7 @@ extension WebSocketManager: SwiftStompDelegate {
     func onDisconnect(swiftStomp: SwiftStomp, disconnectType: StompDisconnectType) {
         //print("🔌 STOMP连接断开: \(disconnectType)")
         updateConnectionState(.disconnected)
+        if isConnected { SdLog.w("指令通道(WS) 断开（\(disconnectType)）") }
         isConnected = false
         stopHeartbeat()
         //

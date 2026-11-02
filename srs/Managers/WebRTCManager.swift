@@ -3361,6 +3361,8 @@ final class WebRTCManager: NSObject, ObservableObject {
     /// 没有 PC 在线（收不到 PC_PRESENCE）这么久 → 切回超低网，网差时先保证出画面
     static let noPcLowAfterSec: TimeInterval = 20
     private var noPcSince: Date?
+    /// SRT直推链路断着 / 还没出流（手机自己网络断了），每秒统计时更新；这期间收不到 PC_PRESENCE 不算「没 PC 在线」
+    private var srtLinkDown = false
     /// 当前会话实际模式
     enum ConnMode { case none, p2p, srs, srt, srtDirect }
     private var currentConnMode: ConnMode = .none
@@ -3803,13 +3805,18 @@ final class WebRTCManager: NSObject, ObservableObject {
             }
             self.refreshPCPresenceState()
             WebRTCManager.currentTypeKey = self.srtProfileKey(self.currentProfile, highRes: self.srtHighResKey)
-            // 没有 PC 在线 20 秒 → 回超低网（PC 上线后由 PC 手动切高档）
-            if SessionPolicy.shared.onlineViewerCount > 0 || self.noPcSince == nil {
+            // 没有 PC 在线 20 秒 → 回超低网（PC 上线后由 PC 手动切高档）。
+            //   指令通道(WS)断着、或 SRT直推链路断着（手机自己网络断了）时收不到 PC_PRESENCE 不代表 PC 走了：计时清零，
+            //   网络恢复后重新数（mm1356633 11-02 01:51 断网 13s，PC 一直在看，恢复后被降成超低网）
+            let ownLinkDown = !WebSocketManager.shared.isConnected
+                || (self.currentConnMode == .srtDirect && self.srtLinkDown)
+            if SessionPolicy.shared.onlineViewerCount > 0 || self.noPcSince == nil || ownLinkDown {
                 self.noPcSince = Date()
             } else if self.currentProfile != .low,
                       let since = self.noPcSince, Date().timeIntervalSince(since) >= WebRTCManager.noPcLowAfterSec {
                 self.noPcSince = Date()
                 print("📉 没有 PC 在线 \(Int(WebRTCManager.noPcLowAfterSec))s → 切回超低网")
+                SdLog.i("📉 没有 PC 在线 \(Int(WebRTCManager.noPcLowAfterSec))s（指令通道连着、推流正常）→ 自动切回超低网（原档位 \(self.currentProfile)）")
                 let cur = ConfigManager.shared.currentThinConfig
                 self.applyThinRemoteConfig(ThinRemoteConfig(type: "low", zoom: cur?.zoom ?? 1.0, ptype: "type",
                                                             direction: cur?.direction ?? "-1"))
@@ -7727,6 +7734,7 @@ extension WebRTCManager: SrtDirectEngineHost {
         @unknown default: thermal = "未知"
         }
         let s = srtDirectEngine.tick(extra: "温度\(thermal)")
+        srtLinkDown = !s.live
         WebSocketManager.publishingKbps = s.encKbps
         WebSocketManager.publishingFps = s.encFps
         WebSocketManager.publishingSendFps = s.live ? s.encFps : 0
