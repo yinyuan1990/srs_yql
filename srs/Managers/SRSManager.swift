@@ -4,7 +4,7 @@
 //
 //  独立的 SRS 推流连接管理类（与 P2PManager 对称）。
 //  - 仅负责 SRS 连接建立（创建 PeerConnection、Offer→/rtc/v1/publish→Answer、Token、deleteStream）
-//    与 ICE 重连。
+//    与断线重建（SRS 不支持 ICE Restart，断线一律新建 PeerConnection 重新 publish）。
 //  - 采集管线（capturer/frameThrottler/localVideoTrack）、统计、码率强制、关键帧、自适应
 //    仍由 WebRTCManager 管理，作用于本类回填的「活动连接」。
 //  - 与 P2PManager 互斥：connect_mode == "srs" 时启用。
@@ -38,12 +38,12 @@ final class SRSManager: NSObject {
 
     private var streamToken = ""
     private var iceReconnectTimer: Timer?
-    private var iceRestartAttempts = 0
-    private let maxIceRestartAttempts = 3
+    /// 连续全重建次数（推上后清零），用于失败后的退避间隔
+    private var rebuildAttempts = 0
     /// 已成功 publish 到 SRS 的流名（带时间戳）。换流重推/停流时按它精确 unpublish，
     /// 避免旧流名在 SRS 端残留为僵尸 rtc-publish（并让旧 pc 的 ICE 重连定时器一并清掉）。
     private var activeStreamKey = ""
-    /// 会话代号：每次建连 / 拆连 +1。异步回调（Offer、向 SRS 发布、Answer、ICE Restart）回来时代号对不上 = 旧会话，直接丢弃，
+    /// 会话代号：每次建连 / 拆连 +1。异步回调（Offer、向 SRS 发布、Answer）回来时代号对不上 = 旧会话，直接丢弃，
     /// 防止旧 Offer 晚到后用旧 SDP 再向 SRS 发布一路（SRS 上同一部手机出现两路 rtc-publish / RtcStreamBusy）
     private var epoch = 0
 
@@ -51,7 +51,7 @@ final class SRSManager: NSObject {
 
     func start() {
         // 幂等：若上一路会话还在（换流重推 / 异常重入），先彻底清理旧连接与定时器，
-        // 否则旧 pc 会继续对旧 streamKey 做 ICE Restart / 请求 Token，在 SRS 留下僵尸会话。
+        // 否则旧 pc 会继续对旧 streamKey 做 ICE 重连 / 请求 Token，在 SRS 留下僵尸会话。
         if isActive || pc != nil || !activeStreamKey.isEmpty {
             teardown()
         }
@@ -69,7 +69,7 @@ final class SRSManager: NSObject {
     private func teardown() {
         epoch += 1
         iceReconnectTimer?.invalidate(); iceReconnectTimer = nil
-        iceRestartAttempts = 0
+        rebuildAttempts = 0
         pc?.close()
         pc = nil
         videoSender = nil
@@ -126,7 +126,7 @@ final class SRSManager: NSObject {
 
         newPC.offer(for: sdpCons) { [weak self, weak newPC] sdp, err in
             guard let self = self, let sdp = sdp else {
-                self?.dataSource?.srsDidFail(reason: "生成 Offer 失败: \(err?.localizedDescription ?? "")")
+                self?.reportFailure("生成 Offer 失败: \(err?.localizedDescription ?? "")", isRestart: isRestart, epoch: myEpoch)
                 return
             }
             guard self.epoch == myEpoch, let pc = self.pc, pc === newPC else {
@@ -149,72 +149,64 @@ final class SRSManager: NSObject {
                         DispatchQueue.main.async {
                             guard self.epoch == myEpoch else { return }
                             if let err = err {
-                                self.dataSource?.srsDidFail(reason: "设置 Answer 失败: \(err.localizedDescription)")
+                                self.reportFailure("设置 Answer 失败: \(err.localizedDescription)", isRestart: isRestart, epoch: myEpoch)
                             } else {
-                                self.iceRestartAttempts = 0
+                                self.rebuildAttempts = 0
                                 self.activeStreamKey = ds.srsStreamKey  // 记录已成功 publish 的流名，供换流/停流精确 unpublish
-                                print("🟢 [SRS] 推流连接成功")
+                                print(isRestart ? "🟢 [SRS] 断线重建成功（新会话已 publish）" : "🟢 [SRS] 推流连接成功")
                                 self.dataSource?.srsDidConnect(pc: pc, sender: self.videoSender)
                             }
                         }
                     }
                 } catch {
-                    DispatchQueue.main.async {
-                        self.dataSource?.srsDidFail(reason: "SRS 服务器错误: \(error.localizedDescription)")
-                    }
+                    self.reportFailure("SRS 服务器错误: \(error.localizedDescription)", isRestart: isRestart, epoch: myEpoch)
                 }
             }
         }
     }
 
-    // MARK: - ICE 重连（分级：ICE Restart → 全重建）
+    /// 首次推流失败照旧交给上层（ContentView 会重试一次）；断线重建失败（多半是网还没好 / SRS 旧会话还没释放报 400）
+    /// 留在本类里退避再重建，不然上层只重试一次就停推了。
+    private func reportFailure(_ reason: String, isRestart: Bool, epoch failedEpoch: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.epoch == failedEpoch else { return }
+            guard isRestart, self.isActive, self.dataSource?.srsIsPublishing == true else {
+                self.dataSource?.srsDidFail(reason: reason)
+                return
+            }
+            let delay = min(10.0, 2.0 * Double(max(1, self.rebuildAttempts)))
+            print("⚠️ [SRS] 断线重建失败: \(reason)，\(Int(delay))秒后再重建")
+            self.iceReconnectTimer?.invalidate()
+            self.iceReconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                guard let self = self, self.isActive, self.dataSource?.srsIsPublishing == true,
+                      self.epoch == failedEpoch else { return }
+                self.rebuild(reason: "上次重建失败")
+            }
+        }
+    }
 
+    // MARK: - 断线重建
+
+    // 不用 ICE Restart：把 IceRestart 的 Offer 发到 /rtc/v1/publish/，SRS 会当成新推流建一个新会话（要重新 DTLS 握手），
+    // 而 ICE Restart 不重做 DTLS，手机继续用旧会话的密钥发，SRS 解不开全丢 → ICE 显示已连、SRS 显示在推、观看端一帧没有，
+    // 一直卡到 App 重开（mm1356633 11-03 04:55 断网 4 秒后卡了 4 个多小时）。
     private func scheduleIceReconnect(delay: TimeInterval, reason: String) {
         iceReconnectTimer?.invalidate()
         print("⏳ [SRS] \(reason)，\(delay)秒后检查重连")
+        let checkEpoch = epoch
         iceReconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            guard let self = self, self.dataSource?.srsIsPublishing == true else { return }
+            guard let self = self, self.dataSource?.srsIsPublishing == true, self.epoch == checkEpoch else { return }
             let state = self.pc?.iceConnectionState
             if state == .disconnected || state == .failed || state == .closed {
-                if self.iceRestartAttempts < self.maxIceRestartAttempts {
-                    self.iceRestartAttempts += 1
-                    print("🔄 [SRS] ICE Restart (\(self.iceRestartAttempts)/\(self.maxIceRestartAttempts))")
-                    self.triggerICERestart()
-                    self.scheduleIceReconnect(delay: 5.0, reason: "ICE Restart 后等待恢复")
-                } else {
-                    print("🔄 [SRS] ICE Restart 耗尽，全重建")
-                    self.iceRestartAttempts = 0
-                    self.establish(isRestart: true)
-                }
-            } else {
-                self.iceRestartAttempts = 0
+                self.rebuild(reason: "ICE 未恢复")
             }
         }
     }
 
-    private func triggerICERestart() {
-        guard let ds = dataSource, let curPC = self.pc else { return }
-        let myEpoch = epoch
-        let cons = RTCMediaConstraints(
-            mandatoryConstraints: ["IceRestart": kRTCMediaConstraintsValueTrue],
-            optionalConstraints: nil)
-        curPC.offer(for: cons) { [weak self, weak curPC] sdp, _ in
-            guard let self = self, let sdp = sdp,
-                  self.epoch == myEpoch, let pc = self.pc, pc === curPC else { return }
-            pc.setLocalDescription(sdp) { _ in }
-            Task {
-                do {
-                    let ans = try await self.postOfferToSRS(
-                        apiPath: "/rtc/v1/publish/",
-                        streamurl: "webrtc://\(ds.srsIP)/\(ds.srsApp)/\(ds.srsStreamKey)",
-                        offer: sdp.sdp)
-                    guard self.epoch == myEpoch, let pc = self.pc, pc === curPC else { return }
-                    pc.setRemoteDescription(.init(type: .answer, sdp: ans)) { _ in }
-                } catch {
-                    print("❌ [SRS] ICE Restart 失败: \(error.localizedDescription)")
-                }
-            }
-        }
+    private func rebuild(reason: String) {
+        rebuildAttempts += 1
+        print("🔄 [SRS] \(reason) → 全重建（第\(rebuildAttempts)次，新 PeerConnection 重新 publish）")
+        establish(isRestart: true)
     }
 
     // MARK: - SRS HTTP
