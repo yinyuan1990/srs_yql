@@ -1224,6 +1224,9 @@ extension WebSocketManager: SwiftStompDelegate {
         if let n = msgDict["level5Name"] as? String, !n.isEmpty {
             UserDefaults.standard.set(n, forKey: "level5_name")
         }
+        if let s = msgDict["noPcLowAfterSec"] as? NSNumber {
+            WebRTCManager.noPcLowAfterSec = TimeInterval(min(max(s.intValue, 10), 3600))
+        }
 
         // 🔥 日试用相关（新增）
         UserDefaults.standard.set(isDailyTrial, forKey: "is_daily_trial")
