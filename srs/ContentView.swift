@@ -1582,6 +1582,16 @@ struct ContentView: View {
             self.showKickedAlert = true
         })
 
+        // 总后台 / PC「退出程序」：停推流、断开，进程由 WebSocketManager 随后结束
+        noteTokens.add(NotificationCenter.default.addObserver(
+            forName: .exitAppRequested,
+            object: nil,
+            queue: .main
+        ) { _ in
+            if self.rtc.isPublishing { print("⚠️ [原因] 收到退出程序指令"); self.rtc.stopPublish() }
+            WebSocketManager.shared.disconnect()
+        })
+
         // 监听试用断开请求
         noteTokens.add(NotificationCenter.default.addObserver(
             forName: .tryDisconnectRequested,

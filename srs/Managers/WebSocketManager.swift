@@ -722,6 +722,20 @@ extension WebSocketManager: SwiftStompDelegate {
                     }
                 }
             }
+
+            // 总后台 / PC「退出程序」：设备号对得上就让推流页停推流，稍后直接结束进程（不提示）
+            if msgType == "EXIT_APP" {
+                let messageDeviceId = (msgDict?["deviceId"] as? String) ?? ""
+                if let mine = deviceId, messageDeviceId == mine {
+                    print("🚪 [EXIT_APP] 退出程序")
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: .exitAppRequested, object: nil)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { exit(0) }
+                    }
+                } else {
+                    print("🚪 [EXIT_APP] deviceId不匹配，忽略 msg=\(messageDeviceId) mine=\(deviceId ?? "nil")")
+                }
+            }
             
             // 🔥 v2.0: 处理 PC 端 set_fps 指令
             if let cmd = msgDict?["cmd"] as? String, cmd == "set_fps" {
@@ -1351,6 +1365,7 @@ extension Notification.Name {
     static let cameraSleepRequested = Notification.Name("cameraSleepRequested")  // 🔥 摄像头休眠/唤醒请求
     static let tryDisconnectRequested = Notification.Name("tryDisconnectRequested")  // 🔥 试用断开请求
     static let kickedByNewDevice = Notification.Name("kickedByNewDevice")  // ⭐ §71 被另一台手机顶下线
+    static let exitAppRequested = Notification.Name("exitAppRequested")  // 总后台 / PC「退出程序」
     static let setFpsRequested = Notification.Name("setFpsRequested")  // 🔥 PC端自适应FPS指令
     //static let publishingStateChanged = Notification.Name("publishingStateChanged")
 }
